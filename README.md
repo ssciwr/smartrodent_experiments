@@ -21,13 +21,14 @@ src/smartrodent/main.py     YOLO and SpeciesNet experiment entry points
 src/smartrodent/utils.py    image-path, country-code, visualization, and crop helpers
 requirements_processing.txt extra processing/notebook dependencies, including BioTrove and CLIP
 datasets/                   local datasets; large data is expected to live here locally
+biotrove_process            A modified version of the original biotrove_process package provided in the BioTrove repository. Modifications allow more filtering flexibility, and use multiprocessing instead of threading for speed
 ```
 
 ## What it depends on
 
 The Python package is configured in `pyproject.toml` and requires Python **3.13 or newer**. Main runtime dependencies are:
 
-- `datasets` / `hf-datasets` for Hugging Face dataset access,
+- `datasets` / `hf-datasets` for HuggingFace dataset access,
 - `polars`, `numpy`, `pyaml` for metadata processing,
 - `matplotlib` and `Pillow` for plotting/preview image output,
 - `ultralytics` for YOLO inference,
@@ -40,6 +41,12 @@ The BioTrove processing notebook also uses the packages listed in `requirements_
 - `torch`, `torchvision`, `pandas`, `pyarrow`, `fastparquet`, `seaborn`, `scikit-image`, `ipykernel`, and `tqdm`.
 
 Development tools are available through the optional `dev` extra: `pytest`, `pytest-cov`, `coverage`, `pre-commit`, and `pytest-mock`.
+
+You have to download the biotrove dataset from here first to make everything work:
+https://huggingface.co/datasets/BGLab/BioTrove
+
+
+
 
 ## Installation
 
