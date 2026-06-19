@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>faunanet Codebase Overview</title>
+  <style>
+    :root{--bg:#0b1020;--panel:#121a32;--panel2:#182342;--ink:#eef3ff;--muted:#b7c3dc;--line:#42557f;--accent:#7dd3fc;--accent2:#c084fc;--ok:#86efac;--warn:#fde68a}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif} main{max-width:1280px;margin:auto;padding:28px} h1,h2,h3{line-height:1.15} h1{font-size:34px;margin:0 0 8px} h2{font-size:24px;margin:34px 0 14px;border-bottom:1px solid var(--line);padding-bottom:8px} h3{font-size:17px;margin:18px 0 8px;color:var(--accent)} a{color:var(--accent)} code{background:#090d1a;border:1px solid #243150;border-radius:5px;padding:1px 5px;color:#dbeafe}.lead{color:var(--muted);font-size:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}.card{background:linear-gradient(180deg,var(--panel),#0f172d);border:1px solid #263653;border-radius:12px;padding:14px}.card h3{margin-top:0}.small{font-size:12px;color:var(--muted)} ul{padding-left:20px} li{margin:4px 0}.badge{display:inline-block;padding:2px 7px;border-radius:999px;background:#203253;color:#dbeafe;border:1px solid #35517d;font-size:12px}.diagram{width:100%;overflow:auto;background:#081020;border:1px solid #263653;border-radius:12px;padding:12px}.mermaid{background:#081020;color:var(--ink);border-radius:8px;padding:8px;min-width:900px} table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:12px;overflow:hidden} th,td{border:1px solid #263653;padding:8px;text-align:left;vertical-align:top} th{background:#17213d;color:#dbeafe}.toc a{margin-right:12px;white-space:nowrap}.warn{color:var(--warn)} .ok{color:var(--ok)}
+  </style>
+  <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs'; mermaid.initialize({startOnLoad:true,theme:'dark'});</script>
+</head>
+<body>
+<main>
+  <h1>faunanet Codebase Overview</h1>
+  <p class="lead"><code>faunanet</code> is a Python bioacoustics package and REPL-driven watcher service. It monitors an input directory, loads configurable audio preprocessors and neural-network models, analyzes new audio files, optionally restricts predictions by species presence, and writes CSV results plus runtime configuration snapshots.</p>
+  <p class="toc"><a href="#tech-stack">Tech stack</a><a href="#paradigms">Paradigms</a><a href="#structure">Structure</a><a href="#class-diagram">Class diagram</a><a href="#classes">Classes</a><a href="#module-diagram">Module diagram</a><a href="#modules">Modules</a><a href="#entry-points">Entry points</a><a href="#tests">Tests</a><a href="#run">Run/test</a><a href="#docs">Docs</a><a href="#risks">Risks</a></p>
+
+  <section id="tech-stack">
+    <h2>Tech stack</h2>
+    <div class="grid">
+      <div class="card"><h3>Runtime</h3><p><span class="badge">Python &gt;=3.9</span> <span class="badge">birdnetlib 0.15.0</span> <span class="badge">watchdog</span> <span class="badge">cmd.Cmd</span> <span class="badge">multiprocessing</span></p><p class="small">Core package code lives under <code>src/faunanet</code>; the console script is <code>faunanet</code>.</p></div>
+      <div class="card"><h3>Audio and ML</h3><p><span class="badge">numpy</span> <span class="badge">librosa</span> <span class="badge">resampy</span> <span class="badge">ffmpeg-python</span> <span class="badge">TensorFlow</span> <span class="badge">tflite-runtime</span></p><p class="small">Model loading supports <code>model.tflite</code> and TensorFlow <code>saved_model.pb</code> files.</p></div>
+      <div class="card"><h3>Configuration and distribution</h3><p><span class="badge">PyYAML</span> <span class="badge">platformdirs</span> <span class="badge">pooch</span> <span class="badge">setuptools</span> <span class="badge">Docker</span></p><p class="small">Runtime setup downloads model assets, writes user config/cache directories, and stores YAML snapshots.</p></div>
+      <div class="card"><h3>Quality and docs</h3><p><span class="badge">pytest</span> <span class="badge">pytest-cov</span> <span class="badge">coverage</span> <span class="badge">Sphinx</span> <span class="badge">myst-parser</span> <span class="badge">Black</span> <span class="badge">GitHub Actions</span></p><p class="small">Coverage is configured for branch coverage over <code>src/faunanet</code> with a fail-under threshold of 80.</p></div>
+    </div>
+  </section>
+
+  <section id="paradigms">
+    <h2>Dominant coding and testing paradigms</h2>
+    <ul>
+      <li><b>Object-oriented runtime orchestration:</b> <code>Watcher</code>, <code>Recording</code>, <code>ModelBase</code>, <code>PreprocessorBase</code>, and <code>SpeciesPredictorBase</code> are the central extension and orchestration objects.</li>
+      <li><b>Configuration-driven composition:</b> YAML files decide directories, model names, analyzer parameters, recording options, and species predictor options.</li>
+      <li><b>Plugin-style model loading:</b> downloaded or custom model folders provide <code>model.py</code>, <code>preprocessor.py</code>, model weights, labels, and a model-specific <code>default.yml</code>.</li>
+      <li><b>Event/process-driven application behavior:</b> <code>watchdog.Observer</code> runs in a separate process; REPL commands start, stop, pause, resume, restart, and reconfigure the watcher.</li>
+      <li><b>Pytest-based integration-heavy tests:</b> fixtures create temporary installations, download/cache model assets, run watcher and REPL flows, and compare generated CSVs with stored expected results.</li>
+    </ul>
+  </section>
+
+  <section id="structure">
+    <h2>Repository structure</h2>
+    <table><thead><tr><th>Path</th><th>Purpose</th></tr></thead><tbody>
+      <tr><td><code>src/faunanet</code></td><td>Installable package: setup helpers, REPL, watcher, recording wrapper, abstract model/preprocessor APIs, species predictor, utilities, Docker assets, default YAML.</td></tr>
+      <tr><td><code>tests</code></td><td>Pytest suite, reusable fixtures, test configs, stored CSV expectations, stored species list.</td></tr>
+      <tr><td><code>doc/source</code></td><td>Sphinx documentation sources covering design, getting started, REPL usage, configuration files, custom models, Docker usage, and API docs.</td></tr>
+      <tr><td><code>.github/workflows</code></td><td>CI test matrix and package release workflow.</td></tr>
+      <tr><td><code>pyproject.toml</code></td><td>Project metadata, dependencies, optional extras, pytest settings, coverage settings, and console-script registration.</td></tr>
+      <tr><td><code>README.md</code></td><td>Project purpose, installation, setup, library usage, REPL usage, Docker commands, and links to hosted documentation.</td></tr>
+      <tr><td><code>requirements-dev.txt</code>, <code>.pre-commit-config.yaml</code>, <code>.flake8</code>, <code>codecov.yml</code></td><td>Developer dependencies, formatting hooks, lint exceptions, and coverage upload configuration.</td></tr>
+    </tbody></table>
+  </section>
+
+  <section id="class-diagram">
+    <h2>Class diagram</h2>
+    <div class="diagram">
+<pre class="mermaid">classDiagram
+direction LR
+class ModelBase {
+  &lt;&lt;abstract&gt;&gt;
+  +name
+  +model_path
+  +labels_path
+  +load_model()
+  +load_labels()
+  +predict(data)
+  +analyze_recording(recording)
+}
+class PreprocessorBase {
+  &lt;&lt;abstract&gt;&gt;
+  +name
+  +sample_secs
+  +chunks
+  +read_audio_data(path)
+  +process_audio_data(rawdata)
+}
+class Recording {
+  +processor
+  +analyzer
+  +species_predictor
+  +allowed_species
+  +set_analyzer(model, preprocessor, species_predictor)
+  +restrict_species_list(lat, lon, date)
+  +read_audio_data()
+  +process_audio_data(rawdata)
+  +detections
+  +from_cfg(cfg)
+}
+class SpeciesPredictorBase {
+  +model_path
+  +labels_path
+  +cache_dir
+  +load_species_list_model()
+  +load_labels()
+  +predict_species_list(latitude, longitude, date, threshold)
+  +predict(latitude, longitude, date, threshold)
+  +detections
+  +export(outputpath)
+  +clear_cache()
+}
+class Watcher {
+  +input
+  +output
+  +model_dir
+  +model_name
+  +start()
+  +stop()
+  +pause()
+  +go_on()
+  +restart()
+  +change_analyzer(name)
+  +analyze(filename, recording)
+  +save_results(filename, results)
+  +clean_up()
+}
+class AnalysisEventHandler {
+  +pattern
+  +recording
+  +callback
+  +on_created(event)
+}
+class FaunanetCmd {
+  +watcher
+  +update_parameters(cfgpath)
+  +do_set_up(line)
+  +do_start(line)
+  +do_stop(line)
+  +do_pause(line)
+  +do_continue(line)
+  +do_restart(line)
+  +do_status(line)
+  +do_change_analyzer(line)
+}
+class SetupFunctions {
+  &lt;&lt;free functions&gt;&gt;
+  +make_directories(base_cfg_dirs)
+  +download_model_files(model_dir)
+  +download_example_data(example_dir)
+  +set_up(filepath)
+}
+class UtilityFunctions {
+  &lt;&lt;free functions&gt;&gt;
+  +read_yaml(path)
+  +update_dict_leafs_recursive(base, update)
+  +load_model_from_file_tflite(path, threads)
+  +load_model_from_file_pb(path, threads)
+  +load_module(alias, path)
+  +load_name_from_module(alias, path, name)
+  +wait_for_file_completion(path)
+}
+class WatcherTask {
+  &lt;&lt;free function&gt;&gt;
+  +watchertask(watcher)
+}
+Recording --&gt; ModelBase : analyzer
+Recording --&gt; PreprocessorBase : processor
+Recording --&gt; SpeciesPredictorBase : optional filtering
+Watcher --&gt; Recording : creates and uses
+Watcher --&gt; UtilityFunctions : dynamic imports and YAML
+Watcher --&gt; AnalysisEventHandler : event callback
+AnalysisEventHandler --&gt; Watcher : calls analyze
+WatcherTask --&gt; AnalysisEventHandler : schedules observer
+FaunanetCmd --&gt; Watcher : controls process
+FaunanetCmd --&gt; SetupFunctions : setup command
+SetupFunctions --&gt; UtilityFunctions : YAML and resource helpers
+ModelBase --&gt; UtilityFunctions : model loading
+SpeciesPredictorBase --&gt; UtilityFunctions : TFLite loading</pre>
+    </div>
+  </section>
+
+  <section id="classes">
+    <h2>Class and function descriptions</h2>
+    <div class="grid">
+      <div class="card"><h3><code>ModelBase</code> in <code>src/faunanet/model_base.py</code></h3><ul><li>Abstract base class for model plugins.</li><li>Validates model and label paths, loads labels, dispatches model loading by filename, and converts chunk predictions into time-windowed result dictionaries.</li><li>Subclasses implement <code>predict(data)</code>.</li></ul></div>
+      <div class="card"><h3><code>PreprocessorBase</code> in <code>src/faunanet/preprocessor_base.py</code></h3><ul><li>Abstract base class for audio preprocessing plugins.</li><li>Reads audio with the configured sample rate and stores chunk metadata for the model.</li><li>Subclasses implement <code>process_audio_data(rawdata)</code>.</li></ul></div>
+      <div class="card"><h3><code>Recording</code> in <code>src/faunanet/recording.py</code></h3><ul><li>Extends <code>birdnetlib.main.RecordingBase</code>.</li><li>Binds one preprocessor, one model, one file path, confidence thresholds, and optional species-presence filtering.</li><li>Checks component compatibility through shared <code>name</code> values, reads/preprocesses audio, and exposes BirdNET-style detections.</li></ul></div>
+      <div class="card"><h3><code>SpeciesPredictorBase</code> in <code>src/faunanet/species_predictor.py</code></h3><ul><li>Extends <code>birdnetlib.species.SpeciesList</code>.</li><li>Loads <code>species_presence_model.tflite</code> and <code>labels.txt</code> from a model directory.</li><li>Predicts present species for latitude, longitude, and date; supports file cache export and cache clearing.</li></ul></div>
+      <div class="card"><h3><code>Watcher</code> and <code>AnalysisEventHandler</code> in <code>src/faunanet/watcher.py</code></h3><ul><li><code>Watcher</code> owns runtime directories, model config, recording config, species predictor config, multiprocessing state, and output cleanup.</li><li><code>AnalysisEventHandler</code> receives filesystem creation events and calls <code>Watcher.analyze</code> for files matching the configured suffix.</li><li><code>watchertask(watcher)</code> creates the watchdog observer inside the worker process.</li></ul></div>
+      <div class="card"><h3><code>FaunanetCmd</code> in <code>src/faunanet/repl.py</code></h3><ul><li>Interactive command loop registered as the <code>faunanet</code> console script.</li><li>Processes <code>--name=value</code> command arguments, merges default and custom YAML, controls watcher lifecycle, and reports errors/status.</li></ul></div>
+      <div class="card"><h3>Setup functions in <code>src/faunanet/faunanet_setup.py</code></h3><ul><li><code>make_directories</code> creates home, model, output, local config, local cache, and sample-data directories.</li><li><code>download_model_files</code> fetches default model packages from Hugging Face through <code>pooch</code>.</li><li><code>download_example_data</code> fetches sample audio assets.</li><li><code>set_up</code> orchestrates installation setup from YAML.</li></ul></div>
+      <div class="card"><h3>Utility functions in <code>src/faunanet/utils.py</code></h3><ul><li>YAML reading and nested dictionary updates.</li><li>TensorFlow Lite and TensorFlow SavedModel loading.</li><li>Dynamic import helpers for model/preprocessor plugin modules.</li><li>File-completion polling for incoming audio files.</li></ul></div>
+    </div>
+  </section>
+
+  <section id="module-diagram">
+    <h2>Module diagram</h2>
+    <div class="diagram">
+<pre class="mermaid">flowchart LR
+  subgraph Config[Configuration and setup]
+    install[src/faunanet/install.yml]
+    defaults[src/faunanet/default.yml]
+    setup[src/faunanet/faunanet_setup.py]
+    usercfg[User YAML config]
+  end
+  subgraph CLI[CLI / REPL]
+    repl[src/faunanet/repl.py]
+  end
+  subgraph Runtime[Watcher runtime]
+    watcher[src/faunanet/watcher.py]
+    event[AnalysisEventHandler]
+    task[watchertask process]
+  end
+  subgraph Analysis[Analysis objects]
+    recording[src/faunanet/recording.py]
+    modelbase[src/faunanet/model_base.py]
+    prepbase[src/faunanet/preprocessor_base.py]
+    species[src/faunanet/species_predictor.py]
+  end
+  subgraph Plugins[Downloaded or custom model folders]
+    modelpy[model.py]
+    preppy[preprocessor.py]
+    weights[model.tflite or saved_model.pb]
+    labels[labels.txt]
+    modeldefault[default.yml]
+  end
+  subgraph Support[Support]
+    utils[src/faunanet/utils.py]
+    docker[src/faunanet/faunanet.dockerfile and docker-compose.yml]
+    docs[doc/source]
+    tests[tests]
+  end
+  setup -- creates --> install
+  setup -- downloads --> Plugins
+  defaults --> repl
+  usercfg --> repl
+  modeldefault --> repl
+  repl -- constructs and controls --> watcher
+  watcher -- starts --> task
+  task -- schedules --> event
+  event -- created audio file --> watcher
+  watcher -- builds --> recording
+  recording --> modelbase
+  recording --> prepbase
+  recording --> species
+  modelbase -- loads --> weights
+  modelbase -- reads --> labels
+  watcher -- imports --> modelpy
+  watcher -- imports --> preppy
+  utils -- dynamic loading/YAML/model IO --> watcher
+  utils --> modelbase
+  utils --> species
+  watcher -- writes CSV/config --> output[Timestamped output directory]
+  tests -- exercise --> CLI
+  tests -- exercise --> Runtime
+  tests -- exercise --> Analysis
+  docs -- explain --> CLI</pre>
+    </div>
+  </section>
+
+  <section id="modules">
+    <h2>Module descriptions</h2>
+    <table><thead><tr><th>Module</th><th>Description</th><th>Important relationships</th></tr></thead><tbody>
+      <tr><td><code>src/faunanet/__init__.py</code></td><td>Defines package version and public imports.</td><td>Exports <code>ModelBase</code>, <code>Recording</code>, <code>PreprocessorBase</code>, <code>SpeciesPredictorBase</code>, and <code>Watcher</code>.</td></tr>
+      <tr><td><code>src/faunanet/repl.py</code></td><td>Interactive command shell and console entry point.</td><td>Reads installation config through <code>platformdirs</code>, merges YAML defaults, creates and controls <code>Watcher</code>.</td></tr>
+      <tr><td><code>src/faunanet/watcher.py</code></td><td>Directory monitoring, analysis scheduling, CSV writing, lifecycle control, analyzer swapping, cleanup.</td><td>Imports plugin classes through <code>utils.load_name_from_module</code>, creates <code>Recording</code>, uses <code>watchdog</code> and <code>multiprocessing</code>.</td></tr>
+      <tr><td><code>src/faunanet/recording.py</code></td><td>Audio-file wrapper around a preprocessor/model/species-predictor trio.</td><td>Extends <code>birdnetlib.main.RecordingBase</code>; calls model analysis and exposes detections.</td></tr>
+      <tr><td><code>src/faunanet/model_base.py</code></td><td>Model extension-point base class.</td><td>Loads labels and TensorFlow/TFLite model objects through utility functions; subclasses are supplied by model folders.</td></tr>
+      <tr><td><code>src/faunanet/preprocessor_base.py</code></td><td>Audio preprocessing extension-point base class.</td><td>Concrete preprocessors are supplied by model folders and must produce chunks consumed by model plugins.</td></tr>
+      <tr><td><code>src/faunanet/species_predictor.py</code></td><td>Species presence prediction and cache handling.</td><td>Uses BirdNET species utilities and TFLite model loading; optional in <code>Recording</code>.</td></tr>
+      <tr><td><code>src/faunanet/faunanet_setup.py</code></td><td>Initial installation setup and asset downloads.</td><td>Creates user folders, copies package YAML/Docker assets, downloads model code/weights/configs and audio sample data.</td></tr>
+      <tr><td><code>src/faunanet/utils.py</code></td><td>Shared YAML, import, model loading, docstring, and file-completion helpers.</td><td>Used by setup, REPL, watcher, model base, and species predictor modules.</td></tr>
+      <tr><td><code>src/faunanet/startup_docker.py</code></td><td>Docker startup helper.</td><td>Used with packaged Docker assets and environment-driven run configuration.</td></tr>
+    </tbody></table>
+  </section>
+
+  <section id="entry-points">
+    <h2>Starting reading points and runtime entry points</h2>
+    <div class="grid">
+      <div class="card"><h3>Best first files</h3><ol><li><code>README.md</code> for purpose, setup, usage, Docker, and hosted docs.</li><li><code>src/faunanet/watcher.py</code> for the central runtime path.</li><li><code>src/faunanet/repl.py</code> for command behavior and config merging.</li><li><code>src/faunanet/recording.py</code>, <code>model_base.py</code>, and <code>preprocessor_base.py</code> for extension contracts.</li><li><code>tests/watcher_test.py</code> and <code>tests/repl_test.py</code> for end-to-end expected behavior.</li></ol></div>
+      <div class="card"><h3>Main code paths</h3><ul><li><b>Console start:</b> <code>faunanet</code> calls <code>faunanet.repl:run</code>, which starts <code>FaunanetCmd.cmdloop()</code>.</li><li><b>Setup:</b> <code>set_up --cfg=...</code> calls <code>faunanet_setup.set_up</code> to create folders and download default assets.</li><li><b>Watch and analyze:</b> <code>start --cfg=...</code> merges config, creates <code>Watcher</code>, starts a subprocess, schedules <code>AnalysisEventHandler</code>, and writes <code>results_*.csv</code>.</li><li><b>Model exchange:</b> <code>change_analyzer</code> updates model/preprocessor classes from another model folder while preserving watcher state.</li></ul></div>
+      <div class="card"><h3>CI and release entry points</h3><ul><li><code>.github/workflows/main.yml</code> runs tests on Ubuntu, macOS, and Windows for Python 3.9 and 3.12, installs ffmpeg, installs <code>.[tensorflow]</code>, installs development requirements, and uploads coverage from the Ubuntu Python 3.12 job.</li><li><code>.github/workflows/cd.yml</code> builds distributions, installs the generated source distribution, runs an import smoke test, publishes to PyPI on tags, signs artifacts, and creates a GitHub release.</li></ul></div>
+    </div>
+  </section>
+
+  <section id="tests">
+    <h2>Tests and fixtures</h2>
+    <table><thead><tr><th>Area</th><th>Files</th><th>Relates to</th></tr></thead><tbody>
+      <tr><td>Global fixtures and environment</td><td><code>tests/conftest.py</code></td><td>Sets test mode, creates temporary install directories, downloads/caches model and audio assets, patches runtime paths, and cleans up test installations.</td></tr>
+      <tr><td>Model fixture helpers</td><td><code>tests/fixtures/model_fixtures.py</code></td><td>Loads model modules and expected stored CSV outputs for default, custom, and Google model flows.</td></tr>
+      <tr><td>Recording fixture helpers</td><td><code>tests/fixtures/recording_fixtures.py</code></td><td>Builds preprocessors, models, and recordings used by recording and analyzer tests.</td></tr>
+      <tr><td>Watcher fixture helpers</td><td><code>tests/fixtures/watcher_fixtures.py</code></td><td>Builds watcher configurations and simulates incoming audio files.</td></tr>
+      <tr><td>Model and preprocessor contracts</td><td><code>tests/model_test.py</code>, <code>tests/preprocessor_test.py</code></td><td>Checks concrete downloaded plugin behavior against <code>ModelBase</code> and <code>PreprocessorBase</code> expectations.</td></tr>
+      <tr><td>Recording behavior</td><td><code>tests/recording_test.py</code></td><td>Checks audio read/process/analyze behavior, detections, species filtering, and component compatibility errors.</td></tr>
+      <tr><td>REPL and setup</td><td><code>tests/repl_test.py</code>, <code>tests/repl_setup_test.py</code>, <code>tests/setup_test.py</code></td><td>Checks command parsing, setup commands, watcher command dispatch, installation directory creation, asset downloads, and configuration handling.</td></tr>
+      <tr><td>Species predictor</td><td><code>tests/speciespredictor_test.py</code></td><td>Checks species presence model loading, prediction, cache behavior, export, and invalid path handling.</td></tr>
+      <tr><td>Utilities</td><td><code>tests/utils_test.py</code></td><td>Checks YAML reading, recursive dictionary updates, dynamic imports, model loading error paths, and file-completion waiting.</td></tr>
+      <tr><td>Watcher runtime</td><td><code>tests/watcher_test.py</code></td><td>Checks watcher start/stop/pause/resume/restart, analysis output, cleanup, analyzer change, exception handling, and output directory behavior.</td></tr>
+      <tr><td>Expected outputs and configs</td><td><code>tests/stored_test_results</code>, <code>tests/test_configs</code>, <code>tests/test_install_config</code></td><td>Stored CSVs, stored species list, valid/invalid analysis YAML, custom install YAML, and watcher-specific config inputs.</td></tr>
+    </tbody></table>
+  </section>
+
+  <section id="run">
+    <h2>How to run, test, and build docs</h2>
+    <div class="grid">
+      <div class="card"><h3>Install for development</h3><ul><li>Install ffmpeg first: Debian/Ubuntu <code>sudo apt install ffmpeg</code>, macOS <code>brew install ffmpeg</code>, Windows <code>choco install ffmpeg</code>.</li><li>Create and activate a virtual environment, then run <code>python3 -m pip install -e .[tensorflow,dev]</code>.</li><li>Use <code>.[tensorflow-lite,dev]</code> only when TensorFlow Lite support is sufficient for the target model.</li></ul></div>
+      <div class="card"><h3>Run the application</h3><ul><li>Start the REPL with <code>faunanet</code>.</li><li>Initial setup from the REPL: <code>set_up --cfg=path/to/install_config.yml</code>.</li><li>Start watching from the REPL: <code>start --cfg=path/to/analysis_config.yml</code>.</li><li>Useful REPL commands include <code>help</code>, <code>status</code>, <code>pause</code>, <code>continue</code>, <code>restart</code>, <code>change_analyzer</code>, <code>cleanup</code>, <code>stop</code>, and <code>exit</code>.</li></ul></div>
+      <div class="card"><h3>Run tests</h3><ul><li>Standard test command: <code>pytest</code>.</li><li>CI-equivalent coverage command: <code>pytest --cov=./src/faunanet --cov-report=xml</code>.</li><li>Targeted examples: <code>pytest tests/watcher_test.py</code>, <code>pytest tests/repl_test.py</code>, <code>pytest tests/recording_test.py</code>.</li><li>Pytest defaults in <code>pyproject.toml</code> are <code>-v -x</code> and <code>testpaths = ["tests"]</code>.</li></ul></div>
+      <div class="card"><h3>Build documentation</h3><ul><li>Install documentation extras: <code>python3 -m pip install -e .[doc]</code>.</li><li>Build from the documentation directory: <code>cd doc &amp;&amp; make html</code>.</li><li>Windows build helper: <code>doc/make.bat</code>.</li></ul></div>
+    </div>
+  </section>
+
+  <section id="docs">
+    <h2>Documentation pointers</h2>
+    <ul>
+      <li><code>README.md</code> contains a high-level project description, installation notes, setup instructions, Docker usage, and contribution links.</li>
+      <li><code>doc/source/index.rst</code> is the local Sphinx documentation root.</li>
+      <li><code>doc/source/getting_started.md</code>, <code>doc/source/repl_usage.md</code>, <code>doc/source/using_configuration_files.md</code>, <code>doc/source/using_custom_models.md</code>, and <code>doc/source/using_faunanetlab_through_docker.md</code> cover operational workflows.</li>
+      <li><code>doc/source/basic_design.md</code> describes design-level concepts.</li>
+      <li><code>doc/source/faunanet_api_doc.rst</code> collects API documentation.</li>
+      <li>Hosted documentation is linked from <code>pyproject.toml</code> and <code>README.md</code>: <a href="https://isparrow.readthedocs.io/en/latest/">https://isparrow.readthedocs.io/en/latest/</a>.</li>
+    </ul>
+  </section>
+
+  <section id="risks">
+    <h2>Constraints, risks, and open questions</h2>
+    <ul>
+      <li><b>Dynamic plugin imports:</b> <code>utils.load_module</code> and <code>load_name_from_module</code> execute Python code from model directories. This enables flexible custom models but requires trusted model folders and strong runtime error handling.</li>
+      <li><b>External downloads:</b> setup and tests rely on model/audio assets fetched from Hugging Face through <code>pooch</code>. Network availability and cache state can affect first-run behavior.</li>
+      <li><b>Runtime TensorFlow choice:</b> either <code>tensorflow</code> or <code>tflite-runtime</code> must be installed for actual inference. The correct extra depends on model format.</li>
+      <li><b>Cross-platform shell details:</b> CI runs all supported platforms, but README activation snippets differ between Unix shells and Windows shells.</li>
+      <li><b>Potential release workflow mismatch:</b> <code>.github/workflows/cd.yml</code> smoke tests import <code>faunanet_record</code>, while this package exports <code>faunanet</code>.</li>
+      <li><b>Potential method-name mismatch:</b> scout findings indicate <code>Watcher.change_analyzer()</code> references <code>restore_old_state</code> while the implemented helper is named <code>_restore_old_state</code>.</li>
+      <li><b>Potential config naming mismatch:</b> default and runtime paths should be checked around <code>SpeciesPresence</code> versus <code>SpeciesPredictor</code> naming before changing species-filter configuration.</li>
+      <li><b>Filesystem watcher timing:</b> incoming audio handling depends on file-completion polling and process state. Large files, slow writes, or abrupt process termination can affect cleanup and result consistency.</li>
+      <li><b>Output cleanup risk:</b> watcher cleanup intentionally manipulates timestamped output directories; changes should preserve data-loss safeguards and tests around cleanup limits.</li>
+      <li><b>API inheritance boundary:</b> <code>Recording</code> and <code>SpeciesPredictorBase</code> extend <code>birdnetlib</code> classes. Upstream API changes can affect constructor expectations, detection formats, and species list semantics.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

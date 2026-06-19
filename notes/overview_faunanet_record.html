@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>faunanet-record Codebase Overview</title>
+  <style>
+    :root{--bg:#0b1020;--panel:#121a32;--panel2:#182342;--ink:#eef3ff;--muted:#b7c3dc;--line:#42557f;--accent:#7dd3fc;--accent2:#c084fc;--ok:#86efac;--warn:#fde68a;--bad:#fca5a5}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif} main{max-width:1280px;margin:auto;padding:28px} h1,h2,h3{line-height:1.15} h1{font-size:34px;margin:0 0 8px} h2{font-size:24px;margin:34px 0 14px;border-bottom:1px solid var(--line);padding-bottom:8px} h3{font-size:17px;margin:18px 0 8px;color:var(--accent)} a{color:var(--accent)} code{background:#090d1a;border:1px solid #243150;border-radius:5px;padding:1px 5px;color:#dbeafe} pre{background:#081020;border:1px solid #263653;border-radius:12px;padding:12px;overflow:auto;color:#dbeafe} .lead{color:var(--muted);font-size:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}.card{background:linear-gradient(180deg,var(--panel),#0f172d);border:1px solid #263653;border-radius:12px;padding:14px}.card h3{margin-top:0}.small{font-size:12px;color:var(--muted)} ul{padding-left:20px} li{margin:4px 0}.badge{display:inline-block;padding:2px 7px;border-radius:999px;background:#203253;color:#dbeafe;border:1px solid #35517d;font-size:12px}.toc a{margin-right:12px;white-space:nowrap}.mermaid{background:#081020;border:1px solid #263653;border-radius:12px;padding:16px;overflow:auto}.warn{color:var(--warn)}.ok{color:var(--ok)} table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:12px;overflow:hidden} th,td{border:1px solid #263653;padding:8px;text-align:left;vertical-align:top} th{background:#17213d;color:#dbeafe}
+  </style>
+  <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs'; mermaid.initialize({startOnLoad:true,theme:'dark'});</script>
+</head>
+<body>
+<main>
+  <h1>faunanet-record Codebase Overview</h1>
+  <p class="lead"><code>faunanet-record</code> is a Python package and CLI for chunked microphone recording. It creates configuration/data directories, merges YAML configuration, records audio through PyAudio/PortAudio, writes WAV files, and exposes <code>Recorder</code> and <code>Runner</code> for library use.</p>
+  <p class="toc"><a href="#structure">Structure</a><a href="#stack">Tech stack</a><a href="#paradigms">Paradigms</a><a href="#modules">Modules</a><a href="#entities">Classes/functions</a><a href="#diagrams">Diagrams</a><a href="#entrypoints">Entry points</a><a href="#tests">Tests</a><a href="#docs">Docs</a><a href="#risks">Risks</a></p>
+
+  <h2 id="structure">Repository structure</h2>
+  <div class="grid">
+    <div class="card"><h3>Package source</h3><ul><li><code>src/faunanet_record/audio_recording.py</code> — recorder abstraction and PyAudio implementation.</li><li><code>src/faunanet_record/runner.py</code> — run orchestration, configuration merge, output folder creation.</li><li><code>src/faunanet_record/cli.py</code> — Click command group and user-facing commands.</li><li><code>src/faunanet_record/set_up.py</code> — install/setup helpers for data and config folders.</li><li><code>src/faunanet_record/utils.py</code> — YAML reading and dictionary update helpers.</li><li><code>src/faunanet_record/default.yml</code>, <code>install.yml</code> — packaged defaults.</li></ul></div>
+    <div class="card"><h3>Tests and fixtures</h3><ul><li><code>tests/audio_recorder_test.py</code> — PyAudio recorder behavior.</li><li><code>tests/runner_test.py</code> — config merging, runtime processing, runner construction.</li><li><code>tests/cli_test.py</code> — Click install/run command paths.</li><li><code>tests/integration_test.py</code> — end-to-end Runner recording flow.</li><li><code>tests/utils_test.py</code> — recursive update and replacement parsing helpers.</li><li><code>tests/conftest.py</code>, <code>tests/test_configs/</code> — autouse installation fixtures and test YAML.</li></ul></div>
+    <div class="card"><h3>Tooling and documentation</h3><ul><li><code>pyproject.toml</code> — package metadata, dependencies, pytest, coverage, scripts.</li><li><code>.github/workflows/ci.yml</code> — Ubuntu CI with virtual PulseAudio devices.</li><li><code>.github/workflows/cd.yml</code> — build, distribution test, PyPI publish, release signing.</li><li><code>doc/</code> — Sphinx documentation project.</li><li><code>README.md</code> — installation, configuration, CLI, Docker, troubleshooting.</li><li><code>.pre-commit-config.yaml</code>, <code>.flake8</code>, <code>codecov.yml</code> — quality tooling.</li></ul></div>
+  </div>
+
+  <h2 id="stack">Tech stack</h2>
+  <table><thead><tr><th>Area</th><th>Elements</th></tr></thead><tbody>
+    <tr><td>Language and packaging</td><td>Python 3.9+, setuptools build backend, PEP 621 metadata in <code>pyproject.toml</code>, package layout under <code>src/</code>.</td></tr>
+    <tr><td>Audio</td><td><code>pyaudio</code> / PortAudio for capture, Python <code>wave</code> module for WAV writing, hardcoded <code>pyaudio.paInt16</code> sample format.</td></tr>
+    <tr><td>Configuration</td><td>YAML via <code>PyYAML</code>, user config directories via <code>platformdirs</code>, recursive dictionary overrides.</td></tr>
+    <tr><td>CLI</td><td><code>click</code> command group exposed as <code>faunanet_record</code>.</td></tr>
+    <tr><td>Tests</td><td><code>pytest</code>, <code>pytest-cov</code>, <code>coverage</code>, <code>librosa</code> for WAV duration/sample-rate checks, PulseAudio virtual devices in CI.</td></tr>
+    <tr><td>Docs and release</td><td>Sphinx, MyST parser, Read the Docs config, GitHub Actions, Codecov, PyPI trusted publishing workflow.</td></tr>
+    <tr><td>Containerization</td><td><code>src/faunanet_record/faunanet_record.dockerfile</code> and README Docker run instructions using <code>--device=/dev/snd</code>.</td></tr>
+  </tbody></table>
+
+  <h2 id="paradigms">Dominant coding and testing paradigms</h2>
+  <div class="grid">
+    <div class="card"><h3>Coding style</h3><p>Small object-oriented core around <code>RecorderBase</code>, <code>Recorder</code>, and <code>Runner</code>, with procedural helper functions for setup, YAML loading, and dictionary merging. Runtime behavior is configuration-driven through nested dictionaries loaded from YAML.</p></div>
+    <div class="card"><h3>Testing style</h3><p>Pytest-based unit and integration tests. Tests exercise real PyAudio behavior against virtual audio devices in CI rather than using heavy mocking. Autouse fixtures create and remove config/data directories under platform-specific user config/data locations.</p></div>
+    <div class="card"><h3>Operational model</h3><p>The CLI first installs default configs and data folders, then each run creates a timestamped output subdirectory, optionally dumps the effective YAML config, and records sequential WAV chunks until a stop condition is met.</p></div>
+  </div>
+
+  <h2 id="modules">Module descriptions</h2>
+  <table><thead><tr><th>Module</th><th>Responsibilities</th><th>Important relationships</th></tr></thead><tbody>
+    <tr><td><code>src/faunanet_record/audio_recording.py</code></td><td>Defines the recorder contract and concrete PyAudio recorder. Handles stream creation, start/stop, chunk reads, WAV serialization, and cleanup.</td><td><code>Runner</code> instantiates <code>Recorder</code>. Tests use <code>Recorder.from_cfg</code> and direct constructor calls.</td></tr>
+    <tr><td><code>src/faunanet_record/runner.py</code></td><td>Loads install/default YAML, merges custom overrides, creates timestamped run folders, dumps effective config, maps runtime settings to stop conditions, and starts recording.</td><td>Depends on <code>Recorder</code> and <code>update_dict_recursive</code>. Used by CLI and exported as library API.</td></tr>
+    <tr><td><code>src/faunanet_record/cli.py</code></td><td>Defines <code>install</code>, <code>get-device-info</code>, and <code>run</code> commands. Validates installed config/data folders, loads custom config, applies replacement dictionaries, constructs <code>Runner</code>.</td><td>Calls <code>set_up.set_up</code>, <code>read_yaml</code>, <code>dict_from_string</code>, <code>update_dict_recursive</code>, and <code>Runner.run</code>.</td></tr>
+    <tr><td><code>src/faunanet_record/set_up.py</code></td><td>Creates data and config directories from install YAML and copies <code>install.yml</code>/<code>default.yml</code> into the user config directory.</td><td>Used by the <code>install</code> CLI command and by test fixtures.</td></tr>
+    <tr><td><code>src/faunanet_record/utils.py</code></td><td>Reads YAML, recursively updates existing dictionary leaves, and parses replacement dictionaries from CLI strings with <code>ast.literal_eval</code>.</td><td>Shared by CLI, Runner, setup, and tests.</td></tr>
+    <tr><td><code>src/faunanet_record/__init__.py</code></td><td>Exports <code>Recorder</code>, <code>Runner</code>, and package version.</td><td>Library import surface: <code>from faunanet_record import Runner, Recorder</code>.</td></tr>
+  </tbody></table>
+
+  <h2 id="entities">Classes and important functions</h2>
+  <table><thead><tr><th>Entity</th><th>Type</th><th>Description</th></tr></thead><tbody>
+    <tr><td><code>RecorderBase</code></td><td>Abstract class</td><td>Defines the common recorder state and required methods for starting, streaming, and stopping a data source.</td></tr>
+    <tr><td><code>Recorder</code></td><td>Concrete class</td><td>Implements <code>RecorderBase</code> with PyAudio. It opens an input stream, records fixed-length chunks, writes WAV files in record mode, and returns raw bytes in stream mode.</td></tr>
+    <tr><td><code>Runner</code></td><td>Class</td><td>Combines installed defaults and user overrides, creates a per-run output folder, builds a <code>Recorder</code>, and supplies the stop condition for finite, date-limited, or indefinite recording.</td></tr>
+    <tr><td><code>cli.install</code></td><td>Click command</td><td>Calls the setup routine to create user config/data directories and copy default YAML files.</td></tr>
+    <tr><td><code>cli.run</code></td><td>Click command</td><td>Validates installation state, loads optional run config and replacement values, constructs <code>Runner</code>, and starts recording.</td></tr>
+    <tr><td><code>cli.get_device_info</code></td><td>Click command</td><td>Prints PyAudio device metadata for selecting <code>input_device_index</code>.</td></tr>
+    <tr><td><code>set_up.set_up</code></td><td>Function</td><td>Reads install YAML, creates required folders, and copies packaged or user-provided default configs into the platform user config directory.</td></tr>
+    <tr><td><code>set_up.make_directories</code></td><td>Function</td><td>Creates the data directory and config directory derived from the install configuration.</td></tr>
+    <tr><td><code>utils.update_dict_recursive</code></td><td>Function</td><td>Recursively updates existing leaves in a nested base dictionary from a partial override dictionary.</td></tr>
+    <tr><td><code>utils.read_yaml</code></td><td>Function</td><td>Loads a YAML file after checking that the path exists.</td></tr>
+    <tr><td><code>utils.dict_from_string</code></td><td>Function</td><td>Parses a CLI string representation of a dictionary with <code>ast.literal_eval</code> and rejects non-dictionary input.</td></tr>
+  </tbody></table>
+
+  <h2 id="diagrams">Diagrams</h2>
+  <h3>Class and function relationship diagram</h3>
+  <div class="mermaid">
+classDiagram
+    class RecorderBase {
+      &lt;&lt;abstract&gt;&gt;
+      +length_in_s
+      +sample_rate
+      +output_folder
+      +file_type
+      +channels
+      +num_format
+      +mode
+      +output
+      +start(stop_condition)
+      +stream_audio()
+      +stop()
+    }
+    class Recorder {
+      +stream
+      +p
+      +input_device_index
+      +chunk_size
+      +filename_format
+      +start(stop_condition)
+      +stream_audio()
+      +stop()
+      +is_running
+      +from_cfg(cfg)
+      -_close()
+    }
+    class Runner {
+      +config
+      +end_time
+      +output_path
+      +recorder
+      -_process_configs(custom_cfg, config_folder)
+      -_process_runtime(config)
+      +run()
+    }
+    class cli_install {
+      &lt;&lt;ClickCommand&gt;&gt;
+      +install(cfg_dir)
+    }
+    class cli_run {
+      &lt;&lt;ClickCommand&gt;&gt;
+      +run(cfg, debug, replace, defaults)
+    }
+    class cli_get_device_info {
+      &lt;&lt;ClickCommand&gt;&gt;
+      +get_device_info()
+    }
+    class set_up_functions {
+      &lt;&lt;functions&gt;&gt;
+      +set_up(cfg_path)
+      +make_directories(base_cfg_dirs)
+    }
+    class utils_functions {
+      &lt;&lt;functions&gt;&gt;
+      +read_yaml(path)
+      +update_dict_recursive(base, update)
+      +dict_from_string(dict_repr)
+    }
+    RecorderBase &lt;|-- Recorder
+    Runner o-- Recorder
+    cli_run ..&gt; Runner
+    cli_run ..&gt; utils_functions
+    cli_install ..&gt; set_up_functions
+    set_up_functions ..&gt; utils_functions
+    Runner ..&gt; utils_functions
+    cli_get_device_info ..&gt; Recorder : PyAudio device list
+  </div>
+
+  <h3>Runtime/module flow diagram</h3>
+  <div class="mermaid">
+flowchart TD
+    A[CLI: faunanet_record install] -- cfg_dir --> B[set_up.set_up]
+    B --> C[make_directories]
+    C --> D[User config directory]
+    C --> E[Data directory]
+    B --> F[Copy install.yml and default.yml]
+
+    G[CLI: faunanet_record run] --> H[Read installed install.yml]
+    H --> I[Validate data directory]
+    I --> J[Read optional custom cfg]
+    J --> K[Parse --replace dictionary]
+    K --> L[Runner]
+    L --> M[Load default.yml + install.yml]
+    M --> N[update_dict_recursive]
+    N --> O[Create timestamped run folder]
+    O --> P[Dump effective config if enabled]
+    P --> Q[Recorder]
+    Q --> R[PyAudio input stream]
+    R --> S[stream_audio chunks]
+    S --> T[wave.open writes .wav files]
+
+    U[Tests] --> V[conftest install fixture]
+    V --> D
+    V --> E
+    U --> W[PulseAudio virtual microphone in CI]
+    W --> R
+  </div>
+
+  <h2 id="entrypoints">Entry points and common commands</h2>
+  <h3>Development setup</h3>
+  <pre><code>sudo apt-get update
+sudo apt-get install -y portaudio19-dev gcc
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -e '.[dev,doc]'</code></pre>
+  <h3>CLI usage</h3>
+  <pre><code>faunanet_record install --cfg_dir=src/faunanet_record
+faunanet_record get-device-info
+faunanet_record run
+faunanet_record run --cfg=path/to/record_config.yml
+faunanet_record run --replace='{&quot;Recording&quot;:{&quot;length_s&quot;:2}}'</code></pre>
+  <p class="small">Click converts the Python function <code>get_device_info</code> to the CLI command <code>get-device-info</code>. The package script name in <code>pyproject.toml</code> is <code>faunanet_record</code>.</p>
+  <h3>Library usage</h3>
+  <pre><code>from faunanet_record import Runner, Recorder
+
+runner = Runner({"Output": {"runtime": 8}})
+runner.run()</code></pre>
+
+  <h2 id="tests">Tests and fixtures</h2>
+  <table><thead><tr><th>Test file</th><th>Coverage focus</th><th>Related code</th></tr></thead><tbody>
+    <tr><td><code>tests/audio_recorder_test.py</code></td><td>Recorder construction from config, record mode WAV output, stream mode byte counts, stop/restart/close behavior, error paths for invalid mode/missing stream/resources.</td><td><code>audio_recording.py</code></td></tr>
+    <tr><td><code>tests/runner_test.py</code></td><td>Default/custom config merge, install config expansion, runtime and run-until precedence, timestamped output folder creation, config dump.</td><td><code>runner.py</code>, <code>utils.py</code></td></tr>
+    <tr><td><code>tests/cli_test.py</code></td><td>Click command output and failure handling for install; default run, debug warning, custom config run, and <code>--replace</code> override behavior.</td><td><code>cli.py</code>, <code>set_up.py</code>, <code>runner.py</code></td></tr>
+    <tr><td><code>tests/integration_test.py</code></td><td>End-to-end <code>Runner</code> recording, expected WAV/config counts, WAV duration/sample-rate checks with <code>librosa</code>.</td><td><code>runner.py</code>, <code>audio_recording.py</code></td></tr>
+    <tr><td><code>tests/utils_test.py</code></td><td>Recursive dictionary update behavior and safe parsing of replacement dictionaries.</td><td><code>utils.py</code></td></tr>
+    <tr><td><code>tests/conftest.py</code></td><td>Autouse setup fixture copies test configs into the platform user config directory and removes generated config/data directories after each test.</td><td><code>set_up.py</code>, <code>tests/test_configs/</code></td></tr>
+  </tbody></table>
+
+  <h3>Run tests locally</h3>
+  <p>Audio tests require PortAudio and an available input device. To mirror CI on Ubuntu, start virtual PulseAudio devices before pytest:</p>
+  <pre><code>sudo apt-get install -y portaudio19-dev pulseaudio
+pulseaudio -D
+pactl load-module module-null-sink sink_name=virtspk sink_properties=device.description=Virtual_Speaker
+pactl load-module module-null-sink sink_name=virtmic sink_properties=device.description=Virtual_Microphone_Sink
+pactl load-module module-remap-source master=virtmic.monitor source_name=virtmic source_properties=device.description=Virtual_Microphone
+python3 -m pytest --cov=./src/faunanet_record --cov-report=xml</code></pre>
+  <p><code>pyproject.toml</code> sets <code>addopts = -v -x</code>, <code>testpaths = ["tests"]</code>, branch coverage on <code>src/faunanet_record</code>, and a coverage threshold of 80%.</p>
+
+  <h2 id="docs">Documentation and CI</h2>
+  <ul>
+    <li><code>README.md</code> is the primary usage document and includes installation, configuration, Docker, and troubleshooting notes.</li>
+    <li><code>doc/source/index.rst</code> defines the Sphinx documentation tree and links README, API docs, and license text.</li>
+    <li><code>.readthedocs.yaml</code> configures hosted documentation builds.</li>
+    <li><code>.github/workflows/ci.yml</code> runs tests on Ubuntu for Python 3.9 and 3.12 with virtual PulseAudio devices and uploads coverage.</li>
+    <li><code>.github/workflows/cd.yml</code> builds distributions, tests importability, publishes tagged releases to PyPI, and creates signed GitHub releases.</li>
+  </ul>
+
+  <h2 id="risks">Constraints, risks, and open questions</h2>
+  <ul>
+    <li><span class="warn">Audio hardware dependency:</span> normal operation requires PortAudio/PyAudio and a working input device. CI works around this with virtual PulseAudio sources.</li>
+    <li><span class="warn">Linux-centric support:</span> package classifiers and CI target POSIX/Linux. README mentions macOS success but no Windows validation.</li>
+    <li><span class="warn">Hardcoded sample format:</span> recording uses <code>pyaudio.paInt16</code>. README explicitly notes this as a current limitation.</li>
+    <li><span class="warn">Chunk divisibility:</span> <code>(sample_rate * length_s) / chunk_size</code> is truncated to an integer in <code>stream_audio</code>; README warns that non-divisible settings can cause PortAudio frame issues.</li>
+    <li><span class="warn">Configuration drift:</span> README documents <code>runtime: "inf"</code>, but <code>Runner.run</code> only handles <code>None</code>, <code>int</code>, and <code>datetime</code>. A string runtime may not start recording.</li>
+    <li><span class="warn">Folder collisions:</span> <code>Runner</code> creates timestamped folders with second-level precision using <code>mkdir()</code> without <code>exist_ok=True</code>; repeated starts in the same second can collide.</li>
+    <li><span class="warn">Resource cleanup:</span> cleanup relies partly on <code>__del__</code> and internal <code>_close()</code>; explicit lifecycle management may be safer for long-running deployments.</li>
+    <li><span class="warn">Public API naming:</span> README contains both hyphenated and underscored command spellings. <code>pyproject.toml</code> defines <code>faunanet_record</code>; Click subcommands use hyphens for underscores.</li>
+  </ul>
+</main>
+</body>
+</html>
