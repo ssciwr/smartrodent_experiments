@@ -13,6 +13,9 @@ dependencies = [
     "pyaml>=26.2.1",
     "speciesnet>=1.0",
     "ultralytics>=8.4.68",
+    "torch",
+    "torchvision",
+    "pyaml",
 ]
 
 [project.optional-dependencies]
