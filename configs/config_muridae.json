@@ -1,35 +1,35 @@
 {
     "metadata_processor_info": {
-        "source_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/BioTrove/BioTrove",
-        "destination_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/biotrove-muridae-filtered",
+        "source_folder": "./datasets/BioTrove/BioTrove",
+        "destination_folder": "./datasets/biotrove-muridae/biotrove-muridae-filtered",
         "categories": [
             "Muridae"
         ]
     },
-    "filter_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-sri-lanka/sri-lanka_parquet",
+    "filter_dir": "./datasets/biotrove-sri-lanka/sri-lanka_parquet",
     "metadata_filter_and_shuffle_info": {
-        "species_count_data": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/biotrove-muridae_filtered/combined_sample_counts_per_species.csv",
-        "directory": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae",
+        "species_count_data": "./datasets/biotrove-muridae/biotrove-muridae_filtered/combined_sample_counts_per_species.csv",
+        "directory": "./datasets/biotrove-muridae",
         "rare_threshold": 5,
         "cap_threshold": 1000,
         "part_size": 500,
-        "rare_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/rare_cases",
-        "cap_filtered_dir_train": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/tmp_cap_filtered",
-        "capped_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/overthecap_cases",
-        "merged_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/processed_metadata",
+        "rare_dir": "./datasets/biotrove-muridae/rare_cases",
+        "cap_filtered_dir_train": "./datasets/biotrove-muridae/tmp_cap_filtered",
+        "capped_dir": "./datasets/biotrove-muridae/overthecap_cases",
+        "merged_dir": "./datasets/biotrove-muridae/processed_metadata",
         "files_per_chunk": 100,
         "random_seed": 42
     },
     "image_download_info": {
-        "processed_metadata_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/processed_metadata",
-        "output_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/img_txt",
+        "processed_metadata_folder": "./datasets/biotrove-muridae/processed_metadata",
+        "output_folder": "./datasets/biotrove-muridae/img_txt",
         "start_index": 0,
         "end_index": null,
         "concurrent_downloads": 100
     },
     "img_text_gen_info": {
-        "processed_metadata_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/processed_metadata",
-        "img_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-muridae/img_txt",
+        "processed_metadata_folder": "./datasets/biotrove-muridae/processed_metadata",
+        "img_folder": "./datasets/biotrove-muridae/img_txt",
         "generate_tar": true
     }
 }
