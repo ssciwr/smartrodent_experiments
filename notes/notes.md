@@ -11,99 +11,97 @@
 - this is interesting as a modeling project in itself
 
 ## Dataset evaluation
-- **iRodent**: Species labels are stripped and only the class 'rodent' is retained, not useful for us unless for pose estimation, for which the dataset is intended. good thing: it's scrapped from iNaturalist, which we might be able to use.
+- **iRodent**: Species labels are stripped and only the class 'rodent' is retained, not useful for us unless for pose estimation, for which the dataset is intended. good thing: it's scrapped from iNaturalist, which we might be able to use, but I am not entirely sure how to get the species labels back.
 - **snakeclef21**: Have not read the paper yet, but many images retain copyright notices and the usage of flikr images is unclear wrt licensing. Provenance unclear
 - **nature published dataset**: is too specific for the area the images are from (qilian mountains, China)
 - **BioTrove**: can be filtered on various taxonomic levels depending on what is needed. Started out with "[Muridae](https://en.wikipedia.org/wiki/Muridae)" (mouse-likes), which can further be filtered based on need. Because it spans essentially the animal tree of life, we can filter the dataset for various animal species we need, and then apply OpenAI's clip model to filter out specific image types (like dead animals, animals caught in traps, bones/skulls or museum specimens) to build a dataset.
 
-## Code
-
-
-
 ## List of interesting species beyond just black rat and mouse
-researched with the help of gemini flash
-### Central Europe: The Complete Small Mammal Pest Matrix
 
-In European settlements, the crossover between true rodents, dormice, and shrews is extensive. They all raid human structures for heat and food, especially in autumn.
-### 1. True Rodents (Muridae & Cricetidae)
+The lists below are the current BioTrove target categories, taken from `configs/config_central_europe.json` and `configs/config_srilanka.json`. They are not intended to be complete regional faunas. Summaries below were rewritten to be conservative and tied to the references listed at the end of this section.
 
-- **`Rattus norvegicus` (Brown Rat):** Subterranean king of cities, sewers, and livestock farms. Prime vector for _Leptospira_.
+The list is at the moment bigger than what we would minimally need, which programmatically doesn't really make much of a difference. Model training can get more complex, so we can scale that up as possible and necessary.
 
-- **`Rattus rattus` (Roof Rat):** Less common than the brown rat but heavily colonized in older granaries, shipping ports, and high rafters of agricultural buildings.
+### Central Europe: configured BioTrove target list
 
-- **`Mus musculus` (House Mouse):** Classic indoor commensal pest found globally inside walls, kitchens, and urban warehouses.
+### 1. Rodents (Muridae & Cricetidae)
 
-- **`Mus spicilegus` (Steppe Mouse):** Found in southeastern Central Europe (e.g., Austria/Hungary borders). They build massive, human-disruptive seed mounds right on the edges of agricultural plots.
+- **`Rattus norvegicus` (Brown Rat / Norway Rat):** Strongly human-associated in many cities, farms, food-storage settings, sewers, and other built environments. It is a public-health target because commensal rats in Europe have been reported with many zoonotic infectious agents. Refs: [CE-RN1], [CE-RAT].
 
-- **`Apodemus sylvaticus` (Wood Mouse):** The main "invader" of suburban gardens and garages during winter.
+- **`Rattus rattus` (Black Rat / Roof Rat):** A climbing, globally invasive commensal rat that is often associated with buildings, ports, storage, and other human-modified habitats. In Europe it is generally less widespread than `R. norvegicus`, but still relevant as a pest and zoonotic-host species. Refs: [CE-RR1], [CE-RAT].
 
-- **`Apodemus flavicollis` (Yellow-necked Mouse):** Lives near woodland borders but aggressively enters rural attics and houses. A critical vector for **Tick-Borne Encephalitis (TBE)** and various hantaviruses.
+- **`Mus musculus` (House Mouse):** A globally distributed commensal species, frequently associated with residential, agricultural, and commercial structures; also occurs in feral populations. Relevant for food contamination, infrastructure nuisance, and as a visual/model confounder for other small rodents. Refs: [CE-MM1], [CE-MM2].
 
-- **`Apodemus agrarius` (Striped Field Mouse):** Easily identified by its black dorsal stripe. It heavily bridges rural fields and urban parks, acting as the primary reservoir for the deadly **Dobrava-Belgrade hantavirus**.
+- **`Apodemus sylvaticus` (Wood Mouse):** A widespread and adaptable European mouse found in woodlands, shrublands, arable fields, parks, gardens, and other human-modified habitats. It should be treated mainly as a peri-domestic or outdoor species rather than a strictly indoor commensal. Refs: [CE-AS1], [CE-AS2].
 
-- **`Microtus arvalis` (Common Vole):** Explodes in agricultural population cycles, frequently overrunning barns and grain bins, bringing **Tularemia** into contact with humans.
+- **`Apodemus flavicollis` (Yellow-necked Mouse):** Primarily associated with woodland and forest-edge habitats, but can occur near human habitation where woodland and buildings meet. It is also one of the small mammals discussed in European tick/pathogen ecology. Refs: [CE-AF1], [CE-TICK].
 
-- **`Myodes glareolus` (Bank Vole):** Inhabits rural woodpiles and gardens. The absolute primary reservoir for the **Puumala hantavirus**.
+- **`Apodemus agrarius` (Striped Field Mouse):** Originally associated with steppe and grassland, but also common in anthropogenic habitats such as meadows, croplands, field edges, road verges, gardens, and orchards in parts of its range. It has documented relevance in European orthohantavirus ecology, but the public-health implication is regional and pathogen-specific. Refs: [CE-AA1], [CE-HANTA].
 
-- **`Arvicola amphibius` (European Water Vole):** A massive, rat-sized vole that acts as a major pest in suburban orchards and gardens by destroying root systems.
+- **`Microtus arvalis` (Common Vole):** A common vole of European agricultural landscapes. Population outbreaks can damage crops, and outbreaking farm-vole populations have been linked to increased concern about zoonotic pathogen transmission, including tularemia in some regions. Refs: [CE-MA1], [CE-MA2].
 
+- **`Microtus agrestis` (Field Vole):** A grassland, wetland, heathland, cropland, and agricultural-mosaic vole in Europe. Included as a target species for visual/taxonomic coverage rather than because it is a classic indoor pest. Refs: [CE-MAG1].
 
-### 2. Dormice (Gliridae — The Rodent Analogs)
+- **`Myodes glareolus` (Bank Vole):** A woodland-associated vole that is important in European public-health context because it is the reservoir host of Puumala orthohantavirus, which can cause nephropathia epidemica in humans. Refs: [CE-MG1], [CE-MG2].
 
-- **`Glis glis` (Edible Dormouse):** Looks like a miniature squirrel-rat hybrid. They are notorious for nesting inside the roof insulation and attics of suburban houses, causing severe structural damage and noise.
+- **`Arvicola amphibius` (European Water Vole):** Usually associated with banks of rivers, streams, ponds, wetlands, and other areas with vegetated water margins, but can also occur in gardens and fields. It is relevant for recognition because it is rat-sized and vole-like, but it should not be summarized simply as an urban rat analog. Refs: [CE-AV1], [CE-AV2].
 
-- **`Eliomys quercinus` (Garden Dormouse):** Frequently found in human orchards, fruit gardens, and outbuildings.
+### 2. Shrews (Soricidae — non-rodent visual/pathogen confounder)
 
+- **`Crocidura leucodon` (Bicolored White-toothed Shrew):** Not a rodent. Included because it can be visually confused with small rodents and because it is a documented reservoir host of Borna disease virus 1 in parts of Central Europe. Refs: [CE-CL1], [CE-CL2].
 
-### 3. Shrews & Moles (Soricidae & Talpidae — The Insectivore Analogs)
+### Sri Lanka: configured BioTrove target list
 
-- **`Crocidura russula` (Greater White-toothed Shrew):** Highly synanthropic. They move out of compost piles and directly into basements and crawlspaces. *not sure about risks*
+### 1. Rodents (Muridae)
 
-- **`Crocidura leucodon` (Bicolored Shrew):** Visually distinct but highly dangerous from a public health standpoint; they are the primary reservoir for **Borna disease virus 1 (BoDV-1)**, which causes fatal encephalitis in humans.
+- **`Rattus norvegicus` (Brown Rat / Norway Rat):** A globally commensal rat and plausible urban/peri-urban pest target in Sri Lanka. In one Sri Lankan storage-facility study, it was not the dominant trapped small mammal; `R. rattus` and `Suncus` spp. were much more common. Refs: [SL-L1], [CE-RN1].
 
-- **`Sorex araneus` (Common Shrew):** Frequently caught on camera traps near rural sheds and woodpiles; known carriers of Seewis and Altai hantaviruses.
+- **`Rattus rattus` (Black Rat / House Rat / Roof Rat):** A major Sri Lankan target. In the cited storage-facility study, `R. rattus` was the dominant captured small mammal across sampled districts and was discussed in the context of Leptospira reservoir ecology. Refs: [SL-L1], [SL-L2].
 
+- **`Mus musculus` (House Mouse):** A globally commensal mouse associated with residential, agricultural, and commercial structures. It remains a useful class for model coverage, although the Sri Lankan reservoir study cited here emphasized `R. rattus`, `Suncus` spp., `Bandicota` spp., and `Mus booduga` rather than `M. musculus`. Refs: [CE-MM1], [SL-L1].
 
-## Sri Lanka: The Tropical Commensal & Field Community
+- **`Bandicota indica` (Greater Bandicoot Rat):** A large South/Southeast Asian murid recorded from Sri Lanka. It was rare in the cited Sri Lankan storage-facility trapping data but remains relevant because `Bandicota` spp. are part of the local rodent/reservoir community. Refs: [SL-BI1], [SL-L1].
 
-In Sri Lanka, open-air architecture and tropical agricultural cycles create a highly fluid environment where large burrowing rats, climbing mice, arboreal squirrels, and highly vocal shrews constantly overlap.
-*Not all of them might be useful for our purposes, b/c their health impact is unclear*
+- **`Bandicota bengalensis` (Lesser Bandicoot Rat):** Occurs in Sri Lanka and the broader Indian subcontinent. It was also rare in the cited storage-facility trapping data, so claims about dominance should be avoided unless local data support them. Refs: [SL-BB1], [SL-L1], [SL-BART].
 
-### 1. True Rodents (Muridae)
+- **`Mus booduga` (Little Indian Field Mouse):** A small South Asian mouse included in the Sri Lanka config. In the cited Sri Lankan storage-facility study it was captured at low frequency and only in the wet zone, so it should be treated as a local field/peri-domestic target rather than a universally dominant indoor pest. Refs: [SL-L1].
 
-- **`Rattus rattus` (House Rat / Roof Rat):** The absolute dominant urban pest across Sri Lanka, occupying ceilings, rafters, and thatch.
+- **`Vandeleuria` (Long-tailed climbing mice, genus-level target):** The config uses the genus name rather than a species name. `Vandeleuria oleracea` is recorded from Sri Lanka and occupies forested and human-modified habitats including cropland; use genus-level labels carefully when evaluating model outputs. Refs: [SL-VO1].
 
-- **`Rattus norvegicus` (Brown Rat):** Primarily restricted to massive urban port cities like Colombo, occupying subterranean drains.
+### 2. Shrews (Soricidae — non-rodent visual/pathogen confounder)
 
-- **`Mus musculus` (House Mouse — Subspecies _castaneus_):** Pervasive indoor pest in both high-density urban settings and rural villages.
+- **`Suncus murinus` (Asian House Shrew / Asian Musk Shrew):** Not a rodent. It is important as a Sri Lankan visual confounder and reservoir-context species: in the cited storage-facility study, `Suncus` spp. were the second most common captured small mammals after `R. rattus`, and `S. murinus` was reported from all three sampled zones. Refs: [SL-L1], [SL-SM1].
 
-- **`Bandicota indica` (Greater Bandicoot Rat):** A massive, aggressive, cat-sized rodent that infests urban sewers, markets, and drainage ditches. High-risk vector for **Leptospirosis**.
+### References for this species section
 
-- **`Bandicota bengalensis` (Lesser Bandicoot Rat):** Smaller but vastly more destructive to infrastructure. They dig massive burrow networks right up against the foundations of rural kitchens, village homes, and rice mills.
+- [CE-RAT] Strand, T. M. et al. 2019. “Rat-borne diseases at the horizon. A systematic review on infectious agents carried by rats in Europe 1995–2016.” `https://pmc.ncbi.nlm.nih.gov/articles/PMC6394330/`
+- [CE-RN1] IUCN Global Invasive Species Database: `Rattus norvegicus`. `https://www.iucngisd.org/gisd/speciesname/Rattus+norvegicus`
+- [CE-RR1] IUCN Global Invasive Species Database: `Rattus rattus`. `https://www.iucngisd.org/gisd/pdf.php?sc=19`
+- [CE-MM1] CABI Compendium: `Mus musculus` (house mouse). `https://www.cabidigitallibrary.org/doi/10.1079/cabicompendium.35218`
+- [CE-MM2] IUCN Global Invasive Species Database: `Mus musculus`. `https://www.iucngisd.org/gisd/pdf.php?sc=97`
+- [CE-AS1] IUCN Red List: `Apodemus sylvaticus`. `https://www.iucnredlist.org/species/pdf/197270811`
+- [CE-AS2] EUNIS: `Apodemus sylvaticus`. `https://eunis.eea.europa.eu/species/11233`
+- [CE-AF1] EUNIS: `Apodemus flavicollis`. `https://eunis.eea.europa.eu/species/11231`
+- [CE-TICK] Mihalca, A. D. & Sándor, A. D. 2013. “The role of rodents in the ecology of Ixodes ricinus and associated pathogens in Central and Eastern Europe.” `https://www.frontiersin.org/journals/cellular-and-infection-microbiology/articles/10.3389/fcimb.2013.00056/full`
+- [CE-AA1] IUCN Red List PDF for `Apodemus agrarius`. `https://www.iucnredlist.org/species/pdf/111875852`
+- [CE-HANTA] Hönig, V. et al. 2022. “Orthohantaviruses in Reservoir and Atypical Hosts in the Czech Republic.” `https://journals.asm.org/doi/10.1128/spectrum.01306-22`
+- [CE-MA1] Jacob, J. et al. 2020. “Europe-wide outbreaks of common voles in 2019.” `https://link.springer.com/article/10.1007/s10340-020-01200-2`
+- [CE-MA2] Luque-Larena, J. J. et al. 2021. “Common Vole Populations and Tularemia Outbreaks in NW Spain.” `https://pmc.ncbi.nlm.nih.gov/articles/PMC8397442/`
+- [CE-MAG1] EUNIS: `Microtus agrestis`. `https://eunis.eea.europa.eu/species/11288`
+- [CE-MG1] ECDC factsheet on orthohantavirus infections. `https://www.ecdc.europa.eu/en/infectious-disease-topics/hantavirus-infection/factsheet-orthohantavirus-infections`
+- [CE-MG2] Reil, D. et al. 2017. “Puumala hantavirus infections in bank vole populations: host and virus dynamics in Central Europe.” `https://link.springer.com/article/10.1186/s12898-017-0118-z`
+- [CE-AV1] EUNIS: `Arvicola amphibius`. `https://eunis.eea.europa.eu/species/11822`
+- [CE-AV2] Animal Diversity Web: `Arvicola amphibius`. `https://animaldiversity.org/accounts/Arvicola_amphibius/`
+- [CE-CL1] CDC Emerging Infectious Diseases: “Shrews as Reservoir Hosts of Borna Disease Virus.” `https://wwwnc.cdc.gov/eid/article/12/4/05-1418_article`
+- [CE-CL2] Puorger, M. E. et al. 2014. “The Bicolored White-Toothed Shrew Crocidura leucodon is an Indigenous Host of Mammalian Borna Disease Virus.” `https://pmc.ncbi.nlm.nih.gov/articles/PMC3974811/`
+- [SL-L1] Cosson, J.-F. et al. 2022. “Ecology and distribution of Leptospira spp., reservoir hosts and environmental interaction in Sri Lanka.” `https://journals.plos.org/plosntds/article?id=10.1371/journal.pntd.0010757`
+- [SL-L2] Same article in PMC full text. `https://pmc.ncbi.nlm.nih.gov/articles/PMC9518908/`
+- [SL-BI1] National Red List: `Bandicota indica`. `https://www.nationalredlist.org/assessments/nrld-94573`
+- [SL-BB1] Mammal Diversity Database: `Bandicota bengalensis`. `https://www.mammaldiversity.org/taxon/1003501/`
+- [SL-BART] Mühldorfer, K. et al. 2021. “First Detection of Bartonella spp. in Small Mammals from Rice Storage and Processing Facilities in Myanmar and Sri Lanka.” `https://pmc.ncbi.nlm.nih.gov/articles/PMC8004705/`
+- [SL-VO1] National Red List: `Vandeleuria oleracea`. `https://www.nationalredlist.org/assessments/nrld-95011`
+- [SL-SM1] IUCN Global Invasive Species Database: `Suncus murinus`. `https://www.iucngisd.org/gisd/pdf.php?sc=162`
 
-- **`Millardia meltada` (Soft-furred Field Rat):** Tracks human harvesting schedules closely, moving en masse from grain fields into village crop stores and homes.
-
-- **`Mus booduga` (Little Indian Field Mouse):** Tiny mouse that floods rice paddies and frequently infiltrates mud-brick homes and rural floor boards.
-
-- **`Mus cervicolor` (Fawn-colored Mouse):** Co-habitates with humans in rural spaces, frequently nesting in thatched roofs.
-
-- **`Vandeleuria oleracea` (Asiatic Long-tailed Climbing Mouse):** A tiny, agile climber that transitions from banana and coconut plantations straight into the ceilings and roofs of rural houses.
-
-- **`Golunda ellioti` (Indian Bush Rat):** Lives in the dense, brushy borders and living fences surrounding semi-rural properties.
-
-
-### 2. Large Rodents & Arboreal Analogs (Sciuridae & Hystricidae)
-
-- **`Funambulus palmarum` (Three-striped Palm Squirrel):** Functionally behaves like a rodent pest in Sri Lanka, nesting inside roof tiles, raiding kitchens, and contaminating food prep areas.
-
-- **`Hystrix indica` (Indian Crested Porcupine):** A massive rodent that frequently invades rural home gardens and agricultural fringes, causing major agricultural conflict.
-
-
-### 3. Shrews (Soricidae — The Major Vector Analogs)
-
-- **`Suncus murinus` (Asian House Shrew):** Locally known as the _Hik-meeya_. It is large, grey, musky, makes sharp chattering noises, and lives 100% inside human dwellings. It is a dominant carrier of **Leptospirosis** and flea-borne typhus. Your model _must_ separate this from true rats.
-
-- **`Suncus montanus` (Sri Lanka Highland Shrew):** Takes over the synanthropic niche of _S. murinus_ in the colder, high-altitude human settlements of the central hill country.
 ### Models
 - [SpeciesNet](https://research.google/blog/where-wild-things-roam-identifying-wildlife-with-speciesnet/) Can give species classifications and goes up the taxonomic hierarchy if not sure
 - [Yolo](https://docs.ultralytics.com/models/yolo11#overview) 'The' object detection model. Retrainable, but we need data of the species in question
@@ -113,10 +111,10 @@ In Sri Lanka, open-air architecture and tropical agricultural cycles create a hi
 - we could perhaps try to become a member of wildlifeinsights to help the community with camera trap data?
 
 ### Questions
-- uncertainty -> inference = 'accumulating evidence for hypothesis and give out likelihood', not binary is/is not.
-	- model calibration
-	- inference over multiple images
-	- uncertainty quantification
+- uncertainty -> inference = 'accumulating evidence for hypothesis and give out likelihood', not binary is/is not. Reason: We are not guaranteed that nth image taken of an animal is a good one.
+	- model calibration?
+	- inference over multiple images?
+	- uncertainty quantification?
 - data
 	- would it be enough to build a image augmentation pipeline to create low-res thermal images from the data we can find?
 - integration of thermal images
@@ -134,35 +132,39 @@ In Sri Lanka, open-air architecture and tropical agricultural cycles create a hi
 	- how big will the surveillance system become?
 		- how many images do we expect to arrive on the server per hour
 	- can we allow for future GPU availability even if that means we are overtaxing the current deployment hardware now?
-	-
 
-## Software architecture
-
-- faunanet-record should be generalized to be not audio centric -> sensor channel agnostic
+## Software architecture (very loose, needs to be made more workable and scaled perhaps)
+- generally, it would make sense to coopt faunanet for this, b/c we have the infrastructure already for much of what we need.
+- faunanet-record should be generalized to be not audio centric -> sensor channel agnostic. We can use Hammad's repo here.
 - faunanet should be generalized to not be audio centric -> sensor channel agnostic
-- both should support multi-recorder systems: audio, video, perhaps lidar or whatever else
-- add a faunanet-comms repository which can be run to receive the data and send it. usual SOLID principles apply to make it work with all kinds of comms backends. Build on top of Hammad's comms repo
-- use docker-compose to run record + comms.
-- add faunanet-watch repo to have a dashboard for a fleet of raspberrys. Usual SOLID principles apply here
-- on the server side, do away with the faunanet REPL, but coopt the watcher system for inference. Test with YOLO.
-- run server with docker-compose: comms + watch+inference
+- both should support multi-recorder systems in the long run (not this project, but at the moment I don't see anything that would make this hard): audio, video, perhaps lidar or whatever else
+- add a faunanet-comms repository which can be run to receive the data and send it. usual SOLID principles apply to make it work with all kinds of comms backends. Build on top of Hammad's comms repo?
+- use docker-compose to run record + comms on the raspberry
+- add faunanet-manage repo to have a dashboard for a fleet of raspberrys. Usual SOLID principles apply here. perhaps base it on the frontend of heiplanet?
+- on the server side, do away with the faunanet REPL, but coopt the watcher system for inference. Test with YOLO. Have faunanet and dashboard run on the server
+- run server with docker-compose: comms + watch + inference
 - What should we simplify, remove or add?
 
-## Machine learning
+## Machine learning (very loose, needs to be made workable and scaled down perhaps)
 - Yolo26 is a good starting point for detection, cropping, pose estimation
 - SpeciesNet is more powerful for species detection and perhaps should be used there
-- We can use some of the available dataset for finetuning
-- We may be able to 'thermalize' images for finetuning/retraining
-- we could try, depending on time of day and quality:
-	- YOLO pose estimation from thermal as indicator of what we are looking at
-	- thermal as extra channels for YOLO inference and/or speciesnet
+- We can use some of the available dataset for finetuning or retraining
+- We may be able to 'thermalize' images for finetuning/retraining, but that is rather difficult
+- The thermal camera they use: https://www.amazon.de/-/en/Waveshare-Long-Wave-Interfaces-Communication-Development/dp/B0FW3XZY7N/
+    - has 80x62 pixels, which is extremely low and not good enough to make out details
+- we could try, depending on time of day and quality if we have time and resources for it:
+	- YOLO pose estimation from thermal as indicator of what we are looking at?
+	- thermal as extra channels for YOLO inference and/or speciesnet, to guide where the thing is we want.
 	- only rgb if good enough, whatever good enough means atm
-- We need a solid way of estimating which approach works best in the wild! This is the most difficult part of the whole thing, and outside our current reach
-- We need a solid estimation of inference uncertainty. How confident are we about having detected something. A single estimate is not enough. Read up on that:
-	- Bayesian approach: hypothesis -> update -> do until done
-	- for the speciesnet model, we could use the thermal images as preconditioner for the object detection system -> would avoid false blanks
-	- ... or should we do that in the preprocessing side? probably not, some finetuning would be necessary either way
-- If we need to do finetuning/training we need to calibrate properly, i.e., need some idea of how common certain species are in the area?
-- If we need to do finetuning/training we need to make sure we handle long-tailed class distributions properly, which we always have in ecology
+    - thermal will not help much I (HM) believe atm at night or for snakes. We would need an active infrared camera for that I think atm.
+- We need a solid way of estimating which approach works best in the wild! This is the most difficult part of the whole thing, and outside our current reach b/c the zoo setup is a suboptimal solution imho.
+    - we can only try to be as broad as possible wrt data?
+- We need a solid estimation of inference uncertainty. How confident are we about having detected something? A single estimate is not enough. Read up on that:
+   - Bayesian approach: take a set of species -> hypothesis -> update -> do until images used up
+- If we need to do finetuning/training we need to calibrate properly...
+- If we need to do finetuning/training we need to make sure we handle long-tailed class distributions properly, which we always have in ecology.
+
 ### Model evaluation
-preliminary tests show that generic models don't seem to be good enough out of the box.
+- preliminary tests show that speciesnet at least is not good enough for the data that we have. It appears to be great for larger species commonly seen in camera traps (nutria, muskrat, beaver), but it seems to struggle with the small animals we have here.
+- The data that they currently produce is a very particular set: top down perspective, one angle, only one.
+- I think atm that retraining a yolo model makes more sense.
