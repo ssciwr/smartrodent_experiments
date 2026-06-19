@@ -8,3 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+
+# data
+datasets
+runs
+
+# torch files
+*.pt
+
+# pi coding agent stuff
+.pi
