@@ -1,0 +1,47 @@
+{
+    "metadata_processor_info": {
+        "source_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/BioTrove/BioTrove",
+        "destination_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/biotrove-central-europe-large-filtered",
+        "categories": [
+            "Rattus norvegicus",
+            "Rattus rattus",
+            "Mus musculus",
+            "Myodes glareolus",
+            "Apodemus agrarius",
+            "Apodemus flavicollis",
+            "Apodemus sylvaticus",
+            "Microtus arvalis",
+            "Microtus agrestis",
+            "Arvicola amphibius",
+            "Crocidura leucodon"
+        ],
+        "category_type": "scientificName"
+    },
+    "filter_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/central-europe_parquet",
+    "img_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/biotrove-central-europe-large/imgs",
+    "metadata_filter_and_shuffle_info": {
+        "species_count_data": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/biotrove-central-europe-large-filtered/combined_sample_counts_per_species.csv",
+        "directory": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large",
+        "rare_threshold": 5,
+        "cap_threshold": 100000,
+        "part_size": 500,
+        "rare_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/rare_cases",
+        "cap_filtered_dir_train": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/tmp_cap_filtered",
+        "capped_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/overthecap_cases",
+        "merged_dir": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/processed_metadata",
+        "files_per_chunk": 100,
+        "random_seed": 42
+    },
+    "image_download_info": {
+        "processed_metadata_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/processed_metadata",
+        "output_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/img_txt",
+        "start_index": 0,
+        "end_index": null,
+        "concurrent_downloads": 100
+    },
+    "img_text_gen_info": {
+        "processed_metadata_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/processed_metadata",
+        "img_folder": "/mnt/dataLinux/Development/rodent_experiments/datasets/biotrove-central-europe-large/img_txt",
+        "generate_tar": true
+    }
+}
