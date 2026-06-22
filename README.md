@@ -54,7 +54,7 @@ The currently maintained region configs are:
 - `configs/config_srilanka.json`
   - `Rattus norvegicus`, `Rattus rattus`, `Suncus murinus`, `Bandicota indica`, `Bandicota bengalensis`, `Mus booduga`, `Vandeleuria`, `Mus musculus`
 
-The config paths are currently machine-local absolute paths. Before running the notebook on another machine, update `source_folder`, output folders, and intermediate directories in the selected config.
+You have to adjust the paths to your setup before using. You also have to download the biotrove dataset from huggingface first (see 'Data requirements').
 
 ### Model experiments
 
