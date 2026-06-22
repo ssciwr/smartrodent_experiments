@@ -12,15 +12,15 @@
 
 ## Dataset evaluation
 - **iRodent**: Species labels are stripped and only the class 'rodent' is retained, not useful for us unless for pose estimation, for which the dataset is intended. good thing: it's scrapped from iNaturalist, which we might be able to use, but I am not entirely sure how to get the species labels back.
-- **snakeclef21**: Have not read the paper yet, but many images retain copyright notices and the usage of flikr images is unclear wrt licensing. Provenance unclear
-- **nature published dataset**: is too specific for the area the images are from (qilian mountains, China)
-- **BioTrove**: can be filtered on various taxonomic levels depending on what is needed. Started out with "[Muridae](https://en.wikipedia.org/wiki/Muridae)" (mouse-likes), which can further be filtered based on need. Because it spans essentially the animal tree of life, we can filter the dataset for various animal species we need, and then apply OpenAI's clip model to filter out specific image types (like dead animals, animals caught in traps, bones/skulls or museum specimens) to build a dataset.
+- **snakeclef21**: Have not read the paper yet, but many images retain copyright notices and the usage of flikr images is unclear wrt licensing. Provenance unclear, hence not trusted.
+- **nature published dataset**: is too specific for the area the images are from (qilian mountains, China), no relevant species
+- **BioTrove**: can be filtered on various taxonomic levels depending on what is needed. Started out with "[Muridae](https://en.wikipedia.org/wiki/Muridae)" (mouse-likes), which can further be filtered based on need. Because it spans essentially the entire animal tree of life (to one degree or another), we can filter the dataset for various animal species we need, and then apply OpenAI's clip model to filter out specific image types (like dead animals, animals caught in traps, bones/skulls or museum specimens) to build a dataset.
 
 ## List of interesting species beyond just black rat and mouse
 
-The lists below are the current BioTrove target categories, taken from `configs/config_central_europe.json` and `configs/config_srilanka.json`. They are not intended to be complete regional faunas. Summaries below were rewritten to be conservative and tied to the references listed at the end of this section.
-
-The list is at the moment bigger than what we would minimally need, which programmatically doesn't really make much of a difference. Model training can get more complex, so we can scale that up as possible and necessary.
+- Species lists have been derived from Gemini/gpt-5.5 powered internet searches about health relevant rodent species in central europe and sri lanka, so take it with a grain of salt.
+- Species list is more general than needed for our current project, and are just there to check how we do with a mixed set of common and uncommon species, and what data is available.
+- For starters we can just use Rattus and Mus perhaps.
 
 ### Central Europe: configured BioTrove target list
 
@@ -44,7 +44,6 @@ The list is at the moment bigger than what we would minimally need, which progra
 
 - **`Myodes glareolus` (Bank Vole):** A woodland-associated vole that is important in European public-health context because it is the reservoir host of Puumala orthohantavirus, which can cause nephropathia epidemica in humans. Refs: [CE-MG1], [CE-MG2].
 
-- **`Arvicola amphibius` (European Water Vole):** Usually associated with banks of rivers, streams, ponds, wetlands, and other areas with vegetated water margins, but can also occur in gardens and fields. It is relevant for recognition because it is rat-sized and vole-like, but it should not be summarized simply as an urban rat analog. Refs: [CE-AV1], [CE-AV2].
 
 ### 2. Shrews (Soricidae — non-rodent visual/pathogen confounder)
 
@@ -66,7 +65,7 @@ The list is at the moment bigger than what we would minimally need, which progra
 
 - **`Mus booduga` (Little Indian Field Mouse):** A small South Asian mouse included in the Sri Lanka config. In the cited Sri Lankan storage-facility study it was captured at low frequency and only in the wet zone, so it should be treated as a local field/peri-domestic target rather than a universally dominant indoor pest. Refs: [SL-L1].
 
-- **`Vandeleuria` (Long-tailed climbing mice, genus-level target):** The config uses the genus name rather than a species name. `Vandeleuria oleracea` is recorded from Sri Lanka and occupies forested and human-modified habitats including cropland; use genus-level labels carefully when evaluating model outputs. Refs: [SL-VO1].
+- **`Vandeleuria` (Long-tailed climbing mice, genus-level target):** The config uses the genus name rather than a species name. `Vandeleuria oleracea` is recorded from Sri Lanka and occupies forested and human-modified habitats including cropland; use genus-level labels carefully when evaluating model outputs. Refs: [SL-VO1]. *This has been fixed and we use the 'Vandleuria oleracea' now.
 
 ### 2. Shrews (Soricidae — non-rodent visual/pathogen confounder)
 
@@ -111,26 +110,27 @@ The list is at the moment bigger than what we would minimally need, which progra
 - we could perhaps try to become a member of wildlifeinsights to help the community with camera trap data?
 
 ### Questions
-- uncertainty -> inference = 'accumulating evidence for hypothesis and give out likelihood', not binary is/is not. Reason: We are not guaranteed that nth image taken of an animal is a good one.
+- uncertainty -> inference = 'accumulating evidence for hypothesis and give out likelihood', not binary is/is not. Reason: We are not guaranteed that 1st/nth image taken of an animal is a good one.
 	- model calibration?
 	- inference over multiple images?
 	- uncertainty quantification?
 - data
 	- would it be enough to build a image augmentation pipeline to create low-res thermal images from the data we can find?
+        - No, probably not. We only can use the thermal images realistically as an indicator if something is there or not.
 - integration of thermal images
 	- sensor fusion for low light conditions even during the day?
-	- when to run thermal image?
-	- thermal image as prior for rgb object detection?
-	- what to do at night? can we use posture, movement from thermal image for identification? thermal image alone will not be enough b/c res. is too low
+	- thermal image as prior for rgb object detection? -> this is what we need probably.
+	- what to do at night? can we use posture, movement from thermal image for identification?
+        - thermal image alone will not be enough b/c resolution is too low
 - ecology
 	- onthogenetic niche shift in snake predators
+        - is that relevant in Sri Lanka?
 		- size of snake might play a role (young snakes eat different rodents)
-	- is there any value in extending our involvement towards this
-	- how does the risk model look like?
 	- what influence does prior knowledge of local ecology have on the detection?
 - inference and deployment
 	- how big will the surveillance system become?
-		- how many images do we expect to arrive on the server per hour
+        - we know now it's gonna 7x7 trap grid, but cameras is yet to be determined
+	- how many images do we expect to arrive on the server per hour
 	- can we allow for future GPU availability even if that means we are overtaxing the current deployment hardware now?
 
 ## Software architecture (very loose, needs to be made more workable and scaled perhaps)
@@ -146,25 +146,38 @@ The list is at the moment bigger than what we would minimally need, which progra
 - What should we simplify, remove or add?
 
 ## Machine learning (very loose, needs to be made workable and scaled down perhaps)
-- Yolo26 is a good starting point for detection, cropping, pose estimation
+- Yolo26 is a good starting point for detection/classification, cropping, pose estimation
 - SpeciesNet is more powerful for species detection and perhaps should be used there
+    - doesn't seem to perform well with the small animals we have
 - We can use some of the available dataset for finetuning or retraining
+    - Problem: Many images are too close-up
 - We may be able to 'thermalize' images for finetuning/retraining, but that is rather difficult
+    - no we are not, at least not in a way that would work well and could be used for training
 - The thermal camera they use: https://www.amazon.de/-/en/Waveshare-Long-Wave-Interfaces-Communication-Development/dp/B0FW3XZY7N/
     - has 80x62 pixels, which is extremely low and not good enough to make out details
 - we could try, depending on time of day and quality if we have time and resources for it:
 	- YOLO pose estimation from thermal as indicator of what we are looking at?
 	- thermal as extra channels for YOLO inference and/or speciesnet, to guide where the thing is we want.
+        - that was the original idea
 	- only rgb if good enough, whatever good enough means atm
     - thermal will not help much I (HM) believe atm at night or for snakes. We would need an active infrared camera for that I think atm.
-- We need a solid way of estimating which approach works best in the wild! This is the most difficult part of the whole thing, and outside our current reach b/c the zoo setup is a suboptimal solution imho.
+- We need a solid way of estimating which approach works best in the wild! This is the most difficult part of the whole thing, and outside our (SSC) current reach?
     - we can only try to be as broad as possible wrt data?
 - We need a solid estimation of inference uncertainty. How confident are we about having detected something? A single estimate is not enough. Read up on that:
    - Bayesian approach: take a set of species -> hypothesis -> update -> do until images used up
-- If we need to do finetuning/training we need to calibrate properly...
-- If we need to do finetuning/training we need to make sure we handle long-tailed class distributions properly, which we always have in ecology.
+- Model calibration?
+- If we need to do finetuning/training we need to make sure we handle long-tailed class distributions properly, which we always have in ecology, unless we are focusing only on the dominant species for this stage.
+- We need a 'not what we are after' class.
+    - 2-stage pipeline:
+        - check if interesting species with confidence level
+            - confident: discard
+            - not confident enough -> expert checks
+        - if confident it's what we are after:
+            - classify what it is
 
 ### Model evaluation
-- preliminary tests show that speciesnet at least is not good enough for the data that we have. It appears to be great for larger species commonly seen in camera traps (nutria, muskrat, beaver), but it seems to struggle with the small animals we have here.
-- The data that they currently produce is a very particular set: top down perspective, one angle, only one.
+- preliminary tests show that speciesnet at least is not good enough for the biotrove data that we have. It appears to be great for larger species commonly seen in camera traps (nutria, muskrat, beaver), but it seems to struggle with the small animals we have here.
+- The data that they currently produce is a very particular set: top down perspective, one angle, only one species.
 - I think atm that retraining a yolo model makes more sense.
+- We can check out Biotrove-CLIP and YOLOE26 as vision language models for detecting species. For species-detection, some finetuning will be needed.
+    - Main problem: Just like with microscopse, it might turn out that transfering images from one setup to another doesn't cut it and we will have to wait until data is produced to build a proper detection model. Until then, we would probably be limited to 'rodent or not' or perhaps the Genus level (Rattus, Mus) at best.
