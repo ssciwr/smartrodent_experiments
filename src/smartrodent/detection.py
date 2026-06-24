@@ -36,6 +36,7 @@ def main(
     batchsize: int,
     project: Path | str = "runs/yolo26",
     crop: bool = False,
+    conf=0.1,
 ):
     """Run YOLO on one image path or a batch of image paths.
 
@@ -59,7 +60,7 @@ def main(
             project=project,
             name="boxed",
             exist_ok=True,
-            conf=0.01,
+            conf=conf,
             save_crop=crop,
         )
 
@@ -72,7 +73,7 @@ def main(
         project=project,
         name="boxed",
         exist_ok=True,
-        conf=0.1,
+        conf=conf,
         save_crop=crop,
     )
 
@@ -159,36 +160,39 @@ if __name__ == "__main__":
     # Example experiment block. The functions above can be imported by notebooks or
     # other scripts, while this block lets the file be run directly for ad-hoc tests.
     # IMAGE_DIR = Path(
-    # "/mnt/dataLinux/machinelearning_data/smartrodent/irodent/rodent/images/"
+    # smartrodent/irodent/rodent/images/"
     # )
 
     IMAGE_DIR = Path(
-        "/home/hmack/Development/rodent_experiments/datasets/biotrove-sri-lanka/imgs/Rattus rattus"
-    )
-    out = Path("./runs/yolo/sri-lanka/Rattus rattus")
-    imgs = sorted(IMAGE_DIR.iterdir())
-    out.mkdir(parents=True, exist_ok=True)
-
-    # YOLO writes boxed preview images under the configured project/name directory.
-    for img in imgs:
-        res = main(img, 1, crop=True)
-
-    # SpeciesNet writes JSON first, then this script renders boxed preview images.
-    out = Path("./runs/speciesnet/sri-lanka/Rattus rattus")
-
-    speciesnet_results = run_speciesnet(
-        imgs,
-        output_json=out / "predictions.json",
-        preview_dir=out / "boxed",
-        batch_size=16,
-        country="LKA",
-        model_name="kaggle:google/speciesnet/pyTorch/v4.0.3b/1",
-        crop_dir=out / "crops",
+        "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/filtered"
     )
 
-    for item in speciesnet_results["predictions"]:
-        print(
-            f"{Path(item['filepath']).name}: "
-            f"{short_speciesnet_label(item.get('prediction'))} "
-            f"({item.get('prediction_score', 0):.2f})"
-        )
+    for imgpath in IMAGE_DIR.iterdir():
+        name = imgpath.name
+        out = Path(f"./runs/yolo/central-europe/{name}")
+        imgs = sorted(imgpath.iterdir())
+        out.mkdir(parents=True, exist_ok=True)
+
+        # YOLO writes boxed preview images under the configured project/name directory.
+        for img in imgs:
+            res = main(img, 1, crop=True)
+
+    # # SpeciesNet writes JSON first, then this script renders boxed preview images.
+    # out = Path("./runs/speciesnet/sri-lanka/Rattus rattus")
+
+    # speciesnet_results = run_speciesnet(
+    #     imgs,
+    #     output_json=out / "predictions.json",
+    #     preview_dir=out / "boxed",
+    #     batch_size=16,
+    #     country="LKA",
+    #     model_name="kaggle:google/speciesnet/pyTorch/v4.0.3b/1",
+    #     crop_dir=out / "crops",
+    # )
+
+    # for item in speciesnet_results["predictions"]:
+    #     print(
+    #         f"{Path(item['filepath']).name}: "
+    #         f"{short_speciesnet_label(item.get('prediction'))} "
+    #         f"({item.get('prediction_score', 0):.2f})"
+    #     )
