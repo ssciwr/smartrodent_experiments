@@ -32,33 +32,33 @@ Question here: The angles and distance at which the animals are photographed mig
 	- uncertainty quantification?
 - data
 	- would it be enough to build a image augmentation pipeline to create low-res thermal images from the data we can find?
-        - No, probably not. We only can use the thermal images realistically as an indicator if something is there or not.
+        - No, probably not. We only can use the thermal images realistically as an indicator if something is there or not, and turning RGB into *realistic* thermals is not productive b/c distribution shifts from real thermals are impossible to detect but relevant.
 - integration of thermal images
-	- sensor fusion for low light conditions even during the day?
+	- sensor fusion for low light conditions even during the day? (shaded area)
 	- thermal image as prior for rgb object detection? -> this is what we need probably.
 	- what to do at night? can we use posture, movement from thermal image for identification?
         - thermal image alone will not be enough b/c resolution is too low
 - ecology
 	- onthogenetic niche shift in snake predators
-        - is that relevant in Sri Lanka?
 		- size of snake might play a role (young snakes eat different rodents)
+        - is that relevant in Sri Lanka?
 	- what influence does prior knowledge of local ecology have on the detection?
 - inference and deployment
 	- how big will the surveillance system become?
-        - we know now it's gonna 7x7 trap grid, but cameras is yet to be determined
+        - we know now it's gonna 7x7 trap grid, but cameras is yet to be determined?
 	- how many images do we expect to arrive on the server per hour
-	- can we allow for future GPU availability even if that means we are overtaxing the current deployment hardware now?
+	- can we allow for future GPU availability even if that means we are near-overtaxing the current deployment hardware now?
 
 ## Software architecture ideas (very loose, needs to be made more workable and scaled perhaps)
-- generally, it would make sense to coopt faunanet for this, b/c we have the infrastructure already for much of what we need.
+- generally, it would make sense to co-opt faunanet for this, b/c we have the infrastructure already for much of what we need.
 - faunanet should be generalized to not be audio centric -> sensor channel agnostic
-- make small faunanet-cam repo that is based on Hammad's work and can be used with faunanet in a docker setup
-- both should support multi-recorder systems in the long run (not this project, but at the moment I don't see anything that would make this hard): audio, video, perhaps lidar or whatever else
-- add a faunanet-comms repository which can be run to receive the data and send it. usual SOLID principles apply to make it work with all kinds of comms backends. Build on top of Hammad's comms repo?
+- make small faunanet-cam repo that is based on Hammad's work + faunanet-record and can be used with faunanet in a docker setup
+- iff faunanet: add a faunanet-comms repository which can be run to receive the data and send it. usual SOLID principles apply to make it work with all kinds of comms backends. Build on top of Hammad's comms repo?
 - use docker-compose to run record + comms on the raspberry
-- add faunanet-manage repo to have a dashboard for a fleet of raspberrys. Usual SOLID principles apply here. perhaps base it on the frontend of heiplanet?
-- on the server side, do away with the faunanet REPL, but coopt the watcher system for inference. Test with YOLO. Have faunanet and dashboard run on the server
+- dashboard -> James
+- on the server side, do away with the faunanet REPL I think, but coopt the watcher system for inference. Test with YOLO. Have faunanet and dashboard run on the server
 - run server with docker-compose: comms + watch + inference
+- run devices with docker-compose: cams+comms+(record if bioacoustics is needed)
 - What should we simplify, remove or add?
 
 ## Machine learning ideas (very loose, needs to be made workable and scaled down perhaps)
@@ -66,7 +66,7 @@ Question here: The angles and distance at which the animals are photographed mig
 - SpeciesNet is more powerful for species detection and perhaps should be used there
     - doesn't seem to perform well with the small animals we have
 - We can use some of the available dataset for finetuning or retraining
-    - Problem: Many images are too close-up
+    - Problem: Many images are too close-up perhaps? we need to try
 - We may be able to 'thermalize' images for finetuning/retraining, but that is rather difficult
     - no we are not, at least not in a way that would work well and could be used for training
 - The thermal camera they use: https://www.amazon.de/-/en/Waveshare-Long-Wave-Interfaces-Communication-Development/dp/B0FW3XZY7N/
@@ -74,11 +74,11 @@ Question here: The angles and distance at which the animals are photographed mig
 - we could try, depending on time of day and quality if we have time and resources for it:
 	- YOLO pose estimation from thermal as indicator of what we are looking at?
 	- thermal as extra channels for YOLO inference and/or speciesnet, to guide where the thing is we want.
-        - that was the original idea
+        - that was the original idea and what we should go for first
 	- only rgb if good enough, whatever good enough means atm
-    - thermal will not help much I (HM) believe atm at night or for snakes. We would need an active infrared camera for that I think atm.
+    - thermal will not help much I (HM) believe atm at night or for snakes. We would need an active infrared camera for that I think atm., at least that is the most low-risk path
 - We need a solid estimation of inference uncertainty. How confident are we about having detected something? A single estimate is not enough. Read up on that:
-   - take a set of species -> hypothesis -> update -> do until images used up
+   - take a set of species -> hypothesis -> update ->...
 - Model calibration?
 - If we need to do finetuning/training we need to make sure we handle long-tailed class distributions properly, which we always have in ecology, unless we are focusing only on the dominant species for this stage.
 - We need a 'not what we are after' class.
