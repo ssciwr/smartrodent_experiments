@@ -1,5 +1,7 @@
-from ultralytics import YOLOE
+import json
 from pathlib import Path
+
+from ultralytics import YOLOE
 
 
 def detect(
@@ -60,6 +62,26 @@ def detect(
     )
 
 
+def write_detections_json(results, json_path: Path | str) -> None:
+    """Append detection records from a predict() result list to a JSON file.
+
+    Existing entries are preserved so the file accumulates across per-image calls.
+    Each entry is keyed by filename and contains a list of {class, conf} dicts.
+    """
+    json_path = Path(json_path)
+    records = json.loads(json_path.read_text()) if json_path.exists() else {}
+    for r in results:
+        boxes = r.boxes
+        if not boxes or len(boxes) == 0:
+            records[Path(r.path).name] = []
+        else:
+            records[Path(r.path).name] = [
+                {"class": r.names[int(cls)], "conf": round(float(conf), 3)}
+                for cls, conf in sorted(zip(boxes.cls, boxes.conf), key=lambda x: -x[1])
+            ]
+    json_path.write_text(json.dumps(records, indent=2))
+
+
 if __name__ == "__main__":
     IMAGE_DIR = Path(
         "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/filtered"
@@ -71,6 +93,7 @@ if __name__ == "__main__":
         imgs = sorted(imgpath.iterdir())
         out.mkdir(parents=True, exist_ok=True)
 
+        results = []
         for img in imgs:
             res = detect(
                 img,
@@ -83,3 +106,7 @@ if __name__ == "__main__":
                 ],
                 conf=0.25,
             )
+            results.append(res)
+
+        for res in results:
+            write_detections_json(res, out / "detections.json")
