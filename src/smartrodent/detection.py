@@ -12,7 +12,10 @@ from typing import Iterable
 
 from speciesnet import DEFAULT_MODEL
 from speciesnet import SpeciesNet
-from ultralytics import YOLO
+from ultralytics import YOLO, YOLOE
+from speciesnet.detector import SpeciesNetDetector
+import string
+import open_clip
 
 try:
     # Package import path, used when running with ``python -m smartrodent.main`` or
@@ -31,10 +34,11 @@ except ImportError:  # pragma: no cover - convenience fallback for direct script
     from utils import short_speciesnet_label
 
 
-def main(
+def detect(
     path: str | Path | list[Path | str],
     batchsize: int,
     project: Path | str = "runs/yolo26",
+    name=" boxed",
     crop: bool = False,
     conf=0.1,
 ):
@@ -58,7 +62,7 @@ def main(
             source=str(Path(path).resolve()),
             save=True,
             project=project,
-            name="boxed",
+            name=name,
             exist_ok=True,
             conf=conf,
             save_crop=crop,
@@ -71,7 +75,7 @@ def main(
         batch=batchsize,
         save=True,
         project=project,
-        name="boxed",
+        name=name,
         exist_ok=True,
         conf=conf,
         save_crop=crop,
@@ -81,14 +85,15 @@ def main(
 def run_speciesnet(
     path: str | Path | Iterable[str | Path],
     *,
-    output_json: str | Path = "runs/speciesnet/predictions.json",
-    preview_dir: str | Path | None = "runs/speciesnet/boxed",
-    crop_dir: str | Path | None = "runs/speciesnet/crops",
+    output_json: str | Path = "runs/segment/speciesnet/predictions.json",
+    preview_dir: str | Path | None = "runs/segment/speciesnet/boxed",
+    crop_dir: str | Path | None = "runs/segment/speciesnet/crops",
     batch_size: int = 16,
     country: str | None = None,
     admin1_region: str | None = None,
     model_name: str = DEFAULT_MODEL,
     resume: bool = False,
+    conf: float = 0.1,
 ) -> dict:
     """Run the SpeciesNet ensemble and optionally save boxed preview images.
 
@@ -107,7 +112,7 @@ def run_speciesnet(
         model_name: SpeciesNet model identifier. Defaults to the package default.
         resume: Reuse complete predictions already present in output_json. Leave
             this disabled when changing country/geofence settings.
-
+        conf: confidence value for detections
     Returns:
         The SpeciesNet predictions dictionary loaded from or returned by SpeciesNet.
     """
@@ -125,6 +130,9 @@ def run_speciesnet(
     # work by reusing previous JSON that was generated with different settings.
     if output_json.exists() and not resume:
         output_json.unlink()
+
+    # set detection threshold
+    SpeciesNetDetector.DETECTION_THRESHOLD = conf
 
     # Enable all SpeciesNet components: detector, classifier, and ensemble. Geofence
     # is useful for this dataset because location can reduce implausible species.
@@ -156,6 +164,118 @@ def run_speciesnet(
     return predictions
 
 
+def detect_biotrove_clip(
+    path: str | Path | list[Path | str],
+    batchsize: int,
+    project: Path | str = "runs/biotrove-clip",
+    crop: bool = False,
+    conf=0.1,
+):
+    model, preprocess_train, preprocess_val = open_clip.create_model_and_transforms(
+        "hf-hub:BGLab/BioTrove-CLIP"
+    )
+    tokenizer = open_clip.get_tokenizer("hf-hub:BGLab/BioTrove-CLIP")
+
+    pass
+
+
+def detect_YOLOE(
+    path: str | Path | list[Path | str],
+    batchsize: int,
+    project: Path | str = "runs/yolo26",
+    crop: bool = False,
+    conf=0.1,
+    task: str = "detect",
+    classes: list[str] | None = ["rodent", "non-rodent"],
+):
+    """Run YOLO on one image path or a batch of image paths.
+
+    Ultralytics handles saving boxed preview images when ``save=True`` is passed to
+    ``model.predict``. Single-image and batch paths are split here only so the batch
+    case can use a larger ``batch`` value.
+    """
+    # Load the local COCO-pretrained YOLO model. Resolve the weights relative to this
+    # file so imports from outside the package still find the bundled model file.
+    model = YOLOE(
+        "yoloe-26m-seg.pt",
+        task=task,
+    )
+
+    if classes:
+        model.set_classes(
+            classes,
+            model.get_text_pe(classes),
+        )
+
+    # Optional training call kept here as a reminder/example for later experiments.
+    # results = model.train(data="coco8.yaml", epochs=100, imgsz=640)
+
+    if isinstance(path, str | Path):
+        # A single image does not need an explicit batch size. Resolve the path so
+        # Ultralytics receives an absolute filename regardless of the caller's cwd.
+        return model.predict(
+            source=str(Path(path).resolve()),
+            save=True,
+            project=project,
+            name="boxed",
+            exist_ok=True,
+            conf=conf,
+            save_crop=crop,
+        )
+
+    # For a list of images, pass the caller's batch size through to Ultralytics so
+    # larger datasets can be processed more efficiently.
+    return model.predict(
+        source=path,
+        batch=batchsize,
+        save=True,
+        project=project,
+        name="boxed",
+        exist_ok=True,
+        conf=conf,
+        save_crop=crop,
+    )
+
+
+def write_detections_json(results, json_path: Path | str) -> None:
+    """Append detection records to a JSON file from any supported model.
+
+    Accepts an Ultralytics Results list (YOLO26 or YOLOE) or a SpeciesNet predictions
+    dict. Existing entries are preserved so the file accumulates across per-image calls.
+    Each entry is keyed by filename and contains a list of {class, conf} dicts sorted
+    by confidence descending.
+    """
+    json_path = Path(json_path)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    records = json.loads(json_path.read_text()) if json_path.exists() else {}
+
+    if isinstance(results, dict) and "predictions" in results:
+        # SpeciesNet: {"predictions": [{filepath, prediction, prediction_score, ...}]}
+        for item in results["predictions"]:
+            filename = Path(item["filepath"]).name
+            label = short_speciesnet_label(item.get("prediction"))
+            score = item.get("prediction_score")
+            if label == "unknown" or score is None:
+                records[filename] = []
+            else:
+                records[filename] = [{"class": label, "conf": round(float(score), 3)}]
+    else:
+        # Ultralytics: list of Results objects (YOLO26 or YOLOE)
+        for r in results:
+            boxes = r.boxes
+            if not boxes or len(boxes) == 0:
+                records[Path(r.path).name] = []
+            else:
+                records[Path(r.path).name] = [
+                    {"class": r.names[int(cls)], "conf": round(float(conf), 3)}
+                    for cls, conf in sorted(
+                        zip(boxes.cls, boxes.conf), key=lambda x: -x[1]
+                    )
+                ]
+
+    json_path.write_text(json.dumps(records, indent=2))
+
+
 if __name__ == "__main__":
     # Example experiment block. The functions above can be imported by notebooks or
     # other scripts, while this block lets the file be run directly for ad-hoc tests.
@@ -163,36 +283,83 @@ if __name__ == "__main__":
     # smartrodent/irodent/rodent/images/"
     # )
 
-    IMAGE_DIR = Path(
-        "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/filtered"
-    )
+    for conf in [0.01, 0.05, 0.1, 0.2]:
+        confstr = str(conf).translate(str.maketrans("", "", string.punctuation))
+        IMAGE_DIR = Path(
+            "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/filtered"
+        )
 
-    for imgpath in IMAGE_DIR.iterdir():
-        name = imgpath.name
-        out = Path(f"./runs/yolo/central-europe/{name}")
-        imgs = sorted(imgpath.iterdir())
-        out.mkdir(parents=True, exist_ok=True)
+        for imgpath in IMAGE_DIR.iterdir():
+            name = imgpath.name
+            out = Path(
+                f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/yolo26/central-europe/{name}"
+            )
+            imgs = sorted(imgpath.iterdir())
+            out.mkdir(parents=True, exist_ok=True)
 
-        # YOLO writes boxed preview images under the configured project/name directory.
-        for img in imgs:
-            res = main(img, 1, crop=True)
+            results = []
+            for img in imgs:
+                res = detect(
+                    img,
+                    1,
+                    crop=True,
+                    project=out,
+                    conf=conf,
+                )
+                results.append(res)
 
-    # # SpeciesNet writes JSON first, then this script renders boxed preview images.
-    # out = Path("./runs/speciesnet/sri-lanka/Rattus rattus")
+            for res in results:
+                write_detections_json(res, out / "detections.json")
 
-    # speciesnet_results = run_speciesnet(
-    #     imgs,
-    #     output_json=out / "predictions.json",
-    #     preview_dir=out / "boxed",
-    #     batch_size=16,
-    #     country="LKA",
-    #     model_name="kaggle:google/speciesnet/pyTorch/v4.0.3b/1",
-    #     crop_dir=out / "crops",
-    # )
+        for imgpath in IMAGE_DIR.iterdir():
+            name = imgpath.name
+            out = Path(
+                f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/yoloe/central-europe/{name}"
+            )
+            imgs = sorted(imgpath.iterdir())
+            out.mkdir(parents=True, exist_ok=True)
 
-    # for item in speciesnet_results["predictions"]:
-    #     print(
-    #         f"{Path(item['filepath']).name}: "
-    #         f"{short_speciesnet_label(item.get('prediction'))} "
-    #         f"({item.get('prediction_score', 0):.2f})"
-    #     )
+            results = []
+            for img in imgs:
+                res = detect_YOLOE(
+                    img,
+                    1,
+                    crop=True,
+                    project=out,
+                    classes=[
+                        "an animal like a mouse, rat, cat, fox, or hamster",
+                    ],
+                    conf=conf,
+                )
+                results.append(res)
+
+            for res in results:
+                write_detections_json(res, out / "detections.json")
+
+        for imgpath in IMAGE_DIR.iterdir():
+            name = imgpath.name
+            out = Path(
+                f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/speciesnet/central-europe/{name}"
+            )
+            imgs = sorted(imgpath.iterdir())
+            out.mkdir(parents=True, exist_ok=True)
+
+            speciesnet_results = run_speciesnet(
+                imgs,
+                output_json=out / "predictions.json",
+                preview_dir=out / "boxed",
+                batch_size=16,
+                country="DEU",
+                model_name="kaggle:google/speciesnet/pyTorch/v4.0.3b/1",
+                crop_dir=out / "crops",
+                conf=conf,
+            )
+
+            write_detections_json(speciesnet_results, out / "detections.json")
+
+            for item in speciesnet_results["predictions"]:
+                print(
+                    f"{Path(item['filepath']).name}: "
+                    f"{short_speciesnet_label(item.get('prediction'))} "
+                    f"({item.get('prediction_score', 0):.2f})"
+                )
