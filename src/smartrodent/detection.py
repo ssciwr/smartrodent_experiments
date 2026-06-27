@@ -16,6 +16,8 @@ from ultralytics import YOLO, YOLOE
 from speciesnet.detector import SpeciesNetDetector
 import string
 import open_clip
+from PIL import Image
+import torch
 
 try:
     # Package import path, used when running with ``python -m smartrodent.main`` or
@@ -131,12 +133,10 @@ def run_speciesnet(
     if output_json.exists() and not resume:
         output_json.unlink()
 
-    # set detection threshold
-    SpeciesNetDetector.DETECTION_THRESHOLD = conf
-
     # Enable all SpeciesNet components: detector, classifier, and ensemble. Geofence
     # is useful for this dataset because location can reduce implausible species.
     model = SpeciesNet(model_name, geofence=True, components="all")
+    model.detector.DETECTION_THRESHOLD = conf
     predictions = model.predict(
         filepaths=image_paths(path),
         country=country,
@@ -170,13 +170,102 @@ def detect_biotrove_clip(
     project: Path | str = "runs/biotrove-clip",
     crop: bool = False,
     conf=0.1,
-):
-    model, preprocess_train, preprocess_val = open_clip.create_model_and_transforms(
-        "hf-hub:BGLab/BioTrove-CLIP"
-    )
-    tokenizer = open_clip.get_tokenizer("hf-hub:BGLab/BioTrove-CLIP")
+    model_checkpoint: str = "biotroveclip-vit-b-16-from-openai-epoch-40.pt",
+    classes: list[str] | None = None,
+    prompt_template: str = "This is a photo of {}",
+    model_dir: str | Path | None = None,
+) -> dict:
+    """Run BioTrove-CLIP as a zero-shot whole-image classifier.
 
-    pass
+    This mirrors ``ImageFilter`` in ``dataprocessing.py``: each image is loaded with
+    Pillow, converted to RGB, passed through the OpenCLIP preprocessing transform,
+    and compared against tokenized text prompts. BioTrove-CLIP does not emit boxes,
+    so the return value uses the same dict shape that ``write_detections_json``
+    already handles for SpeciesNet: ``{"predictions": [...]}`` with
+    ``filepath``, ``prediction`` and ``prediction_score`` fields.
+    """
+    if batchsize <= 0:
+        raise ValueError(f"batchsize must be positive, got {batchsize}")
+    if crop:
+        raise ValueError("BioTrove-CLIP classifies whole images and cannot save crops.")
+
+    classes = classes or ["rodent", "non-rodent"]
+    paths = image_paths(path)
+
+    project = Path(project)
+    project.mkdir(parents=True, exist_ok=True)
+
+    model_dir = Path("../../models/BioTrove-CLIP").resolve()
+    checkpoint_path = Path(model_checkpoint)
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = model_dir / checkpoint_path
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"BioTrove-CLIP checkpoint not found: {checkpoint_path}"
+        )
+    model_dir = f"local-dir:{str(model_dir)}"
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        str(model_dir),
+        pretrained=str(checkpoint_path),
+        device=device,
+    )
+    tokenizer = open_clip.get_tokenizer(str(model_dir))
+    model.eval()
+
+    text_tokens = tokenizer([prompt_template.format(label) for label in classes]).to(
+        device
+    )
+    with torch.no_grad():
+        text_features = model.encode_text(text_tokens).float()
+        text_features /= text_features.norm(dim=-1, keepdim=True)
+
+    predictions = []
+    # range(..., batchsize) plus slicing includes the last incomplete batch.
+    for start in range(0, len(paths), batchsize):
+        batch_paths = paths[start : start + batchsize]
+        batch_images = []
+        valid_paths = []
+
+        for filename in batch_paths:
+            try:
+                image = Image.open(filename).convert("RGB")
+                batch_images.append(preprocess(image))
+                valid_paths.append(filename)
+            except Exception as exc:
+                print(f"Skipping unreadable image {filename}: {exc}")
+
+        if not batch_images:
+            continue
+
+        image_input = torch.stack(batch_images).to(device)
+        with torch.no_grad():
+            image_features = model.encode_image(image_input).float()
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            probs = (100.0 * image_features @ text_features.T).softmax(
+                dim=-1
+            )  # what other metrics could there be here? not so sure...
+
+        for filename, scores in zip(valid_paths, probs.cpu(), strict=False):
+            best_idx = int(scores.argmax())
+            best_score = float(scores[best_idx])
+            prediction = classes[best_idx] if best_score >= conf else None
+            predictions.append(
+                {
+                    "filepath": filename,
+                    "prediction": prediction,
+                    "prediction_score": best_score if prediction is not None else None,
+                    "classifications": {
+                        "classes": classes,
+                        "scores": [float(score) for score in scores],
+                    },
+                }
+            )
+
+    result = {"predictions": predictions}
+    (project / "predictions.json").write_text(json.dumps(result, indent=2))
+    return result
 
 
 def detect_YOLOE(
@@ -282,59 +371,86 @@ if __name__ == "__main__":
     # IMAGE_DIR = Path(
     # smartrodent/irodent/rodent/images/"
     # )
+    IMAGE_DIR = Path(
+        "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/filtered"
+    )
 
     for conf in [0.01, 0.05, 0.1, 0.2]:
         confstr = str(conf).translate(str.maketrans("", "", string.punctuation))
-        IMAGE_DIR = Path(
-            "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/filtered"
-        )
 
-        for imgpath in IMAGE_DIR.iterdir():
-            name = imgpath.name
-            out = Path(
-                f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/yolo26/central-europe/{name}"
-            )
-            imgs = sorted(imgpath.iterdir())
-            out.mkdir(parents=True, exist_ok=True)
+        # for imgpath in IMAGE_DIR.iterdir():
+        #     name = imgpath.name
+        #     out = Path(
+        #         f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/yolo26/central-europe/{name}"
+        #     )
+        #     imgs = sorted(imgpath.iterdir())
+        #     out.mkdir(parents=True, exist_ok=True)
 
-            results = []
-            for img in imgs:
-                res = detect(
-                    img,
-                    1,
-                    crop=True,
-                    project=out,
-                    conf=conf,
-                )
-                results.append(res)
+        #     results = []
+        #     for img in imgs:
+        #         res = detect(
+        #             img,
+        #             1,
+        #             crop=True,
+        #             project=out,
+        #             conf=conf,
+        #         )
+        #         results.append(res)
 
-            for res in results:
-                write_detections_json(res, out / "detections.json")
+        #     for res in results:
+        #         write_detections_json(res, out / "detections.json")
 
-        for imgpath in IMAGE_DIR.iterdir():
-            name = imgpath.name
-            out = Path(
-                f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/yoloe/central-europe/{name}"
-            )
-            imgs = sorted(imgpath.iterdir())
-            out.mkdir(parents=True, exist_ok=True)
+        # for imgpath in IMAGE_DIR.iterdir():
+        #     name = imgpath.name
+        #     out = Path(
+        #         f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/yoloe_animalornot/central-europe/{name}"
+        #     )
+        #     imgs = sorted(imgpath.iterdir())
+        #     out.mkdir(parents=True, exist_ok=True)
 
-            results = []
-            for img in imgs:
-                res = detect_YOLOE(
-                    img,
-                    1,
-                    crop=True,
-                    project=out,
-                    classes=[
-                        "an animal like a mouse, rat, cat, fox, or hamster",
-                    ],
-                    conf=conf,
-                )
-                results.append(res)
+        #     results = []
+        #     for img in imgs:
+        #         res = detect_YOLOE(
+        #             img,
+        #             1,
+        #             crop=True,
+        #             project=out,
+        #             classes=[
+        #                 "This is a photo of an animal like a mouse, rat, cat, fox, or hamster",
+        #                 "This is not a photo an animal at all, but a photo of something else entirely like trash, a car, a plastic box or a piece of wood or a leaf",
+        #             ],
+        #             conf=conf,
+        #         )
+        #         results.append(res)
 
-            for res in results:
-                write_detections_json(res, out / "detections.json")
+        #     for res in results:
+        #         write_detections_json(res, out / "detections.json")
+
+        # for imgpath in IMAGE_DIR.iterdir():
+        #     name = imgpath.name
+        #     out = Path(
+        #         f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/yoloe_rodentornot/central-europe/{name}"
+        #     )
+        #     imgs = sorted(imgpath.iterdir())
+        #     out.mkdir(parents=True, exist_ok=True)
+
+        #     results = []
+        #     for img in imgs:
+        #         res = detect_YOLOE(
+        #             img,
+        #             1,
+        #             crop=True,
+        #             project=out,
+        #             classes=[
+        #                 "This is a photo of a rodent like a rat, mouse or vole, or similar small mammal like a shrew",
+        #                 "This is a photo of not a rodent at all, but some other animal like a snake, bird or human ",
+        #             ],
+        #             conf=conf,
+        #         )
+        #         results.append(res)
+
+        #     for res in results:
+        #         write_detections_json(res, out / "detections.json")
 
         for imgpath in IMAGE_DIR.iterdir():
             name = imgpath.name
@@ -363,3 +479,155 @@ if __name__ == "__main__":
                     f"{short_speciesnet_label(item.get('prediction'))} "
                     f"({item.get('prediction_score', 0):.2f})"
                 )
+
+        # for imgpath in IMAGE_DIR.iterdir():
+        #     name = imgpath.name
+        #     out = Path(
+        #         f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/biotrove-clip_rodent_or_not/central-europe/{name}"
+        #     )
+        #     imgs = sorted(imgpath.iterdir())
+        #     out.mkdir(parents=True, exist_ok=True)
+
+        #     biotrove_clip_results = detect_biotrove_clip(
+        #         imgs,
+        #         1,
+        #         "runs/biotrove-clip",
+        #         crop=False,
+        #         conf=conf,
+        #         model_checkpoint="biotroveclip-vit-b-16-from-openai-epoch-40.pt",
+        #         classes=[
+        #             "a rodent like a rat, mouse or vole, or similar small mammal like a shrew",
+        #             "not a rodent at all, but some other animal like a snake, bird or human ",
+        #         ],
+        #         prompt_template="This is a photo of {}",
+        #     )
+
+        #     write_detections_json(biotrove_clip_results, out / "detections.json")
+
+        #     for item in biotrove_clip_results["predictions"]:
+        #         if item is None:
+        #             continue
+        #         print(
+        #             f"{Path(item['filepath']).name}: "
+        #             f"{short_speciesnet_label(item.get('prediction'))} "
+        #             f"({item.get('prediction_score', 0):.2f})"
+        #         )
+
+        # for imgpath in IMAGE_DIR.iterdir():
+        #     name = imgpath.name
+        #     out = Path(
+        #         f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/biotrove-clip_animalornot/central-europe/{name}"
+        #     )
+        #     imgs = sorted(imgpath.iterdir())
+        #     out.mkdir(parents=True, exist_ok=True)
+
+        #     biotrove_clip_results = detect_biotrove_clip(
+        #         imgs,
+        #         1,
+        #         "runs/biotrove-clip",
+        #         crop=False,
+        #         conf=conf,
+        #         model_checkpoint="biotroveclip-vit-b-16-from-openai-epoch-40.pt",
+        #         classes=[
+        #             "an animal like a mouse, rat, cat, fox, or hamster",
+        #             "not an animal at all, but a photo of something else entirely like trash, a car, a plastic box or a piece of wood or a leaf",
+        #         ],
+        #         prompt_template="This is a photo of {}",
+        #     )
+
+        #     write_detections_json(biotrove_clip_results, out / "detections.json")
+
+        #     for item in biotrove_clip_results["predictions"]:
+        #         if item is None:
+        #             continue
+        #         print(
+        #             f"{Path(item['filepath']).name}: "
+        #             f"{short_speciesnet_label(item.get('prediction'))} "
+        #             f"({item.get('prediction_score', 0):.2f})"
+        #         )
+
+        # classes_central_europe_species = [
+        #     "Rattus norvegicus",
+        #     "Rattus rattus",
+        #     "Mus musculus",
+        #     "Myodes glareolus",
+        #     "Apodemus agrarius",
+        #     "Apodemus flavicollis",
+        #     "Apodemus sylvaticus",
+        #     "Microtus arvalis",
+        #     "Microtus agrestis",
+        #     "Crocidura leucodon",
+        # ]
+
+        # for imgpath in IMAGE_DIR.iterdir():
+        #     name = imgpath.name
+        #     out = Path(
+        #         f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/biotrove-clip_species_names/central-europe/{name}"
+        #     )
+        #     imgs = sorted(imgpath.iterdir())
+        #     out.mkdir(parents=True, exist_ok=True)
+
+        #     biotrove_clip_results = detect_biotrove_clip(
+        #         imgs,
+        #         1,
+        #         "runs/biotrove-clip",
+        #         crop=False,
+        #         conf=conf,
+        #         model_checkpoint="biotroveclip-vit-b-16-from-openai-epoch-40.pt",
+        #         classes=classes_central_europe_species,
+        #         prompt_template="This is a photo of {}",
+        #     )
+
+        #     write_detections_json(biotrove_clip_results, out / "detections.json")
+
+        #     for item in biotrove_clip_results["predictions"]:
+        #         if item is None:
+        #             continue
+        #         print(
+        #             f"{Path(item['filepath']).name}: "
+        #             f"{short_speciesnet_label(item.get('prediction'))} "
+        #             f"({item.get('prediction_score', 0):.2f})"
+        #         )
+
+        # classes_central_europe_common = [
+        #     "brown rat",
+        #     "black rat",
+        #     "house mouse",
+        #     "bank vole",
+        #     "striped field mouse",
+        #     "yellow-necked mouse",
+        #     "wood mouse",
+        #     "common vole",
+        #     "field vole",
+        #     "bicolored white-toothed shrew",
+        # ]
+
+        # for imgpath in IMAGE_DIR.iterdir():
+        #     name = imgpath.name
+        #     out = Path(
+        #         f"/home/hmack/Development/rodent_experiments/runs/detect{confstr}/biotrove-clip_common_names/central-europe/{name}"
+        #     )
+        #     imgs = sorted(imgpath.iterdir())
+        #     out.mkdir(parents=True, exist_ok=True)
+
+        #     biotrove_clip_results = detect_biotrove_clip(
+        #         imgs,
+        #         1,
+        #         "runs/biotrove-clip",
+        #         crop=False,
+        #         conf=conf,
+        #         model_checkpoint="biotroveclip-vit-b-16-from-openai-epoch-40.pt",
+        #         classes=classes_central_europe_common,
+        #         prompt_template="This is a photo of {}",
+        #     )
+
+        #     write_detections_json(biotrove_clip_results, out / "detections.json")
+
+        #     for item in biotrove_clip_results["predictions"]:
+        #         if item is None:
+        #             continue
+        #         print(
+        #             f"{Path(item['filepath']).name}: "
+        #             f"{short_speciesnet_label(item.get('prediction'))} "
+        #             f"({item.get('prediction_score', 0):.2f})"
+        #         )

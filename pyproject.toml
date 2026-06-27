@@ -17,6 +17,7 @@ dependencies = [
     "torchvision",
     "pyaml",
     "open-clip-torch>=3.3.0",
+    "seaborn>=0.13.2",
 ]
 
 [project.optional-dependencies]
