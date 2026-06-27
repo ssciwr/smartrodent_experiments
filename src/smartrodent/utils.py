@@ -146,6 +146,7 @@ def extract_crop(
     filename = f"{path_component(source_path.stem)}_{source_id}_{crop_index:03d}.jpg"
     crop_path = class_dir / filename
     image.crop((left, top, right, bottom)).convert("RGB").save(crop_path)
+    print("  saved image crop to crop_path: ", crop_path)
     return crop_path
 
 
@@ -200,9 +201,11 @@ def save_speciesnet_previews(
         text = f"{label}: {score:.2f}" if score is not None else label
         top_species = top_speciesnet_species(item)
         species_lines = [
-            f"{idx}. {name}: {species_score:.4f}"
-            if species_score is not None
-            else f"{idx}. {name}"
+            (
+                f"{idx}. {name}: {species_score:.4f}"
+                if species_score is not None
+                else f"{idx}. {name}"
+            )
             for idx, (name, species_score) in enumerate(top_species, start=1)
         ]
 
