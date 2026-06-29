@@ -297,3 +297,10 @@ class ImageFilter:
         plt.title("Cosine similarity between text and image features", size=20)
 
         return fig, ax
+
+
+class CocoDatasetCreator:
+    def __init__(self, path_to_data: str, dataset_output_path: str):
+        pass
+
+    # TODO:
