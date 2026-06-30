@@ -43,11 +43,14 @@ def get_instance(model, image_dict):
 def set_questions():
     # Define the questions for visual question answering
     list_of_questions = [
-        "Is there a rat in the picture, answer with only yes or no?",
-        "Is there a rat in the picture, answer with only a numerical confidence level in percent?",
-        "Is there a rodent in the picture, answer with only yes or no?",
-        "Is there a mammal in the picture, answer with only yes or no?",
-        "Which animal species is in the picture, answer with only the species name and provide the numerical confidence level in percent?",
+        "Is there a peacock in the picture, answer with only yes or no?",
+        "Is there a peacock in the picture, answer with only a numerical confidence level in percent?",
+        # "Is there a bird in the picture, answer with only yes or no?",
+        # "Is there a bird in the picture, answer with only a numerical confidence level in percent?",
+        # "Is there a peacock in the picture, answer with only yes or no?",
+        # "Is there a owl in the picture, answer with only yes or no?",
+        # "Is there a falcon in the picture, answer with only yes or no?",
+        # "Which animal species is in the picture, answer with only the species name and provide the numerical confidence level in percent?",
     ]  # add or replace with your own questions
     return list_of_questions
 
@@ -65,21 +68,23 @@ def convert_to_dataframe(filename):
     # To export the results for further processing, convert the image dictionary into a pandas dataframe.
     image_df = ammico.get_dataframe(image_dict)
     image_df.to_csv(f"./{filename}.csv")
-    # calculate how many images have a rat in them based on the image_dict
+    # calculate how many images have a rat in them based on the FIRST COLUMN!!! of the image_dict
+    # So the first question is the one that is being evaluated here!
     answers = image_df["vqa"].apply(lambda x: x[0] if x else None)
     answers = [1 if "yes" in str(answer).lower() else 0 for answer in answers]
     rat_count = sum(answers)
-    print(f"Number of images with a rat: {rat_count} out of {len(image_df)} images.")
+    print(f"Number of images with a rat or predator: {rat_count} out of {len(image_df)} images.")
 
 if __name__ == "__main__":
     # get a list of subdirectories in the data path
-    data_path = "../data/biotrove_central_europe_filtered"
-    subdirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+    # data_path = "../data/biotrove_central_europe_filtered"
+    data_path_in = "/home/iulusoy/projects/smart-rodent/smartrodent_experimentsdatasets/biotrove-central-europe-large/biotrove-central-europe-large/imgs"
+    subdirs = [d for d in os.listdir(data_path_in) if os.path.isdir(os.path.join(data_path_in, d))]
     print(f"Found {len(subdirs)} subdirectories (species): {subdirs}")
     # for each subdirectory, run the analysis
     for subdir in subdirs:
         print(f"Processing subdirectory: {subdir}")
-        data_path = os.path.join("../data/biotrove_central_europe_filtered", subdir)
+        data_path = os.path.join(data_path_in, subdir)
         image_dict = load_images(data_path)
         model = define_model()
         image_vqa = get_instance(model, image_dict)

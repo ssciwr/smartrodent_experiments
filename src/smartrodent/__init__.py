@@ -1,6 +1,6 @@
 """SmartRodent model experiment package."""
 
-from .detection import main
+# from .detection import main
 from .detection import run_speciesnet
 from .utils import save_speciesnet_crops
 from .utils import save_speciesnet_previews
