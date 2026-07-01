@@ -66,6 +66,10 @@ class YoloDatasetCreatorBase(ABC):
         (p / "images").mkdir(parents=True, exist_ok=True)
 
     @abstractmethod
+    def _filter_labels(self, detections: list) -> list:
+        pass
+
+    @abstractmethod
     def _split_train_val_test(
         self,
     ) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:

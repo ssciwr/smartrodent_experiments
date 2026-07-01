@@ -360,6 +360,15 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
 
         return merged_labels
 
+    def _filter_labels(self, detections: list) -> list:
+        # Placeholder for label filtering logic
+        # TODO: filter stuff that is the same object/ is a duplicate detection
+        # - Non-maximum suppression (NMS) could be applied here to remove overlapping detections
+        # - based on IoU (Intersection over Union) thresholding
+        # - or use IoA / containment checks to remove detections that are fully contained within others
+        # - add parameter for supression sensitivity
+        return detections
+
     def _preprocess_labels(self, raw_labels: dict) -> dict:
         label_data = dict()
         for pred in raw_labels["predictions"]:
@@ -371,8 +380,9 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
             if key not in label_data:
                 label_data[key] = dict()
 
-            # get best detection
-            for detection in pred["detections"]:
+            filtered_detections = self._filter_labels(pred["detections"])
+
+            for detection in filtered_detections:
                 if detection is None:
                     # TODO: how to classify things in which there is nothing?
                     print(f"No detection found for {key}")
@@ -386,12 +396,18 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
                     continue
 
                 bbox = detection["bbox"]
+
+                # TODO: filter predictions if they overlap or likely represent the same object
+                # if that happens it can confuse the model during training.
+
                 # SpeciesNet stores normalized (x_min, y_min, width, height),
                 # while YOLO labels need normalized (x_center, y_center, width, height).
                 width = bbox[2]
                 height = bbox[3]
-                x_center = bbox[0] + width / 2
-                y_center = bbox[1] + height / 2
+                x_min = bbox[0]
+                y_min = bbox[1]
+                x_center = x_min + width / 2
+                y_center = y_min + height / 2
 
                 label_data[key]["bbox"] = [x_center, y_center, width, height]
                 label_data[key]["label"] = label
@@ -468,7 +484,7 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
                 for src in split_paths:
                     dst = (
                         Path(self.dataset_output_path)
-                        / self.image_directory
+                        / "images"
                         / split_name
                         / src.name
                     )
