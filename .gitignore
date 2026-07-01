@@ -11,7 +11,7 @@ wheels/
 
 # data
 datasets
-runs
+runs*
 
 # torch files
 *.pt
