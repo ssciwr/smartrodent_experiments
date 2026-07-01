@@ -7,13 +7,28 @@ ambiguous prompt matches, and visualize the results for manual review.
 """
 
 from itertools import product
+import json
 from math import sqrt
-
+import shutil
+from pathlib import Path
 import clip
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 import torch
+from math import ceil, floor
+import yaml
+
+from .base import YoloDatasetCreatorBase, DataPreprocessorBase
+
+
+class DataPreprocessorBioTrove(DataPreprocessorBase):
+    def __init__(
+        self,
+    ):
+        pass
+
+    # TODO
 
 
 class ImageFilter:
@@ -299,8 +314,193 @@ class ImageFilter:
         return fig, ax
 
 
-class CocoDatasetCreator:
-    def __init__(self, path_to_data: str, dataset_output_path: str):
-        pass
+class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
+    def __init__(
+        self,
+        path_to_data: str,
+        dataset_output_path: str,
+        path_to_labels: str,
+        class_names: list[str],
+        confidence_threshold: float = 0.1,
+        labels_to_filter: list[str] = [
+            "animal",
+        ],
+    ):
+        super().__init__(path_to_data, dataset_output_path, path_to_labels, class_names)
+        self.confidence_threshold = confidence_threshold
+        self.allowed_classes = labels_to_filter
+        with open(self.path_to_labels, "r") as f:
+            self.labels = self._preprocess_labels(json.load(f))
 
-    # TODO:
+    def _preprocess_labels(self, raw_labels: dict) -> dict:
+        labels = raw_labels["predictions"]
+
+        label_data = dict()
+        for pred in labels["predictions"]:
+            filepath = pred["filepath"]
+
+            key = filepath.name  # Use the filename as the key for label_data
+
+            label = (
+                filepath.parent.name
+            )  # Use the parent directory name as the label -> species name
+
+            if key not in label_data:
+                label_data[key] = dict()
+
+            # get best detection
+            for detection in pred["detections"]:
+                if (
+                    detection["confidence"] < self.confidence_threshold
+                    or detection["label"] not in self.allowed_classes
+                ):
+                    continue
+
+                if detection is None:
+                    # TODO: how to classify things in which there is nothing?
+                    print(f"No detection found for {key}")
+                    continue
+                else:
+                    bbox = detection["bbox"]
+                    # TODO: check again if speciesnet stores
+                    # (xmin, y_min, x_max, y_max) or (x_min, y_min, width, height)
+                    width = bbox[2] - bbox[0]
+                    height = bbox[3] - bbox[1]
+                    x_center = bbox[0] + width / 2
+                    y_center = bbox[1] + height / 2
+
+                    label_data[key]["bbox"] = [x_center, y_center, width, height]
+                    label_data[key]["label"] = label
+        return label_data
+
+    def _split_train_val_test(
+        self,
+    ) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
+        paths: dict[str, list[Path]] = {
+            "img_paths": [],
+            "label_paths": [],
+        }
+        for name in ["train", "val", "test"]:
+            img_path = Path(self.dataset_output_path) / "images" / name
+
+            labels_path = Path(self.dataset_output_path) / "labels" / name
+
+            (img_path).mkdir(parents=True, exist_ok=True)
+            (labels_path).mkdir(parents=True, exist_ok=True)
+
+            paths["img_paths"].append(img_path)
+            paths["label_paths"].append(labels_path)
+
+        assignments = {"train": [], "val": [], "test": []}
+
+        # Split independently within each label directory. This keeps the label folders
+        # in each split and prevents an image path from entering more than one split.
+        for label_dir in Path(self.path_to_image_data).iterdir():
+            img_paths = [
+                p
+                for p in Path(label_dir).iterdir()
+                if p.is_file() and p.suffix.lower() in self.img_types
+            ]
+
+            self.rng.shuffle(img_paths)
+            n_images = len(img_paths)
+            n_train = int(ceil(n_images * self.train_frac))
+            n_val = int(floor(n_images * self.val_frac))
+            n_test = n_images - n_train - n_val
+
+            if n_train + n_val + n_test != n_images:
+                raise ValueError(
+                    f"Image split counts do not sum to total for {label_dir}: "
+                    f"{n_train} + {n_val} + {n_test} != {n_images}"
+                )
+
+            split_images = {
+                "train": img_paths[:n_train],
+                "val": img_paths[n_train : n_train + n_val],
+                "test": img_paths[n_train + n_val :],
+            }
+
+            for split_name, paths in split_images.items():
+                for src in paths:
+                    dst = (
+                        Path(self.dataset_output_path)
+                        / "images"
+                        / split_name
+                        / src.name
+                    )
+                    shutil.copy(src, dst)
+                    assignments[split_name].append(dst)
+
+            if (
+                set(assignments["train"]).intersection(assignments["val"])
+                or set(assignments["train"]).intersection(assignments["test"])
+                or set(assignments["val"]).intersection(assignments["test"])
+            ):
+                raise ValueError(
+                    f"Data leakage detected: image paths overlap between splits for {label_dir}"
+                )
+
+            all_assigned = (
+                set(assignments["train"])
+                .union(assignments["val"])
+                .union(assignments["test"])
+            )
+
+            if all_assigned != set(img_paths):
+                raise ValueError(
+                    f"Some image paths were not assigned to any split for {label_dir}"
+                )
+        return paths, assignments
+
+    def _write_labels(
+        self,
+        paths: dict[str, list[Path]],
+        assignments: dict[str, list[Path]],
+        preprocessed_labels: dict,
+    ):
+
+        # write the labels in parallel to the images in the train/val/test splits
+
+        for split_name in ["train", "val", "test"]:
+            for img_path in assignments[split_name]:
+                img_name = img_path.name
+                label_info = preprocessed_labels.get(img_name)
+
+                if label_info is None:
+                    print(f"No label info found for {img_name}, skipping.")
+                    continue
+
+                bbox = label_info["bbox"]
+                label = label_info["label"]
+
+                # Convert to YOLO format: class_index x_center y_center width height
+                class_index = self.class_names.index(label)
+                yolo_bbox = [
+                    class_index,
+                    bbox[0],
+                    bbox[1],
+                    bbox[2],
+                    bbox[3],
+                ]
+
+                label_file_path = (
+                    Path(self.dataset_output_path)
+                    / "labels"
+                    / split_name
+                    / f"{img_path.stem}.txt"
+                )
+
+                with open(label_file_path, "w") as f:
+                    f.write(" ".join(map(str, yolo_bbox)))
+        datayaml = {
+            "path": self.dataset_output_path,
+            "train": "images/train",
+            "val": "images/val",
+            "test": "images/test",
+            "names": self.classes,
+        }
+
+        with open(Path(self.dataset_output_path) / "data.yaml", "w") as f:
+            yaml.safe_dump(datayaml, f)
+
+        return self.dataset_output_path
