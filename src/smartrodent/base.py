@@ -25,22 +25,21 @@ class YoloDatasetCreatorBase(ABC):
     def __init__(
         self,
         path_to_image_data: str,
-        dataset_output_path: str,
         path_to_labels: str,
+        dataset_output_path: str,
         class_names: list[str],
         train_val_test_split: tuple[float, float, float] = (0.7, 0.2, 0.1),
         img_types=[".jpg", ".jpeg", ".png"],
         rng_seed: int = 42,
     ):
         self.path_to_image_data = path_to_image_data
-
+        self.path_to_labels = path_to_labels
         if Path(self.path_to_image_data).exists() is False:
             raise ValueError(
                 f"Path to image data {self.path_to_image_data} does not exist"
             )
 
         self.dataset_output_path = dataset_output_path
-        self.path_to_labels = path_to_labels
         self.class_names = class_names
         self.train_frac, self.val_frac, self.test_frac = train_val_test_split
         self.labels = None

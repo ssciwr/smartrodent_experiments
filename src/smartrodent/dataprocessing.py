@@ -318,59 +318,83 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
     def __init__(
         self,
         path_to_data: str,
-        dataset_output_path: str,
         path_to_labels: str,
+        dataset_output_path: str,
         class_names: list[str],
+        image_directory: str = "boxed",
         confidence_threshold: float = 0.1,
         labels_to_filter: list[str] = [
             "animal",
         ],
     ):
-        super().__init__(path_to_data, dataset_output_path, path_to_labels, class_names)
+        super().__init__(path_to_data, path_to_labels, dataset_output_path, class_names)
         self.confidence_threshold = confidence_threshold
         self.allowed_classes = labels_to_filter
-        with open(self.path_to_labels, "r") as f:
-            self.labels = self._preprocess_labels(json.load(f))
+        self.labels = self._load_speciesnet_predictions()
+        self.image_directory = image_directory
+
+    def _load_speciesnet_predictions(self) -> dict:
+        """Merge per-species SpeciesNet ``predictions.json`` files.
+
+        ``path_to_image_data`` is expected to point at a directory whose immediate
+        children are species folders, each containing images plus a
+        ``predictions.json`` file produced for that species.
+        """
+        merged_labels = {"predictions": []}
+        data_root = Path(self.path_to_labels)
+
+        for species_dir in sorted(p for p in data_root.iterdir() if p.is_dir()):
+            predictions_path = species_dir / "predictions.json"
+            if not predictions_path.exists():
+                continue
+
+            with open(predictions_path, "r") as f:
+                species_labels = json.load(f)
+
+            merged_labels["predictions"].extend(species_labels.get("predictions", []))
+
+        if not merged_labels["predictions"]:
+            raise FileNotFoundError(
+                f"No SpeciesNet predictions found under species folders in {data_root}"
+            )
+
+        return merged_labels
 
     def _preprocess_labels(self, raw_labels: dict) -> dict:
-        labels = raw_labels["predictions"]
-
         label_data = dict()
-        for pred in labels["predictions"]:
-            filepath = pred["filepath"]
+        for pred in raw_labels["predictions"]:
+            filepath = Path(pred["filepath"])
 
             key = filepath.name  # Use the filename as the key for label_data
-
-            label = (
-                filepath.parent.name
-            )  # Use the parent directory name as the label -> species name
+            label = filepath.parent.name  # Parent directory name is the species name
 
             if key not in label_data:
                 label_data[key] = dict()
 
             # get best detection
             for detection in pred["detections"]:
-                if (
-                    detection["confidence"] < self.confidence_threshold
-                    or detection["label"] not in self.allowed_classes
-                ):
-                    continue
-
                 if detection is None:
                     # TODO: how to classify things in which there is nothing?
                     print(f"No detection found for {key}")
                     continue
-                else:
-                    bbox = detection["bbox"]
-                    # TODO: check again if speciesnet stores
-                    # (xmin, y_min, x_max, y_max) or (x_min, y_min, width, height)
-                    width = bbox[2] - bbox[0]
-                    height = bbox[3] - bbox[1]
-                    x_center = bbox[0] + width / 2
-                    y_center = bbox[1] + height / 2
 
-                    label_data[key]["bbox"] = [x_center, y_center, width, height]
-                    label_data[key]["label"] = label
+                confidence = detection.get("conf", detection.get("confidence", 0.0))
+                if (
+                    confidence < self.confidence_threshold
+                    or detection["label"] not in self.allowed_classes
+                ):
+                    continue
+
+                bbox = detection["bbox"]
+                # SpeciesNet stores normalized (x_min, y_min, width, height),
+                # while YOLO labels need normalized (x_center, y_center, width, height).
+                width = bbox[2]
+                height = bbox[3]
+                x_center = bbox[0] + width / 2
+                y_center = bbox[1] + height / 2
+
+                label_data[key]["bbox"] = [x_center, y_center, width, height]
+                label_data[key]["label"] = label
         return label_data
 
     def _split_train_val_test(
@@ -420,36 +444,36 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
                 "test": img_paths[n_train + n_val :],
             }
 
-            for split_name, paths in split_images.items():
-                for src in paths:
-                    dst = (
-                        Path(self.dataset_output_path)
-                        / "images"
-                        / split_name
-                        / src.name
-                    )
-                    shutil.copy(src, dst)
-                    assignments[split_name].append(dst)
-
             if (
-                set(assignments["train"]).intersection(assignments["val"])
-                or set(assignments["train"]).intersection(assignments["test"])
-                or set(assignments["val"]).intersection(assignments["test"])
+                set(split_images["train"]).intersection(split_images["val"])
+                or set(split_images["train"]).intersection(split_images["test"])
+                or set(split_images["val"]).intersection(split_images["test"])
             ):
                 raise ValueError(
                     f"Data leakage detected: image paths overlap between splits for {label_dir}"
                 )
 
             all_assigned = (
-                set(assignments["train"])
-                .union(assignments["val"])
-                .union(assignments["test"])
+                set(split_images["train"])
+                .union(split_images["val"])
+                .union(split_images["test"])
             )
 
             if all_assigned != set(img_paths):
                 raise ValueError(
                     f"Some image paths were not assigned to any split for {label_dir}"
                 )
+
+            for split_name, split_paths in split_images.items():
+                for src in split_paths:
+                    dst = (
+                        Path(self.dataset_output_path)
+                        / self.image_directory
+                        / split_name
+                        / src.name
+                    )
+                    shutil.copy(src, dst)
+                    assignments[split_name].append(dst)
         return paths, assignments
 
     def _write_labels(
@@ -457,7 +481,7 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
         paths: dict[str, list[Path]],
         assignments: dict[str, list[Path]],
         preprocessed_labels: dict,
-    ):
+    ) -> str:
 
         # write the labels in parallel to the images in the train/val/test splits
 
@@ -466,10 +490,9 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
                 img_name = img_path.name
                 label_info = preprocessed_labels.get(img_name)
 
-                if label_info is None:
+                if label_info is None or label_info == {}:
                     print(f"No label info found for {img_name}, skipping.")
                     continue
-
                 bbox = label_info["bbox"]
                 label = label_info["label"]
 
