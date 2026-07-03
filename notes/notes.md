@@ -90,9 +90,38 @@ Question here: The angles and distance at which the animals are photographed mig
             - classify what it is
 
 ### Model evaluation
-- preliminary tests show that speciesnet at least is not good enough for the biotrove data that we have. It appears to be great for larger species commonly seen in camera traps (nutria, muskrat, beaver), but it seems to struggle with the small animals we have here.
-- The data that they currently produce is a very particular set: top down perspective, one angle, only one species, so from this we cannot generalize to real world deployments as far as I see?
-- I think atm that retraining a yolo model makes more sense.
-- We can check out Biotrove-CLIP and YOLOE26 as vision language models for detecting species. For species-detection, some finetuning will be needed likely, at least Biotrove-CLIP says that on their benchmark their models underperformed (huggingface biotrove-clip site).
-    - Just like with microscopes, it might turn out that transfering images from one setup to another doesn't cut it and we will have to wait until data is produced to build a proper detection model. Until then, we would probably be limited to 'rodent or not' or perhaps the Genus level (Rattus, Mus) at best?
-    - Even if that is the case, the development work can be done, so it's not a roadblock for the project as it is now.
+
+- early June 2026:
+    - preliminary tests show that speciesnet at least is not good enough for the biotrove data that we have. It appears to be great for larger species commonly seen in camera traps (nutria, muskrat, beaver), but it seems to struggle with the small animals we have here.
+    - The data that they currently produce is a very particular set: top down perspective, one angle, only one species, so from this we cannot generalize to real world deployments as far as I see?
+    - I think atm that retraining a yolo model makes more sense.
+    - We can check out Biotrove-CLIP and YOLOE26 as vision language models for detecting species. For species-detection, some finetuning will be needed likely, at least Biotrove-CLIP says that on their benchmark their models underperformed (huggingface biotrove-clip site).
+        - Just like with microscopes, it might turn out that transfering images from one setup to another doesn't cut it and we will have to wait until data is produced to build a proper detection model. Until then, we would probably be limited to 'rodent or not' or perhaps the Genus level (Rattus, Mus) at best?
+        - Even if that is the case, the development work can be done, so it's not a roadblock for the project as it is now.
+
+- Final eval:
+    - Summary:
+        - biotrove-clip: vision language, open vocabulary. trained for species identification
+        - speciesnet: specifically camera trap model, trained for species identification, but goes up the phylogenetic tree when its not confident in the lower levels it finds (configurable). uses geofencing (had it set to DE for this test). Crop extraction possible
+        yoloe: open vocabulary vision language model. Crop extraction possible
+        yolo26: object detection + classfication model, uses COCO classes. Crop extraction possible
+        Results
+        - biotrove-clip is rather bad for everything other than identifying 'animal', and doesn´t understand species well (that's expected, the model is reported as such. only in there for testing purposes).
+        - speciesnet is the best at identifying animals in it (~100%) gets rodents occassionally (but not quantified here b/c of the phylogenetic tree mechanic it uses, I didn´t aggregate all the families and stuff that would entail 'rodent' or something rodent-like like shrews), but isn't great at identifying species either. It's trained for camera trap usage, but seems to be trained on 'charismatic megafauna' -> beaver, muskrat, elk, not small critters like rats, mice and shrews.
+        - yoloe (open vocabulary vision language) works well for identifying animals , but worse than speciesnet (85-99% or so, best for detection threshold ~0.2). Works for rodent identification specifically but not as well (~60 -76%)
+        - yolo26 is struggling more (70% correct or so) with animal identification with default classes, would need retraining
+        Hardware: not really checked in detail, yolo26 needed ~800 - 900MB on the gpu, vision language needs more. Speciesnet ~3.5gb
+
+    - Caveats:
+        I aggregated classes that correspond to 'animal' in YOLO26 and Speciesnet (where it did not right away default to 'animal') post hoc. Good results derived from that do not mean that the model separates animals from non-animals cleanly in its latent space as far as I can understand it, so if we change the species the results might jump unexpectedly.
+        I tried to mitigate by including more species than we would most likely be interested in for the rodents at least, so the ones we need should be in the current test and separate out well.
+
+        Biotrove dataset is derived from a citizen scientist database (inaturalist). Images from species associated with human dwellings (house mouse, black and brown rats) can have different biases than images of species mostly encountered in the wild (wood mouse, bicolored shrew), so an object detection might detect non-animal objects more often in the former b/c there's more artificial stuff on them. Also, the former class of animals is substantially overrepresented (good for us though).
+
+    - Possible ways forward I (HM) see:
+        use qwen and call it a day if that's good enough for them (no species identification though, no crops afaik and no ability to modify the model to include IR or thermal unless we can solve that with a prompt a la 'here is the same image in thermal and visible light, find the animalX... )
+        fine tune Yolo26 on the dataset we have using crops derived from Speciesnet. Probably the most tractable and the one that carries us furthest if it works well(!), but also the most resource intensive for us.
+        build a 2 stage pipeline: identify animal first, then check what it is in a separate step with something specialized. thermal would come in in the first for the most part I suppose, we won´t be able to do more with that than separate bird from rodent (snakes will be difficult to spot there).
+        (edited)
+        Integration of thermal images into YOLO:
+        there's a rgb-t version of YOLO12 or so in the literature and a couple of other versions that we could try and use. It always boils down to have a second channel in the model for the thermal images and then a cross-attention/gated-attention neck that merges them before they go to the classifier/object detection head.
