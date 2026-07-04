@@ -1,6 +1,43 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 import numpy as np
+import torch
+
+
+class ImageFilterBase(ABC):
+    def __init__(self, model: str, tol: float):
+        self.tol = tol
+        self._load_model(self.resolve_local_model(model))
+
+    @abstractmethod
+    def _load_model(self, model: str):
+        pass
+
+    def resolve_local_model(self, model_name: str | Path) -> str:
+        """Resolve bundled model weights relative to this file when present."""
+        model_path = Path(model_name)
+        if model_path.is_absolute():
+            return str(model_path)
+
+        bundled_path = Path(__file__).with_name(str(model_name))
+        return str(bundled_path) if bundled_path.exists() else str(model_name)
+
+    @abstractmethod
+    def compute_similarity(
+        self, images: torch.Tensor | list | np.ndarray
+    ) -> torch.Tensor:
+        pass
+
+    @abstractmethod
+    def filter_similarities(
+        self,
+        similarity: torch.Tensor | list | np.ndarray,
+    ) -> tuple | list:
+        pass
+
+    @abstractmethod
+    def decisions(self, imgs: list, decided: torch.Tensor | list | np.ndarray) -> dict:
+        pass
 
 
 class DataPreprocessorBase(ABC):
@@ -31,14 +68,19 @@ class YoloDatasetCreatorBase(ABC):
         train_val_test_split: tuple[float, float, float] = (0.7, 0.2, 0.1),
         img_types=[".jpg", ".jpeg", ".png"],
         rng_seed: int = 42,
+        confidence_threshold: float = 0.1,
+        IoU_threshold: float = 0.45,
     ):
         self.path_to_image_data = path_to_image_data
-        self.path_to_labels = path_to_labels
+
         if Path(self.path_to_image_data).exists() is False:
             raise ValueError(
                 f"Path to image data {self.path_to_image_data} does not exist"
             )
 
+        self.path_to_labels = path_to_labels
+        self.confidence_threshold = confidence_threshold
+        self.IoU_threshold = IoU_threshold
         self.dataset_output_path = dataset_output_path
         self.class_names = class_names
         self.train_frac, self.val_frac, self.test_frac = train_val_test_split
