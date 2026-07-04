@@ -192,7 +192,7 @@ For the full workflow, open `notebooks/process_biotrove.ipynb`, choose one of th
 ```python
 from smartrodent.dataprocessing import ImageFilter
 
-image_filter = ImageFilter(
+image_filter = ImageFilterCLIP(
     model="RN50x16",
     prompts=["not an animal at all", "a mouse, rat or other rodent"],
     id_tol=0.02,
