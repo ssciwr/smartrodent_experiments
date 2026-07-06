@@ -64,6 +64,8 @@ class DetectorBase(ABC):
         # model_checkpoint: str = "biotroveclip-vit-b-16-from-openai-epoch-40.pt",
         prompt_template: str = "This is a photo of {}",
         model_dir: str | Path | None = None,
+        # padding for crop extraction:
+        relpad=0.0,
     ):
         """Store detector configuration for a single experiment run.
 
@@ -80,6 +82,7 @@ class DetectorBase(ABC):
         self.conf = conf
         self.model = None
         self.model_name = model_name
+        self.relpad = relpad
 
         # yolo
         self.project = project
@@ -370,7 +373,7 @@ class SpeciesNet_Detector(DetectorBase):
         # Crops are also optional. When enabled, detections are saved into folders named
         # after detector labels so they can be inspected or used for later experiments.
         if crop_dir is not None:
-            self.save_speciesnet_crops(predictions, crop_dir)
+            self.save_speciesnet_crops(predictions, crop_dir, pad=self.relpad)
 
         self.write_detections_json(predictions, out / "detections.json")
 
@@ -432,8 +435,16 @@ class SpeciesNet_Detector(DetectorBase):
         self,
         predictions: dict,
         output_dir: str | Path = "runs/speciesnet/crops",
+        pad: float = 0.01,
     ) -> list[Path]:
-        """Extract every SpeciesNet detection into detector-label directories."""
+        """Extract every SpeciesNet detection into detector-label directories.
+
+        Args:
+            predictions: SpeciesNet prediction JSON loaded as a dictionary.
+            output_dir: Root directory where crops are grouped by detector label.
+            pad: Relative total expansion passed to ``extract_crop``. For example,
+                ``pad=0.2`` makes each crop 20% wider and taller overall.
+        """
         crop_paths = []
         for item in predictions["predictions"]:
             image_path = Path(item["filepath"])
@@ -445,6 +456,7 @@ class SpeciesNet_Detector(DetectorBase):
                         output_dir=output_dir,
                         source_path=image_path,
                         crop_index=crop_index,
+                        pad=pad,
                     )
                     if crop_path is not None:
                         crop_paths.append(crop_path)

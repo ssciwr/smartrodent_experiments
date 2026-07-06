@@ -2,9 +2,11 @@
 
 from .base import DataPreprocessorBase, YoloDatasetCreatorBase
 from .dataprocessing import (
-    DataPreprocessorBioTrove,
-    ImageFilter,
-    YoloDatasetCreatorFromSpeciesnet,
+    ImageFilterBiotroveClip,
+    ImageFilterCLIP,
+    ImageFilterYoloE,
+    YoloClassifierDatasetCreatorFromSpeciesnet,
+    YoloDetectorDatasetCreatorFromSpeciesnet,
 )
 from .detection import (
     BioTroveClip_Detector,
@@ -18,7 +20,6 @@ from .detection import (
     resolve_lookups,
     run_detector_on_group,
 )
-from .training import train_model
 from .utils import (
     COUNTRY_ALIASES,
     IMAGE_SUFFIXES,
@@ -31,15 +32,17 @@ __all__ = [
     "BioTroveClip_Detector",
     "COUNTRY_ALIASES",
     "DataPreprocessorBase",
-    "DataPreprocessorBioTrove",
     "DetectorBase",
     "IMAGE_SUFFIXES",
-    "ImageFilter",
+    "ImageFilterBiotroveClip",
+    "ImageFilterCLIP",
+    "ImageFilterYoloE",
     "SpeciesNet_Detector",
     "YOLO_Detector",
     "YOLOE_Detector",
     "YoloDatasetCreatorBase",
-    "YoloDatasetCreatorFromSpeciesnet",
+    "YoloClassifierDatasetCreatorFromSpeciesnet",
+    "YoloDetectorDatasetCreatorFromSpeciesnet",
     "conf_to_string",
     "extract_crop",
     "image_groups",
@@ -48,5 +51,4 @@ __all__ = [
     "path_component",
     "resolve_lookups",
     "run_detector_on_group",
-    "train_model",
 ]
