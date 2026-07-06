@@ -20,6 +20,7 @@ from .detection import (
     resolve_lookups,
     run_detector_on_group,
 )
+from .training import YoloDetectorTrainer
 from .utils import (
     COUNTRY_ALIASES,
     IMAGE_SUFFIXES,
@@ -43,6 +44,7 @@ __all__ = [
     "YoloDatasetCreatorBase",
     "YoloClassifierDatasetCreatorFromSpeciesnet",
     "YoloDetectorDatasetCreatorFromSpeciesnet",
+    "YoloDetectorTrainer",
     "conf_to_string",
     "extract_crop",
     "image_groups",
