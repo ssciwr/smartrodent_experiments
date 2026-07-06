@@ -1,6 +1,6 @@
 {
     "train_dataset": "/home/hmack/Development/rodent_experiments/datasets/training-central-europe/yolo_detector_training_dataset",
-    "model_name": "yolo26n.pt",
+    "model_name": "yolo26l.pt",
     "include_macro_f1": true,
     "return_format": "dataframe",
     "train_kwargs": {
@@ -11,7 +11,7 @@
         "workers": 10,
         "patience": 20,
         "project": "/home/hmack/Development/rodent_experiments/training/detect",
-        "name": "central_europe_detector_nano",
+        "name": "central_europe_detector_large",
         "exist_ok": true,
         "plots": true,
         "save": true,
