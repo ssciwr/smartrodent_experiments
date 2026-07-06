@@ -23,6 +23,7 @@ from ultralytics import YOLOE
 from ultralytics.utils.metrics import box_iou
 
 from .base import YoloDatasetCreatorBase, ImageFilterBase
+from .utils import path_component
 
 
 class ImageFilterCLIP(ImageFilterBase):
@@ -530,7 +531,7 @@ class ImageFilterYoloE(ImageFilterCLIP):
         return similarity
 
 
-class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
+class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
     def __init__(
         self,
         path_to_image_data: str,
@@ -544,6 +545,7 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
         labels_to_filter: list[str] = [
             "animal",
         ],
+        create_detection_dirs: bool = True,
     ):
         super().__init__(
             path_to_image_data,
@@ -554,6 +556,7 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
             rng_seed=rng_seed,
             confidence_threshold=confidence_threshold,
             IoU_threshold=IoU_threshold,
+            create_detection_dirs=create_detection_dirs,
         )
         self.allowed_classes = labels_to_filter
         self.labels = self._load_speciesnet_predictions()
@@ -585,25 +588,35 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
 
         return merged_labels
 
-    def _filter_labels(self, detections: list) -> list:
+    def _filter_label_items(self, detections: list) -> list[tuple[int, dict]]:
+        """Filter SpeciesNet detections while preserving original detection indices.
+
+        The detector dataset only needs the filtered detection dictionaries, but the
+        classifier dataset must map each accepted detection back to a crop filename.
+        SpeciesNet crop names include the original detection index, so this helper keeps
+        ``(original_index, detection)`` pairs through confidence filtering, allowed-class
+        filtering, and NMS.
+        """
 
         # this uses non-maximum suppression (NMS) to filter out overlapping detections based on their confidence scores.
         # The assumption is that allowed classes represent **the same** class which got conflated by
         # speciesnet, so there is no extra class equality check below anymore.
 
-        _detections = deepcopy(detections)  # don´t want to modify the og list
+        _detections = [
+            (idx, deepcopy(detection)) for idx, detection in enumerate(detections)
+        ]
 
         # keep only those detections in which we are confident enough and which are in
         # the classes we assume represent detections of relevant animals (allowed_classes)
         _detections = [
-            detection
-            for detection in _detections
+            (idx, detection)
+            for idx, detection in _detections
             if detection.get("conf", detection.get("confidence", 0.0))
             >= self.confidence_threshold
             and detection.get("label", detection.get("class")) in self.allowed_classes
         ]
         _detections.sort(
-            key=lambda x: x.get("conf", x.get("confidence", 0.0)), reverse=True
+            key=lambda x: x[1].get("conf", x[1].get("confidence", 0.0)), reverse=True
         )
 
         def bbox_xywh_to_xyxy_tensor(bbox: list[float]) -> torch.Tensor:
@@ -625,19 +638,28 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
                 continue
 
             keep.append(d1)
-            bbox_d1 = bbox_xywh_to_xyxy_tensor(d1["bbox"])
+            bbox_d1 = bbox_xywh_to_xyxy_tensor(d1[1]["bbox"])
 
             for j in range(i + 1, len(_detections)):
                 if j in suppressed:
                     continue
 
-                bbox_d2 = bbox_xywh_to_xyxy_tensor(_detections[j]["bbox"])
+                bbox_d2 = bbox_xywh_to_xyxy_tensor(_detections[j][1]["bbox"])
                 iou = box_iou(bbox_d1, bbox_d2).item()
 
                 if iou > self.IoU_threshold:
                     suppressed.add(j)
 
         return keep
+
+    def _filter_labels(self, detections: list) -> list:
+        """Return only filtered SpeciesNet detection dictionaries.
+
+        This is the detector-dataset-facing compatibility wrapper around
+        ``_filter_label_items``. It keeps existing detector behavior unchanged while
+        allowing the classifier dataset to use original detection indices.
+        """
+        return [detection for _, detection in self._filter_label_items(detections)]
 
     def _preprocess_labels(self, raw_labels: dict) -> dict:
         label_data = dict()
@@ -816,3 +838,253 @@ class YoloDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
             yaml.safe_dump(datayaml, f)
 
         return self.dataset_output_path
+
+
+class YoloClassifierDatasetCreatorFromSpeciesnet(
+    YoloDetectorDatasetCreatorFromSpeciesnet
+):
+    """Create an Ultralytics YOLO classification dataset from SpeciesNet crops.
+
+    This assumes that SpeciesNet writes crops under per-species folders such as
+    ``<species>/crops/animal/<source_stem>_<hash>_<detection_index>.jpg``. This class
+    reuses te YoloDetectorDatasetCreatorFromSpeciesnet's confidence, allowed-label, and NMS filtering, then
+    copies only the accepted crop files into the standard classification layout:
+    ``train/<species>/``, ``val/<species>/``, and ``test/<species>/``.
+
+    The split is performed by original source image rather than by crop. That prevents
+    multiple crops from the same source image appearing in different splits, which would
+    leak near-duplicate visual context into validation or test data.
+    """
+
+    def __init__(
+        self,
+        path_to_image_data: str,
+        dataset_output_path: str,
+        class_names: list[str],
+        path_to_labels: str | None = None,
+        train_val_test_split: tuple[float, float, float] = (0.7, 0.2, 0.1),
+        rng_seed: int = 42,
+        confidence_threshold: float = 0.1,
+        IoU_threshold: float = 0.45,
+        labels_to_filter: list[str] = [
+            "animal",
+        ],
+        image_directory: str = "crops",
+    ):
+        """Configure classifier dataset creation from a SpeciesNet output tree.
+
+        Args:
+            path_to_image_data: SpeciesNet output root containing one folder per
+                species, each with a ``predictions.json`` and crop directory.
+            dataset_output_path: Destination root for the YOLO classification dataset.
+            class_names: Species names to include. Folders not listed here are ignored.
+            path_to_labels: Optional root for SpeciesNet ``predictions.json`` files.
+                Defaults to ``path_to_image_data`` because crops and predictions usually
+                live in the same SpeciesNet output tree.
+            train_val_test_split: Fractions for train, validation, and test splits.
+            rng_seed: Seed used for reproducible source-image-level splits.
+            confidence_threshold: Minimum SpeciesNet detection confidence to accept.
+            IoU_threshold: NMS overlap threshold for duplicate SpeciesNet detections.
+            labels_to_filter: SpeciesNet detector labels to keep, for example
+                ``["animal", "rodent"]``.
+            image_directory: Name of the crop folder inside each species directory.
+        """
+        self.image_directory = image_directory
+        self.crop_records: dict[str, list[dict]] = {}
+        self.missing_crops: list[dict] = []
+        super().__init__(
+            path_to_image_data=path_to_image_data,
+            path_to_labels=path_to_labels or path_to_image_data,
+            dataset_output_path=dataset_output_path,
+            class_names=class_names,
+            train_val_test_split=train_val_test_split,
+            rng_seed=rng_seed,
+            confidence_threshold=confidence_threshold,
+            IoU_threshold=IoU_threshold,
+            labels_to_filter=labels_to_filter,
+            create_detection_dirs=False,
+        )
+
+    def _find_crop_path(
+        self,
+        species: str,
+        source_path: Path,
+        detection: dict,
+        detection_index: int,
+    ) -> Path | None:
+        """Return the crop path for one accepted SpeciesNet detection if it exists.
+
+        The crop filename is produced by ``utils.extract_crop`` and contains the source image
+        stem, a source-path hash, and the original detection index. We can derive the
+        stem and index here, but the hash is intentionally opaque, so this method uses a
+        glob with the known stem and index.
+        """
+        detection_label = path_component(
+            str(detection.get("label", detection.get("class", "unknown")))
+        )
+        crop_dir = (
+            Path(self.path_to_image_data)
+            / species
+            / self.image_directory
+            / detection_label
+        )
+        if not crop_dir.exists():
+            return None
+
+        source_stem = path_component(source_path.stem)
+        matches = sorted(crop_dir.glob(f"{source_stem}_*_{detection_index:03d}.*"))
+        matches = [p for p in matches if p.suffix.lower() in self.img_types]
+        if len(matches) == 0:
+            return None
+        return matches[0]
+
+    def _preprocess_labels(self, raw_labels: dict) -> dict:
+        """Build accepted crop records grouped by species.
+
+        Unlike the detector dataset, classification labels are represented by directory
+        names. The preprocessing output is therefore a list of crop-copy records instead
+        of YOLO bbox rows. Missing crop files are skipped and recorded in
+        ``self.missing_crops`` so an exploratory run can continue while still exposing
+        data-layout mismatches for review.
+        """
+        records_by_species: dict[str, list[dict]] = {
+            species: [] for species in self.class_names
+        }
+
+        for pred in raw_labels["predictions"]:
+            source_path = Path(pred["filepath"])
+            species = source_path.parent.name
+            if species not in records_by_species:
+                continue
+
+            # Keep the original SpeciesNet detection index through filtering because it
+            # is part of the crop filename written by ``extract_crop``.
+            for detection_index, detection in self._filter_label_items(
+                pred.get("detections", [])
+            ):
+                crop_path = self._find_crop_path(
+                    species=species,
+                    source_path=source_path,
+                    detection=detection,
+                    detection_index=detection_index,
+                )
+                if crop_path is None:
+                    self.missing_crops.append(
+                        {
+                            "species": species,
+                            "source_path": str(source_path),
+                            "detection_index": detection_index,
+                            "label": detection.get(
+                                "label", detection.get("class", "unknown")
+                            ),
+                        }
+                    )
+                    continue
+
+                records_by_species[species].append(
+                    {
+                        "species": species,
+                        "source_path": source_path,
+                        "crop_path": crop_path,
+                    }
+                )
+
+        self.crop_records = records_by_species
+        return records_by_species
+
+    def _split_train_val_test(
+        self,
+    ) -> tuple[dict[str, list[Path]], dict[str, list[dict]]]:
+        """Split accepted crop records by original source image within each species.
+
+        Grouping by ``source_path`` keeps all crops from one original image together.
+        This is more important than matching exact crop counts because SpeciesNet may
+        emit several crops from one image, and splitting those independently would leak
+        near-duplicates across train/val/test.
+        """
+        assignments: dict[str, list[dict]] = {"train": [], "val": [], "test": []}
+
+        for split_name in ["train", "val", "test"]:
+            for species in self.class_names:
+                (Path(self.dataset_output_path) / split_name / species).mkdir(
+                    parents=True, exist_ok=True
+                )
+
+        for species, records in self.crop_records.items():
+            records_by_source: dict[Path, list[dict]] = defaultdict(list)
+            for record in records:
+                records_by_source[record["source_path"]].append(record)
+
+            source_paths = list(records_by_source)
+            self.rng.shuffle(source_paths)
+
+            n_images = len(source_paths)
+            n_train = int(ceil(n_images * self.train_frac))
+            n_val = int(floor(n_images * self.val_frac))
+            n_test = n_images - n_train - n_val
+
+            if n_train + n_val + n_test != n_images:
+                raise ValueError(
+                    f"Image split counts do not sum to total for {species}: "
+                    f"{n_train} + {n_val} + {n_test} != {n_images}"
+                )
+
+            split_sources = {
+                "train": source_paths[:n_train],
+                "val": source_paths[n_train : n_train + n_val],
+                "test": source_paths[n_train + n_val :],
+            }
+
+            for split_name, split_source_paths in split_sources.items():
+                for source_path in split_source_paths:
+                    assignments[split_name].extend(records_by_source[source_path])
+
+        paths = {
+            "train": [Path(self.dataset_output_path) / "train"],
+            "val": [Path(self.dataset_output_path) / "val"],
+            "test": [Path(self.dataset_output_path) / "test"],
+        }
+        return paths, assignments
+
+    def _write_labels(
+        self,
+        paths: dict[str, list[Path]],
+        assignments: dict[str, list[dict]],
+        preprocessed_labels: dict,
+    ) -> str:
+        """Copy accepted crops into YOLO classification folders and write metadata.
+
+        YOLO classification datasets do not use per-image ``.txt`` labels. The class is
+        encoded by the destination directory name, so this method only copies images and
+        writes a small ``data.yaml`` for downstream training convenience.
+        """
+        for split_name, records in assignments.items():
+            for record in records:
+                src = record["crop_path"]
+                dst = (
+                    Path(self.dataset_output_path)
+                    / split_name
+                    / record["species"]
+                    / src.name
+                )
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+
+        datayaml = {
+            "path": self.dataset_output_path,
+            "train": "train",
+            "val": "val",
+            "test": "test",
+            "names": self.classes,
+        }
+
+        with open(Path(self.dataset_output_path) / "data.yaml", "w") as f:
+            yaml.safe_dump(datayaml, f)
+
+        return self.dataset_output_path
+
+    def __call__(self) -> str | Path:
+        """Generate the classifier dataset and return its output path."""
+        preprocessed_labels = self._preprocess_labels(self.labels)
+        paths, assignments = self._split_train_val_test()
+        return self._write_labels(paths, assignments, preprocessed_labels)

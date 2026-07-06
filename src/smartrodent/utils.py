@@ -62,17 +62,40 @@ def extract_crop(
     output_dir: str | Path,
     source_path: str | Path,
     crop_index: int,
+    pad: float = 0.0,
 ) -> Path | None:
-    """Save one normalized SpeciesNet box under its detector label."""
+    """Save one padded normalized SpeciesNet box under its detector label.
+
+    Args:
+        image: Source image containing the detection.
+        detection: SpeciesNet detection with a normalized ``bbox`` in
+            ``[x_min, y_min, width, height]`` format.
+        output_dir: Root directory for crop output.
+        source_path: Original source image path, used to make stable crop names.
+        crop_index: Detection index in the original SpeciesNet prediction list.
+        pad: Relative total expansion for the crop. For example, ``pad=0.2`` makes
+            the crop 20% wider and 20% taller by adding 10% of the original box size
+            on each side. Values are clipped to the image bounds.
+    """
+    if pad < 0:
+        raise ValueError(f"pad must be non-negative, got {pad}")
+
     try:
         xmin, ymin, width, height = map(float, detection["bbox"])
     except (KeyError, TypeError, ValueError):
         return None
 
-    left = max(0, min(image.width, math.floor(xmin * image.width)))
-    top = max(0, min(image.height, math.floor(ymin * image.height)))
-    right = max(0, min(image.width, math.ceil((xmin + width) * image.width)))
-    bottom = max(0, min(image.height, math.ceil((ymin + height) * image.height)))
+    # ``pad`` describes the total relative increase in crop size, so split it evenly
+    # over both sides of each axis before clipping to the image boundary.
+    x_pad = width * pad / 2
+    y_pad = height * pad / 2
+
+    left = max(0, min(image.width, math.floor((xmin - x_pad) * image.width)))
+    top = max(0, min(image.height, math.floor((ymin - y_pad) * image.height)))
+    right = max(0, min(image.width, math.ceil((xmin + width + x_pad) * image.width)))
+    bottom = max(
+        0, min(image.height, math.ceil((ymin + height + y_pad) * image.height))
+    )
     if right <= left or bottom <= top:
         return None
 

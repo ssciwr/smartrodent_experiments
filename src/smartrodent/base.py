@@ -70,7 +70,24 @@ class YoloDatasetCreatorBase(ABC):
         rng_seed: int = 42,
         confidence_threshold: float = 0.1,
         IoU_threshold: float = 0.45,
+        create_detection_dirs: bool = True,
     ):
+        """Store common YOLO dataset creation settings.
+
+        Args:
+            path_to_image_data: Root directory for source images or source crops.
+            path_to_labels: Root directory for label metadata.
+            dataset_output_path: Destination root for the generated YOLO dataset.
+            class_names: Class names in the order they should appear in YOLO metadata.
+            train_val_test_split: Fractions for train, validation, and test splits.
+            img_types: Image suffixes accepted when scanning source folders.
+            rng_seed: Seed used for reproducible train/val/test splits.
+            confidence_threshold: Minimum detector confidence to keep a label.
+            IoU_threshold: NMS overlap threshold for duplicate detections.
+            create_detection_dirs: When true, create ``images/`` and ``labels/`` for
+                YOLO detection datasets. Classification datasets use split/class
+                folders instead and opt out of these directories.
+        """
         self.path_to_image_data = path_to_image_data
 
         if Path(self.path_to_image_data).exists() is False:
@@ -104,8 +121,9 @@ class YoloDatasetCreatorBase(ABC):
         if not p.exists():
             p.mkdir(parents=True, exist_ok=True)
 
-        (p / "labels").mkdir(parents=True, exist_ok=True)
-        (p / "images").mkdir(parents=True, exist_ok=True)
+        if create_detection_dirs:
+            (p / "labels").mkdir(parents=True, exist_ok=True)
+            (p / "images").mkdir(parents=True, exist_ok=True)
 
     @abstractmethod
     def _filter_labels(self, detections: list) -> list:
