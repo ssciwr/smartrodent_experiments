@@ -53,6 +53,7 @@ class YoloDetectorTrainer:
         self.trainer = trainer
         self.train_kwargs = train_kwargs
         self.history: dict[int, dict[str, Any]] = {}
+        self.model = YOLO(str(self.model_name))
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "YoloDetectorTrainer":
@@ -184,13 +185,12 @@ class YoloDetectorTrainer:
             ValueError: If ``return_format`` is not ``"dict"`` or ``"dataframe"``.
         """
         return_format = return_format or self.return_format
-        model = YOLO(str(self.model_name))
-        model.add_callback("on_fit_epoch_end", self.collect_metrics)
+        self.model.add_callback("on_fit_epoch_end", self.collect_metrics)
         if self.event_callback is not None:
             for event, callback in self.event_callback:
-                model.add_callback(event, callback)
+                self.model.add_callback(event, callback)
 
-        model.train(
+        self.model.train(
             trainer=self.trainer,
             data=str(self.data_yaml()),
             **self.train_kwargs,
@@ -234,8 +234,7 @@ class YoloDetectorTrainer:
         # normal training defaults without passing duplicate keyword arguments.
         kwargs = {**self.train_kwargs, **tune_kwargs}
 
-        model = YOLO(str(self.model_name))
-        return model.tune(data=str(self.data_yaml()), **kwargs)
+        return self.model.tune(data=str(self.data_yaml()), **kwargs)
 
     def dataframe(self) -> pd.DataFrame:
         """Return recorded metrics as a long-form table.
