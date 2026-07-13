@@ -11,12 +11,10 @@ wheels/
 
 # data
 datasets
-runs
+runs*
 
 # torch files
 *.pt
 
 # pi coding agent stuff
 .pi
-
-data/
