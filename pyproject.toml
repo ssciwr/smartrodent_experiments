@@ -24,6 +24,7 @@ dependencies = [
     "soundfile>=0.14.0",
     "librosa>=0.11.0",
     "pyinaturalist>=0.21.1",
+    "dvclive>=3.49.1",
 ]
 
 [project.optional-dependencies]
