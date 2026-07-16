@@ -22,6 +22,7 @@ class DetectorBase(ABC):
         conf: float,
         # padding for crop extraction:
         relpad=0.0,
+        project: str | None = None,
     ):
         """Store detector configuration for a single experiment run.
 
@@ -38,6 +39,7 @@ class DetectorBase(ABC):
         self.conf = conf
         self.model = None
         self.relpad = relpad
+        self.project = project
 
     def write_detections_json(self, results, json_path: Path | str) -> None:
         """Append detection records to a JSON file from any supported model.
