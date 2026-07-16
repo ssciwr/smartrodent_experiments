@@ -190,3 +190,48 @@ class YOLOE_Detector(DetectorBase):
         self.write_detections_json(all_results, out / "detections.json")
 
         return all_results
+
+
+def run_detector_on_group(
+    run_dir: str,
+    dataset_name: str,
+    detector_cls: type[DetectorBase],
+    experiment_name: str,
+    detector_kwargs: dict,
+    conf: float,
+    group_name: str,
+    imgs: list[Path],
+):
+    """_summary_
+
+    Args:
+        run_dir (str): _description_
+        dataset_name (str): _description_
+        detector_cls (type[DetectorBase]): _description_
+        experiment_name (str): _description_
+        detector_kwargs (dict): _description_
+        conf (float): _description_
+        group_name (str): _description_
+        imgs (list[Path]): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    out = (
+        Path(run_dir)
+        / f"detect{conf_to_string(conf)}"
+        / experiment_name
+        / dataset_name
+        / group_name
+    )
+    out.mkdir(parents=True, exist_ok=True)
+
+    detector = detector_cls(
+        name="boxed",
+        batchsize=detector_kwargs.pop("batchsize", BATCHSIZE),
+        img_outname="boxed",
+        conf=conf,
+        project=out,
+        **detector_kwargs,
+    )
+    return detector.detect(imgs, out)
