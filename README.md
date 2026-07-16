@@ -199,6 +199,22 @@ image_filter = ImageFilterCLIP(
 )
 ```
 
+### Use VLM inference with ammico
+
+For this you need to install the latest ammico version from the GitHub repo:
+```
+uv pip install git+https://github.com/ssciwr/AMMICO.git
+```
+You also need to start the model using `ollama` or `vllm`, for example with
+```
+docker run --rm --gpus all --ipc=host -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface vllm/vllm-openai:v0.10.0 --model Qwen/Qwen2.5-VL-3B-Instruct --api-key KEY     --limit-mm-per-prompt '{"image": 8}' --gpu-memory-utilization 0.80 --max-model-len 4096
+```
+
+Then there is the [ammico demo notebook](notebooks/ammico_demo_getting_started.ipynb) in the notebook folder, that allows you to inspect the VQA answers together with the images, and also a [script](scripts/species_script.py) for running this on a batch of images. Below is the result for at most 100 images from the rat subset of BioTrove:
+
+![alt text](image.png)
+
+
 ## Tests and development status
 
 The project has pytest/coverage configuration in `pyproject.toml`, but the current repository is primarily notebook- and experiment-driven. Some generated caches and local data may exist in working trees; avoid committing large data, generated outputs, or `__pycache__` files.

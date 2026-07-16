@@ -28,6 +28,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
+vlm = ["ammico[api]"]
+
+[tool.uv.sources]
+# The PyPI release of ammico (<=0.2.6) still depends on the old, unmaintained
+# stack (numpy<=1.23.4, deepface, tensorflow, googletrans==4.0.0rc1 prerelease)
+# which cannot be resolved alongside modern torch/numpy/ultralytics. The GitHub
+# main branch dropped all of that in favor of VLM inference over an
+# OpenAI-compatible HTTP API (the "api" extra), so pin to it instead of PyPI.
+ammico = { git = "https://github.com/ssciwr/AMMICO.git" }
 
 [tool.coverage.run]
 branch = true
