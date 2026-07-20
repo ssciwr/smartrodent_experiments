@@ -10,7 +10,12 @@ wheels/
 .venv
 
 # data
-datasets
+/datasets/**
+!/datasets/
+!/datasets/*.dvc
+!/datasets/.gitignore
+
+# runs
 runs*
 
 # torch files
