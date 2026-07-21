@@ -18,3 +18,5 @@ runs*
 
 # pi coding agent stuff
 .pi
+
+.dvc/*
