@@ -1,0 +1,13 @@
+{
+    "data": {
+        "inaturalist": {
+            "species": [],
+            "quality_grade": "research",
+            "output_path": "./dataset/inaturalist/central_europe",
+            "years": [],
+            "first_year": 1900,
+            "last_year": 2026,
+            "download_images": true
+        }
+    }
+}
