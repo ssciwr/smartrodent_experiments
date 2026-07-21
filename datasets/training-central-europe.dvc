@@ -1,0 +1,6 @@
+outs:
+- md5: 9b4f99113689ebceaa9a31f428c0dfef.dir
+  size: 2254708241
+  nfiles: 34294
+  hash: md5
+  path: training-central-europe
