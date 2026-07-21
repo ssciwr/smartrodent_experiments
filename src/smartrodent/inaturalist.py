@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 import pandas as pd
 import shutil
+from tqdm import tqdm
 
 
 def process_config(config: dict[str, Any]):
@@ -40,8 +41,16 @@ def process_config(config: dict[str, Any]):
         return config  # do nothing
 
 
-def fetch_image_from_inat(df: pd.DataFrame):
-    pass
+def fetch_image_from_inat(photo: dict, img_path: Path, id: int, index: int):
+    if photo["license_code"] != "cc-by-nc":
+        return
+    else:
+        photo_url = photo["url"].replace("square", "large")
+        photo_path = img_path / f"{id}_{index}.jpg"
+        img_bytes = requests.get(photo_url).content
+
+        with open(photo_path, "wb") as f:
+            f.write(img_bytes)
 
 
 def download_inat_data(config_path: str):
@@ -60,8 +69,8 @@ def download_inat_data(config_path: str):
 
     quality = config["quality_grade"]
 
-    all_records = []
     for species in config["species"]:
+        all_records = []
         print(f"current species {species}")
         for year in config["years"]:
             print(f"  current year: {year}")
@@ -77,12 +86,21 @@ def download_inat_data(config_path: str):
 
             all_records.extend(response["results"])
 
-    df = pd.json_normalize(all_records)
+        df = pd.json_normalize(all_records)
 
-    df.to_csv(output_path / "records.csv", index=False)
+        save_path = output_path / f"{species}"
+        save_path.mkdir(parents=True, exist_ok=True)
 
-    if config.get("download_images"):
-        fetch_image_from_inat(df)
+        df.to_csv(save_path / "records.csv", index=False)
+
+        img_path = save_path / "imgs"
+        img_path.mkdir(parents=True, exist_ok=True)
+        print(img_path)
+        for _, row in tqdm(df.iterrows()):
+            photos = row["photos"]
+            id = row["id"]
+            for i, photo in enumerate(photos):
+                fetch_image_from_inat(photo, img_path, id, i)
 
 
 if __name__ == "__main__":
