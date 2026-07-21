@@ -1,11 +1,13 @@
 {
     "data": {
         "inaturalist": {
-            "species": [],
+            "species": [
+                "Myodes glareolus"
+            ],
             "quality_grade": "research",
-            "output_path": "./dataset/inaturalist/central_europe",
+            "output_path": "../../datasets/inaturalist/inaturalist-central-europe",
             "years": [],
-            "first_year": 1900,
+            "first_year": 1990,
             "last_year": 2026,
             "download_images": true
         }
