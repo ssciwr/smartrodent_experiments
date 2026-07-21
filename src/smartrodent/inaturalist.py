@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 import pandas as pd
+import shutil
 
 
 def process_config(config: dict[str, Any]):
@@ -13,7 +14,7 @@ def process_config(config: dict[str, Any]):
     stop_year = config.get("last_year")
 
     if start_year is not None and stop_year is not None:
-        year_range = range(start_year, stop_year + 1)
+        year_range = list(range(start_year, stop_year + 1))
 
         if config.get("years") is not None and len(config["years"]) > 0:
             raise ValueError(
@@ -39,7 +40,7 @@ def process_config(config: dict[str, Any]):
         return config  # do nothing
 
 
-def fetch_image_from_inat(response: dict[str, Any]):
+def fetch_image_from_inat(df: pd.DataFrame):
     pass
 
 
@@ -49,13 +50,21 @@ def download_inat_data(config_path: str):
     with open(cfg_path, "r") as cfgfile:
         config = json.load(cfgfile)["data"]["inaturalist"]
 
+    print("read config: ", config)
     config = process_config(config)
-    output_path = config["output_path"]
-    quality = config["quality"]
+
+    print("processed config: ", config)
+    output_path = Path(config["output_path"]).resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cfg_path, output_path)
+
+    quality = config["quality_grade"]
 
     all_records = []
     for species in config["species"]:
+        print(f"current species {species}")
         for year in config["years"]:
+            print(f"  current year: {year}")
             response = get_observations(
                 taxon_name=species,
                 quality_grade=quality,
@@ -69,7 +78,11 @@ def download_inat_data(config_path: str):
             all_records.extend(response["results"])
 
     df = pd.json_normalize(all_records)
-    df.to_csv(Path(output_path).resolve() / "records.csv", index=False)
+
+    df.to_csv(output_path / "records.csv", index=False)
+
+    if config.get("download_images"):
+        fetch_image_from_inat(df)
 
 
 if __name__ == "__main__":
