@@ -1,14 +1,12 @@
 ### Datasets (collection, not evaluated yet)
-- [iRodent](https://zenodo.org/records/8250392)
+- ~~[iRodent](https://zenodo.org/records/8250392)~~
 - [kaggle thermal images of rats/mice](https://www.kaggle.com/datasets/ronneiborges/thermal-images-of-rats-mice-for-segmentation) but this is only for *Rattus norvegicus* (wistar rat)
 - [nature published dataset from camera traps sepcifically](https://www.nature.com/articles/s41597-025-06105-2)
 - [snakeclef 2021](https://lindat.mff.cuni.cz/repository/items/327ccc1f-a3c5-426a-9cf4-1b329cb019fa)
 - [snakes (found on roboflow)](https://universe.roboflow.com/chris-workspace/snake-species-identification/dataset/7)
 - [BioTrove](https://huggingface.co/datasets/BGLab/BioTrove) Gigantic dataset covering more or less the entire multicellular macroscopic tree of life, including rodent, snake and bird species
-
-- not directly relevant, but perhaps interesting because we might see traces of something that has run by while the machinery was off:
-[AnimalClue](https://dahlian00.github.io/AnimalCluePage/)
-- this is interesting as a modeling project in itself for other/future projects perhaps
+- [LiLA-BC: Labeled Information Library of Alexandria: Biology and Conservation](http://lila.science/) Collection of datasets for ML in biology and conservation. Labels inconsistent between datasets.
+- [wildlife-insights](https://app.wildlifeinsights.org/explore) Worldwide collection of camera trap projects with available data. Would be ideal for our case.
 
 ## Dataset evaluation
 - **iRodent**: Species labels are stripped and only the class 'rodent' is retained, not useful for us unless for pose estimation, for which the dataset is intended. good thing: it's scrapped from iNaturalist, which we might be able to use, but I am not entirely sure how to get the species labels back.
@@ -16,12 +14,13 @@
 - **nature published dataset**: is too specific for the area the images are from (qilian mountains, China), no relevant species
 - **BioTrove**: can be filtered on various taxonomic levels depending on what is needed. Started out with "[Muridae](https://en.wikipedia.org/wiki/Muridae)" (mouse-likes), which can further be filtered based on need. Because it spans essentially the entire animal tree of life (to one degree or another), we can filter the dataset for various animal species we need, and then apply OpenAI's clip model to filter out specific image types (like dead animals, animals caught in traps, bones/skulls or museum specimens) to build a dataset.
 Question here: The angles and distance at which the animals are photographed might be not representative in general of what a camera trap does?
-
+- **LiLA-BC**: tbd.
+- **Wildlife-insights**: Download hasn't worked for me yet? 
 ### Models
 - [SpeciesNet](https://research.google/blog/where-wild-things-roam-identifying-wildlife-with-speciesnet/) Can give species classifications and goes up the taxonomic hierarchy if not sure
 - [Yolo](https://docs.ultralytics.com/models/yolo11#overview) 'The' object detection model. Retrainable, but we need data of the species in question
 - We need to find a way to sensor-fuse the thermals + rgb images?
-
+- [Megadetector](https://github.com/agentmorris/MegaDetector) The detector backbone that SpeciesNet is built upon. Only finds animals in images, doesn't classify anything. 
 ### Remarks
 - we could perhaps try to become a member of wildlifeinsights to help the community with camera trap data?
 
