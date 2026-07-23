@@ -2411,18 +2411,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyaml"
-version = "26.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyyaml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/15/6a/acfdf17de0d6947b419da8696e02b781b18de2cf49e0472298b50e1f0711/pyaml-26.7.0.tar.gz", hash = "sha256:11cda3a796efc6dbce0d56836be56cfd26289dad07bcd78e9904086729929c93", size = 30669, upload-time = "2026-07-04T00:34:38.532Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/26/3f05f9e3692853dff663913d5d62fb8df3f5640c8d70b06588c0b51ed953/pyaml-26.7.0-py3-none-any.whl", hash = "sha256:cfa382780c43ae660669b87d394d550a41856ef175f5749f51f753e12d7077ac", size = 27226, upload-time = "2026-07-04T00:34:37.198Z" },
-]
-
-[[package]]
 name = "pyarrow"
 version = "25.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2970,9 +2958,9 @@ dependencies = [
     { name = "ollama" },
     { name = "open-clip-torch" },
     { name = "polars" },
-    { name = "pyaml" },
     { name = "pyinaturalist" },
     { name = "pytorchwildlife" },
+    { name = "pyyaml" },
     { name = "scikit-learn" },
     { name = "seaborn" },
     { name = "soundfile" },
@@ -3002,12 +2990,12 @@ requires-dist = [
     { name = "open-clip-torch" },
     { name = "polars" },
     { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "pyaml" },
     { name = "pyinaturalist" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-mock", marker = "extra == 'dev'" },
     { name = "pytorchwildlife" },
+    { name = "pyyaml" },
     { name = "scikit-learn" },
     { name = "seaborn" },
     { name = "soundfile" },

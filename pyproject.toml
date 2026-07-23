@@ -10,7 +10,7 @@ dependencies = [
     "matplotlib",
     "numpy",
     "polars",
-    "pyaml",
+    "pyyaml",
     "ultralytics",
     "torch",
     "torchvision",
