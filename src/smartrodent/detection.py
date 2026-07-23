@@ -6,6 +6,8 @@ import importlib
 import string
 import json
 
+import yaml
+
 
 class YOLO_Detector(DetectorBase):
     """Wrap Ultralytics YOLO for boxed object detection.
@@ -352,55 +354,49 @@ class DetectionExperiment:
         """
         return str(conf).translate(str.maketrans("", "", string.punctuation))
 
-    def resolve_lookups(self, value, class_sets: dict[str, list[str]]):
-        """Resolve class-set lookup markers recursively.
+    @staticmethod
+    def load_experiment_config(config_path: Path | str) -> dict:
+        """Load and validate a YAML experiment configuration.
+
+        YAML anchors and aliases can be used to share class lists between the
+        top-level ``class_sets`` mapping and detector keyword arguments.
 
         Args:
-            value: Configuration value that may contain lookup mappings.
-            class_sets: Named class lists available to lookup mappings.
+            config_path: Path to a ``.yaml`` or ``.yml`` configuration file.
 
         Returns:
-            The value with every ``{"lookup": "name"}`` mapping replaced by the
-            corresponding class list.
+            The parsed experiment configuration.
 
         Raises:
-            KeyError: If a lookup refers to an unknown class-set name.
+            ValueError: If the path is not YAML, the document is not a mapping,
+                or required top-level fields are missing.
         """
-        if isinstance(value, dict):
-            if set(value) == {"lookup"}:
-                lookup_name = value["lookup"]
-                try:
-                    return class_sets[lookup_name]
-                except KeyError as exc:
-                    raise KeyError(
-                        f"Unknown class set lookup {lookup_name!r}. "
-                        f"Available class sets: {sorted(class_sets)}"
-                    ) from exc
-            return {
-                key: self.resolve_lookups(item, class_sets)
-                for key, item in value.items()
-            }
+        config_path = Path(config_path)
+        if config_path.suffix.lower() not in {".yaml", ".yml"}:
+            raise ValueError(
+                f"Experiment config must be a YAML file, got {config_path.name!r}"
+            )
 
-        if isinstance(value, list):
-            return [self.resolve_lookups(item, class_sets) for item in value]
-
-        return value
-
-    def load_experiment_config(self, config_path: Path) -> dict:
-        """Load an experiment configuration and resolve class-set references.
-
-        Args:
-            config_path: Path to the JSON configuration file.
-
-        Returns:
-            The parsed configuration with lookup mappings expanded in its
-            ``experiments`` value.
-        """
         with config_path.open() as config_file:
-            config = json.load(config_file)
+            config = yaml.safe_load(config_file)
 
-        class_sets = config.get("class_sets", {})
-        config["experiments"] = self.resolve_lookups(config["experiments"], class_sets)
+        if not isinstance(config, dict):
+            raise ValueError("Experiment config must contain a top-level mapping")
+
+        required_fields = {
+            "image_dir",
+            "runs_dir",
+            "dataset_name",
+            "batchsize",
+            "confs",
+            "experiments",
+        }
+        missing_fields = sorted(required_fields - config.keys())
+        if missing_fields:
+            raise ValueError(
+                f"Experiment config is missing required fields: {missing_fields}"
+            )
+
         return config
 
     def image_groups(self, root: Path):

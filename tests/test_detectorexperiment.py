@@ -1,4 +1,3 @@
-import json
 import pytest
 
 import smartrodent.detection as detection
@@ -108,41 +107,58 @@ def test_conf_to_string(tmp_path, experiment_detector):
     assert experiment.conf_to_string(1.0) == "10"
 
 
-def test_resolve_lookups_nested_lists_scalars_and_unknown(
-    tmp_path, experiment_detector
-):
-    experiment = make_experiment(tmp_path)
-    class_sets = {"rodents": ["mouse", "rat"], "birds": ["owl"]}
-
-    assert experiment.resolve_lookups({"lookup": "rodents"}, class_sets) == [
-        "mouse",
-        "rat",
-    ]
-    assert experiment.resolve_lookups(
-        {"classes": {"lookup": "rodents"}, "nested": [{"lookup": "birds"}, 3]},
-        class_sets,
-    ) == {"classes": ["mouse", "rat"], "nested": [["owl"], 3]}
-    assert experiment.resolve_lookups("plain", class_sets) == "plain"
-
-    with pytest.raises(KeyError, match="Unknown class set lookup"):
-        experiment.resolve_lookups({"lookup": "missing"}, class_sets)
-
-
-def test_load_experiment_config_expands_class_sets(tmp_path, experiment_detector):
-    experiment = make_experiment(tmp_path)
-    config_path = tmp_path / "config.json"
+def test_load_experiment_config_supports_yaml_aliases(tmp_path):
+    config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        json.dumps(
-            {
-                "class_sets": {"rodents": ["mouse", "rat"]},
-                "experiments": [{"classes": {"lookup": "rodents"}}],
-            }
-        )
+        """
+image_dir: images
+runs_dir: runs
+dataset_name: test-data
+batchsize: 2
+confs: [0.1]
+class_sets:
+  rodents: &rodents
+    - mouse
+    - rat
+experiments:
+  - name: prompted
+    detector: YOLOE_Detector
+    kwargs:
+      classes: *rodents
+""".lstrip()
     )
 
-    config = experiment.load_experiment_config(config_path)
+    config = DetectionExperiment.load_experiment_config(config_path)
 
-    assert config["experiments"] == [{"classes": ["mouse", "rat"]}]
+    assert config["experiments"][0]["kwargs"]["classes"] == ["mouse", "rat"]
+    assert (
+        config["experiments"][0]["kwargs"]["classes"] is config["class_sets"]["rodents"]
+    )
+
+
+def test_load_experiment_config_rejects_non_yaml_path(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}")
+
+    with pytest.raises(ValueError, match="must be a YAML file"):
+        DetectionExperiment.load_experiment_config(config_path)
+
+
+@pytest.mark.parametrize("content", ["", "- not\n- a\n- mapping\n"])
+def test_load_experiment_config_requires_mapping(tmp_path, content):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(content)
+
+    with pytest.raises(ValueError, match="top-level mapping"):
+        DetectionExperiment.load_experiment_config(config_path)
+
+
+def test_load_experiment_config_requires_fields(tmp_path):
+    config_path = tmp_path / "config.yml"
+    config_path.write_text("experiments: []\n")
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        DetectionExperiment.load_experiment_config(config_path)
 
 
 def test_image_groups_skips_files_empty_dirs_and_sorts(tmp_path, experiment_detector):
