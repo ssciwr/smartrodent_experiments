@@ -1,35 +1,35 @@
 [project]
 name = "rodent-experiments"
 version = "0.1.0"
-description = "Add your description here"
+description = "Machine-learning for the SENTINEL-RAT/SmartRodent project"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "datasets>=5.0.0",
-    "hf-datasets>=0.3.0",
-    "matplotlib>=3.11.0",
-    "numpy>=2.4.6",
-    "polars>=1.41.2",
-    "pyaml>=26.2.1",
-    "speciesnet>=1.0",
-    "ultralytics>=8.4.68",
+    "datasets",
+    "hf-datasets",
+    "matplotlib",
+    "numpy",
+    "polars",
+    "pyaml",
+    "species",
+    "ultralytics",
     "torch",
     "torchvision",
-    "pyaml",
-    "open-clip-torch>=3.3.0",
-    "seaborn>=0.13.2",
-    "scikit-learn>=1.9.0",
-    "ollama>=0.6.2",
-    "pytorchwildlife>=1.3.0",
-    "soundfile>=0.14.0",
-    "librosa>=0.11.0",
-    "pyinaturalist>=0.21.1",
-    "dvclive>=3.49.1",
+    "open-clip-torch",
+    "seaborn",
+    "scikit-learn",
+    "ollama",
+    "pytorchwildlife",
+    "soundfile",
+    "librosa",
+    "pyinaturalist",
+    "dvclive",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
 vlm = ["ammico[api]"]
+
+dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
 
 [tool.uv.sources]
 # The PyPI release of ammico (<=0.2.6) still depends on the old, unmaintained
@@ -38,6 +38,9 @@ vlm = ["ammico[api]"]
 # main branch dropped all of that in favor of VLM inference over an
 # OpenAI-compatible HTTP API (the "api" extra), so pin to it instead of PyPI.
 ammico = { git = "https://github.com/ssciwr/AMMICO.git" }
+
+# clip from openai needs to be installed from git too
+clip = { git = "https://github.com/openai/CLIP.git" }
 
 [tool.coverage.run]
 branch = true
