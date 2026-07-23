@@ -1,6 +1,4 @@
 import json
-from pathlib import Path
-
 import pytest
 
 import smartrodent.detection as detection
@@ -20,8 +18,8 @@ class ExperimentDummyDetector(DetectorBase):
         self.detect_call = (path, out)
         return ["result"]
 
-    def write_detections_json(self, _results, _json_path):
-        del _results, _json_path
+    def write_detections_json(self, results, json_path):
+        del results, json_path
 
 
 @pytest.fixture
@@ -52,7 +50,7 @@ def test_invalid_detector_type_raises():
         DetectionExperiment("runs", "data", "exp", 0.1, "MissingDetector")
 
 
-def test_init_defaults_and_batchsize_pop(tmp_path, experiment_detector):
+def test_init_defaults(tmp_path, experiment_detector):
     default_experiment = make_experiment(tmp_path)
     assert default_experiment.detector_args == []
     assert default_experiment.detector_kwargs == {}
