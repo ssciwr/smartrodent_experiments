@@ -17,7 +17,7 @@ The current implementation provides:
 - batching that bounds the number of images passed to Ultralytics at once;
 - a `DetectionExperiment` helper for running one detector configuration over
   folder-based image groups;
-- helpers for loading JSON experiment settings and expanding reusable class
+- YAML experiment configuration with anchors and aliases for reusable class
   lists;
 - an AMMICO notebook and script for experimental VLM inference through an
   OpenAI-compatible API;
@@ -33,6 +33,8 @@ experimental or documented as notes.
 
 ```text
 .
+├── configs/
+│   └── detector_experiments.yaml           detector experiment matrix and settings
 ├── notebooks/
 │   ├── ammico_demo_getting_started.ipynb  AMMICO image-summary/VQA walkthrough
 │   └── yolo26n.pt                          local model artifact, ignored by git
@@ -194,9 +196,34 @@ for group_name, images in experiment.image_groups(Path("datasets/grouped")):
     experiment.run_detector_on_group(group_name, images)
 ```
 
-The class also contains `load_experiment_config(...)`, which reads JSON and
-expands values such as `{"lookup": "small_mammals"}` from a top-level
-`class_sets` mapping. A full config-driven runner has not yet been implemented.
+The repository includes `configs/detector_experiments.yaml` for shared dataset
+settings, confidence thresholds, and detector definitions. Load it without
+constructing an experiment first:
+
+```python
+config = DetectionExperiment.load_experiment_config(
+    "configs/detector_experiments.yaml"
+)
+```
+
+YAML anchors replace the previous custom JSON lookup syntax. A reusable class
+set can be declared and referenced directly:
+
+```yaml
+class_sets:
+  small_mammals: &small_mammals
+    - rat
+    - mouse
+    - shrew
+
+experiments:
+  - name: prompted
+    detector: YOLOE_Detector
+    kwargs:
+      classes: *small_mammals
+```
+
+A full config-driven runner has not yet been implemented.
 
 ## AMMICO/VLM experiment
 
