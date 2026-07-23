@@ -30,6 +30,7 @@ dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
 [tool.coverage.run]
 branch = true
 source = ["./src/smartrodent"]
+omit = ["tests/*"]
 
 [tool.coverage.report]
 # Regexes for lines to exclude from consideration
