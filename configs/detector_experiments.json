@@ -1,0 +1,80 @@
+{
+    "image_dir": "./smartrodent_experiments/datasets/biotrove-central-europe/filtered",
+    "runs_dir": "./smartrodent_experiments/test",
+    "dataset_name": "central-europe",
+    "batchsize": 1,
+    "confs": [
+        0.01,
+        0.05,
+        0.1,
+        0.2
+    ],
+    "class_sets": {
+        "central_europe_species": [
+            "Rattus norvegicus",
+            "Rattus rattus",
+            "Mus musculus",
+            "Myodes glareolus",
+            "Apodemus agrarius",
+            "Apodemus flavicollis",
+            "Arvicola amphibius",
+            "Apodemus sylvaticus",
+            "Microtus arvalis",
+            "Microtus agrestis",
+            "Crocidura leucodon",
+            "Sorex araneus",
+            "Sorex minutus",
+            "Sorex coronatus"
+        ],
+        "central_europe_common": [
+            "brown rat",
+            "black rat",
+            "house mouse",
+            "bank vole",
+            "striped field mouse",
+            "yellow-necked mouse",
+            "european water vole",
+            "wood mouse",
+            "common vole",
+            "field vole",
+            "bicolored white-toothed shrew",
+            "common shrew",
+            "pygmy shrew",
+            "crowned shrew"
+        ]
+    },
+    "experiments": [
+        {
+            "name": "yolo26",
+            "detector": "YOLO_Detector",
+            "kwargs": {
+                "model_name": "yolo26s.pt",
+                "crop": true
+            }
+        },
+        {
+            "name": "yoloe_animalornot",
+            "detector": "YOLOE_Detector",
+            "kwargs": {
+                "model_name": "yoloe-26s-seg.pt",
+                "crop": true,
+                "classes": [
+                    "This is a photo with an animal like a mouse, rat, cat, fox, or hamster in it",
+                    "This is a photo without any animal at all in it, but a photo of something else entirely like trash, a car, a plastic box or a piece of wood or a leaf"
+                ]
+            }
+        },
+        {
+            "name": "yoloe_rodentornot",
+            "detector": "YOLOE_Detector",
+            "kwargs": {
+                "model_name": "yoloe-26s-seg.pt",
+                "crop": true,
+                "classes": [
+                    "This is a photo with a rodent like a rat, mouse or vole, or similar small mammal like a shrew in it",
+                    "This is a photo without a rodent in it at all, but a photo of some other animal like a snake, bird or human"
+                ]
+            }
+        }
+    ]
+}
