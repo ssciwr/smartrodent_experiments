@@ -36,6 +36,35 @@ def test_yolo_detector_stores_configuration():
     assert detector.project == "project"
 
 
+def test_yolo_writer_sorts_rounds_and_creates_parent(tmp_path, yolo_result):
+    detector = YOLO_Detector("run", False, 1, "boxed", 0.5, model_name="weights.pt")
+    json_path = tmp_path / "nested" / "detections.json"
+
+    detector.write_detections_json([yolo_result], json_path)
+
+    assert json.loads(json_path.read_text()) == {
+        "camera.jpg": [
+            {"class": "rat", "conf": 0.988},
+            {"class": "mouse", "conf": 0.457},
+        ]
+    }
+
+
+def test_yolo_writer_preserves_existing_and_handles_empty_boxes(
+    tmp_path, empty_yolo_result
+):
+    detector = YOLO_Detector("run", False, 1, "boxed", 0.5, model_name="weights.pt")
+    json_path = tmp_path / "detections.json"
+    json_path.write_text(json.dumps({"old.jpg": [{"class": "old", "conf": 1.0}]}))
+
+    detector.write_detections_json([empty_yolo_result], json_path)
+
+    assert json.loads(json_path.read_text()) == {
+        "old.jpg": [{"class": "old", "conf": 1.0}],
+        "empty.jpg": [],
+    }
+
+
 def test_yolo_detector_detect_chunks_predicts_and_writes_json(
     monkeypatch, tmp_path, sample_paths, recording_model
 ):

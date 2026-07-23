@@ -19,6 +19,9 @@ class DummyDetector(DetectorBase):
         del _path, _out, _args, _kwargs
         return []
 
+    def write_detections_json(self, _results, _json_path):
+        del _results, _json_path
+
 
 class RecordingModel:
     def __init__(self, result_names=None):

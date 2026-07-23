@@ -1,71 +1,20 @@
-import json
 from pathlib import Path
 
 import pytest
 
 from conftest import DummyDetector, make_result
+from smartrodent.base import DetectorBase
 
 
-def read_json(path):
-    return json.loads(path.read_text())
+class DetectOnlyDetector(DetectorBase):
+    def detect(self, path, out, *args, **kwargs):
+        del path, out, args, kwargs
+        return []
 
 
-def test_write_ultralytics_results_sorted_and_rounded(detector, tmp_path, yolo_result):
-    json_path = tmp_path / "nested" / "detections.json"
-
-    detector.write_detections_json([yolo_result], json_path)
-
-    assert read_json(json_path) == {
-        "camera.jpg": [
-            {"class": "rat", "conf": 0.988},
-            {"class": "mouse", "conf": 0.457},
-        ]
-    }
-
-
-def test_write_ultralytics_preserves_existing_and_handles_empty_boxes(
-    detector, tmp_path, empty_yolo_result
-):
-    json_path = tmp_path / "detections.json"
-    json_path.write_text(json.dumps({"old.jpg": [{"class": "old", "conf": 1.0}]}))
-
-    detector.write_detections_json([empty_yolo_result], json_path)
-
-    assert read_json(json_path) == {
-        "old.jpg": [{"class": "old", "conf": 1.0}],
-        "empty.jpg": [],
-    }
-
-
-def test_write_speciesnet_results_known_unknown_and_missing_score(detector, tmp_path):
-    json_path = tmp_path / "detections.json"
-    results = {
-        "predictions": [
-            {
-                "filepath": "/data/mouse.jpg",
-                "prediction": "rodent",
-                "prediction_score": 0.6543,
-            },
-            {
-                "filepath": "/data/unknown.jpg",
-                "prediction": "unknown",
-                "prediction_score": 0.9,
-            },
-            {"filepath": "/data/no-score.jpg", "prediction": "rat"},
-        ]
-    }
-
-    detector.write_detections_json(results, json_path)
-
-    assert read_json(json_path) == {
-        "mouse.jpg": [{"class": "rodent", "conf": 0.654}],
-        "unknown.jpg": [],
-        "no-score.jpg": [],
-    }
-
-
-def test_shorten_label_returns_item_unchanged(detector):
-    assert detector.shorten_label("rodent") == "rodent"
+def test_write_detections_json_is_abstract():
+    with pytest.raises(TypeError, match="write_detections_json"):
+        DetectOnlyDetector("test", False, 1, "boxed", 0.5)
 
 
 def test_resolve_local_model_absolute_and_missing_relative(detector, tmp_path):

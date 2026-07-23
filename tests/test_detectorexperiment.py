@@ -20,6 +20,9 @@ class ExperimentDummyDetector(DetectorBase):
         self.detect_call = (path, out)
         return ["result"]
 
+    def write_detections_json(self, _results, _json_path):
+        del _results, _json_path
+
 
 @pytest.fixture
 def experiment_detector(monkeypatch):
