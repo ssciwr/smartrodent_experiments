@@ -26,3 +26,6 @@ runs*
 
 # vscode
 .vscode/
+
+# plumbing
+.coverage
