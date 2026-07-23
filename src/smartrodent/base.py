@@ -1,16 +1,13 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-import numpy as np
-import json
 
 
 class DetectorBase(ABC):
     """Common interface and shared helpers for all detector backends.
 
-    Subclasses wrap very different model APIs (Ultralytics YOLO, SpeciesNet, and
-    BioTrove-CLIP) behind one ``detect(path, out)`` method. The base class stores
-    the experiment settings that are common across backends and provides helpers for
-    writing a normalized ``detections.json`` file.
+    Subclasses wrap different model APIs behind a common ``detect(path, out)``
+    method. Each detector implementation is responsible for converting its native
+    results into the normalized ``detections.json`` format.
     """
 
     def __init__(
@@ -41,54 +38,10 @@ class DetectorBase(ABC):
         self.relpad = relpad
         self.project = project
 
+    @abstractmethod
     def write_detections_json(self, results, json_path: Path | str) -> None:
-        """Append detection records to a JSON file from any supported model.
-
-        Accepts an Ultralytics Results list (YOLO26 or YOLOE) or a SpeciesNet predictions
-        dict. Existing entries are preserved so the file accumulates across per-image calls.
-        Each entry is keyed by filename and contains a list of {class, conf} dicts sorted
-        by confidence descending.
-        """
-        json_path = Path(json_path)
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        records = json.loads(json_path.read_text()) if json_path.exists() else {}
-
-        if isinstance(results, dict) and "predictions" in results:
-            # SpeciesNet: {"predictions": [{filepath, prediction, prediction_score, ...}]}
-            for item in results["predictions"]:
-                filename = Path(item["filepath"]).name
-                label = self.shorten_label(item.get("prediction"))
-                score = item.get("prediction_score")
-                if label == "unknown" or score is None:
-                    records[filename] = []
-                else:
-                    records[filename] = [
-                        {"class": label, "conf": round(float(score), 3)}
-                    ]
-        else:
-            # Ultralytics: list of Results objects (YOLO26 or YOLOE)
-            for r in results:
-                boxes = r.boxes
-                if not boxes or len(boxes) == 0:
-                    records[Path(r.path).name] = []
-                else:
-                    records[Path(r.path).name] = [
-                        {"class": r.names[int(cls)], "conf": round(float(conf), 3)}
-                        for cls, conf in sorted(
-                            zip(boxes.cls, boxes.conf), key=lambda x: -x[1]
-                        )
-                    ]
-
-        json_path.write_text(json.dumps(records, indent=2))
-
-    def shorten_label(self, item):
-        """Return the display label used in ``detections.json``.
-
-        Most detectors already emit short human-readable labels, so the base
-        implementation returns the value unchanged. SpeciesNet overrides this because
-        it emits semicolon-delimited taxonomy strings.
-        """
-        return item
+        """Write backend-native results as normalized detection records."""
+        pass
 
     def resolve_local_model(self, model_name: str | Path) -> str:
         """Resolve bundled model weights relative to this file when present."""

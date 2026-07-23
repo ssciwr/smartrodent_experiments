@@ -62,6 +62,31 @@ class YOLO_Detector(DetectorBase):
             raise ValueError("Error, model_name cannot be None")
         self.model_name = model_name
 
+    def write_detections_json(self, results, json_path: Path | str) -> None:
+        """Append Ultralytics results to a normalized detections JSON file."""
+        json_path = Path(json_path)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        records = json.loads(json_path.read_text()) if json_path.exists() else {}
+
+        for result in results:
+            boxes = result.boxes
+            filename = Path(result.path).name
+            if not boxes or len(boxes) == 0:
+                records[filename] = []
+                continue
+
+            records[filename] = [
+                {
+                    "class": result.names[int(class_id)],
+                    "conf": round(float(confidence), 3),
+                }
+                for class_id, confidence in sorted(
+                    zip(boxes.cls, boxes.conf), key=lambda item: -item[1]
+                )
+            ]
+
+        json_path.write_text(json.dumps(records, indent=2))
+
     def detect(self, path, out):
         """Run YOLO26 inference and write a normalized detections summary.
 
@@ -99,7 +124,7 @@ class YOLO_Detector(DetectorBase):
         return all_results
 
 
-class YOLOE_Detector(DetectorBase):
+class YOLOE_Detector(YOLO_Detector):
     """Ultralytics YOLOE detector wrapper with optional text prompt classes.
 
     YOLOE can be run with natural-language class prompts through ``self.classes``.
@@ -148,13 +173,18 @@ class YOLOE_Detector(DetectorBase):
             ValueError: If ``model_name`` is not provided.
         """
 
-        super().__init__(name, crop, batchsize, img_outname, conf, relpad, project)
-
-        self.classes = classes
-        self.task = task
-        if model_name is None:
-            raise ValueError("Error, model_name cannot be None")
-        self.model_name = model_name
+        super().__init__(
+            name,
+            crop,
+            batchsize,
+            img_outname,
+            conf,
+            relpad=relpad,
+            model_name=model_name,
+            classes=classes,
+            task=task,
+            project=project,
+        )
 
     def detect(self, path, out):
         """Run YOLOE inference and write a normalized detections summary.
