@@ -3,11 +3,11 @@ from pathlib import Path
 
 
 class DetectorBase(ABC):
-    """Common interface and shared helpers for all detector backends.
+    """Define the common interface and helpers for detector backends.
 
-    Subclasses wrap different model APIs behind a common ``detect(path, out)``
-    method. Each detector implementation is responsible for converting its native
-    results into the normalized ``detections.json`` format.
+    Subclasses wrap model-specific APIs behind a common ``detect(path, out)``
+    method and convert their native results into the normalized
+    ``detections.json`` format.
     """
 
     def __init__(
@@ -21,12 +21,16 @@ class DetectorBase(ABC):
         relpad=0.0,
         project: str | None = None,
     ):
-        """Store detector configuration for a single experiment run.
+        """Initialize settings shared by detector backends.
 
-        Parameters are intentionally broad because the experiment JSON feeds several
-        detector types through the same constructor. Each subclass only uses the
-        fields relevant to its backend; unused fields are kept here so configs can be
-        swapped between experiments without changing the orchestration code.
+        Args:
+            name: Name of the detector run.
+            crop: Whether the backend should save detection crops.
+            batchsize: Maximum number of images processed in one batch.
+            img_outname: Name used for image output where supported.
+            conf: Minimum detection confidence.
+            relpad: Relative padding used when extracting crops.
+            project: Optional directory for backend-native output.
         """
         # all
         self.name = name
@@ -40,11 +44,24 @@ class DetectorBase(ABC):
 
     @abstractmethod
     def write_detections_json(self, results, json_path: Path | str) -> None:
-        """Write backend-native results as normalized detection records."""
+        """Write backend-native results as normalized detection records.
+
+        Args:
+            results: Results in the detector backend's native format.
+            json_path: Destination path for the normalized JSON records.
+        """
         pass
 
     def resolve_local_model(self, model_name: str | Path) -> str:
-        """Resolve bundled model weights relative to this file when present."""
+        """Resolve a model path, preferring weights bundled with this module.
+
+        Args:
+            model_name: Absolute path, relative path, or model identifier.
+
+        Returns:
+            The resolved bundled path when it exists; otherwise, ``model_name``
+            converted to a string.
+        """
         model_path = Path(model_name)
         if model_path.is_absolute():
             return str(model_path)
@@ -53,12 +70,19 @@ class DetectorBase(ABC):
         return str(bundled_path) if bundled_path.exists() else str(model_name)
 
     def restore_result_paths(self, results, source_paths):
-        """Restore original filenames on Ultralytics batch results.
+        """Restore source filenames on Ultralytics batch results.
 
-        Ultralytics converts list-of-path inputs into PIL images internally. That can
-        drop PIL ``filename`` metadata and make result paths fall back to image0.jpg,
-        image1.jpg, etc. The result order matches the input order, so put the original
-        source paths back before writing detections.json.
+        Ultralytics may replace paths with names such as ``image0.jpg`` when it
+        converts a list of paths into in-memory images. Result order still matches
+        input order, so list inputs can be restored safely.
+
+        Args:
+            results: Ultralytics result objects to update.
+            source_paths: A single source path or an ordered collection of paths.
+
+        Returns:
+            The original ``results`` collection, with paths updated for collection
+            inputs.
         """
         if isinstance(source_paths, str | Path):
             return results
@@ -69,11 +93,17 @@ class DetectorBase(ABC):
         return results
 
     def path_batches(self, path: str | Path | list[Path | str]):
-        """Yield single-image input or bounded path batches for model inference.
+        """Split detector input into bounded inference batches.
 
-        Ultralytics treats a Python list of paths as in-memory images and can ignore
-        the separate ``batch=`` setting for that loader. Chunking before ``predict``
-        keeps the real GPU batch bounded by ``self.batchsize``.
+        Args:
+            path: A single path or an ordered list of image paths.
+
+        Yields:
+            A single path unchanged, or lists containing at most ``batchsize``
+            paths.
+
+        Raises:
+            ValueError: If ``batchsize`` is not positive for a list input.
         """
         if isinstance(path, str | Path):
             yield path
@@ -89,10 +119,15 @@ class DetectorBase(ABC):
     def detect(
         self, path: str | Path | list[Path | str], out: Path, *args, **kwargs
     ) -> list:
-        """Run the detector on one image, a directory, or a batch of image paths.
+        """Run detection and write normalized output.
 
-        Subclasses should save their model-native outputs under ``out`` when useful,
-        call ``write_detections_json`` to update the normalized summary, and return
-        the backend's native result object for ad-hoc inspection.
+        Args:
+            path: A single image, a directory, or an ordered list of image paths.
+            out: Directory for normalized detector output.
+            *args: Additional backend-specific positional arguments.
+            **kwargs: Additional backend-specific keyword arguments.
+
+        Returns:
+            Results in the detector backend's native format.
         """
         pass

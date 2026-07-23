@@ -8,10 +8,10 @@ import json
 
 
 class YOLO_Detector(DetectorBase):
-    """Ultralytics YOLO26 detector wrapper for boxed object detections.
+    """Wrap Ultralytics YOLO for boxed object detection.
 
-    This backend uses the bundled YOLO26 weights by default, lets Ultralytics save
-    preview images/crops, and writes a compact per-image class/confidence summary.
+    The detector saves Ultralytics previews and optional crops while also writing
+    a normalized per-image class and confidence summary.
     """
 
     def __init__(
@@ -30,29 +30,23 @@ class YOLO_Detector(DetectorBase):
         task: str = "detect",
         project: str | None = None,
     ):
-        """Configure a YOLO26 detector run.
+        """Initialize a YOLO detector run.
 
         Args:
-            name (str): Ultralytics run name; used as the ``name=`` argument to
-                ``predict`` and as the subfolder under ``project`` where previews land.
-            crop (bool): Whether to save per-detection crop images alongside previews.
-            batchsize (int): Maximum number of images sent to ``predict`` per call.
-            img_outname (str): Unused by this backend; kept for interface parity with
-                other detectors.
-            conf (float): Confidence threshold passed to ``predict``.
-            relpad (float, optional): Unused by this backend; kept for interface parity
-                with other detectors. Defaults to 0.0.
-            model_name (str | None, optional): Filename or path of the YOLO weights to
-                load, resolved via ``resolve_local_model``. Required. Defaults to None.
-            classes (list[str] | None, optional): Unused by this backend; kept for
-                interface parity with ``YOLOE_Detector``. Defaults to None.
-            task (str, optional): Ultralytics task passed to the ``YOLO`` constructor.
-                Defaults to "detect".
-            project (str | None, optional): Ultralytics ``project=`` output directory
-                for previews/crops. Defaults to None.
+            name: Ultralytics run name and output subdirectory name.
+            crop: Whether to save a crop for each detection.
+            batchsize: Maximum number of images passed to one prediction call.
+            img_outname: Image output name retained for interface compatibility.
+            conf: Confidence threshold passed to Ultralytics.
+            relpad: Relative crop padding retained for interface compatibility.
+            model_name: Filename, path, or identifier of the YOLO weights.
+            classes: Class prompts retained for compatibility with
+                ``YOLOE_Detector``.
+            task: Ultralytics model task.
+            project: Optional Ultralytics output directory.
 
         Raises:
-            ValueError: If ``model_name`` is not provided.
+            ValueError: If ``model_name`` is ``None``.
         """
 
         super().__init__(name, crop, batchsize, img_outname, conf, relpad, project)
@@ -63,7 +57,15 @@ class YOLO_Detector(DetectorBase):
         self.model_name = model_name
 
     def write_detections_json(self, results, json_path: Path | str) -> None:
-        """Append Ultralytics results to a normalized detections JSON file."""
+        """Append Ultralytics results to normalized detection records.
+
+        Existing records are preserved. Detections for each image are sorted by
+        descending confidence, and images without boxes receive an empty list.
+
+        Args:
+            results: Ordered Ultralytics result objects.
+            json_path: Destination path for ``detections.json``.
+        """
         json_path = Path(json_path)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         records = json.loads(json_path.read_text()) if json_path.exists() else {}
@@ -88,16 +90,15 @@ class YOLO_Detector(DetectorBase):
         json_path.write_text(json.dumps(records, indent=2))
 
     def detect(self, path, out):
-        """Run YOLO26 inference and write a normalized detections summary.
+        """Run YOLO inference and write normalized detections.
 
         Args:
-            path (str | Path | list[Path | str]): A single image/directory, or a list
-                of image paths to run in batches of ``self.batchsize``.
-            out (Path): Directory to write ``detections.json`` into.
+            path: A single image, a directory, or an ordered list of image paths.
+            out: Directory in which to write ``detections.json``.
 
         Returns:
-            list: The Ultralytics ``Results`` objects for all processed images, with
-            their ``path`` attributes restored to the original source paths.
+            Ultralytics result objects for all processed images, with original
+            source paths restored for list inputs.
         """
 
         self.model = YOLO(self.resolve_local_model(self.model_name), task=self.task)
@@ -125,11 +126,10 @@ class YOLO_Detector(DetectorBase):
 
 
 class YOLOE_Detector(YOLO_Detector):
-    """Ultralytics YOLOE detector wrapper with optional text prompt classes.
+    """Wrap Ultralytics YOLOE with optional text-prompt classes.
 
-    YOLOE can be run with natural-language class prompts through ``self.classes``.
-    The rest of the output handling mirrors ``YOLO_Detector`` so experiments can
-    compare YOLO26 and YOLOE using the same ``detections.json`` format.
+    YOLOE uses the same normalized output format as ``YOLO_Detector`` and can
+    configure natural-language classes before inference.
     """
 
     def __init__(
@@ -147,30 +147,22 @@ class YOLOE_Detector(YOLO_Detector):
         task: str = "detect",
         project: str | None = None,
     ):
-        """Configure a YOLOE detector run, optionally with text-prompt classes.
+        """Initialize a YOLOE detector run.
 
         Args:
-            name (str): Unused by this backend (the Ultralytics run name is hardcoded
-                to "boxed" in ``detect``); kept for interface parity with ``YOLO_Detector``.
-            crop (bool): Whether to save per-detection crop images alongside previews.
-            batchsize (int): Maximum number of images sent to ``predict`` per call.
-            img_outname (str): Unused by this backend; kept for interface parity with
-                other detectors.
-            conf (float): Confidence threshold passed to ``predict``.
-            relpad (float, optional): Unused by this backend; kept for interface parity
-                with other detectors. Defaults to 0.0.
-            model_name (str | None, optional): Filename or path of the YOLOE weights to
-                load, resolved via ``resolve_local_model``. Required. Defaults to None.
-            classes (list[str] | None, optional): Natural-language class prompts. When
-                given, ``detect`` calls ``model.set_classes`` before running inference.
-                Defaults to None.
-            task (str, optional): Ultralytics task passed to the ``YOLOE`` constructor.
-                Defaults to "detect".
-            project (str | None, optional): Ultralytics ``project=`` output directory
-                for previews/crops. Defaults to None.
+            name: Detector run name retained for interface compatibility.
+            crop: Whether to save a crop for each detection.
+            batchsize: Maximum number of images passed to one prediction call.
+            img_outname: Image output name retained for interface compatibility.
+            conf: Confidence threshold passed to Ultralytics.
+            relpad: Relative crop padding retained for interface compatibility.
+            model_name: Filename, path, or identifier of the YOLOE weights.
+            classes: Optional natural-language class prompts.
+            task: Ultralytics model task.
+            project: Optional Ultralytics output directory.
 
         Raises:
-            ValueError: If ``model_name`` is not provided.
+            ValueError: If ``model_name`` is ``None``.
         """
 
         super().__init__(
@@ -187,16 +179,15 @@ class YOLOE_Detector(YOLO_Detector):
         )
 
     def detect(self, path, out):
-        """Run YOLOE inference and write a normalized detections summary.
+        """Run YOLOE inference and write normalized detections.
 
         Args:
-            path (str | Path | list[Path | str]): A single image/directory, or a list
-                of image paths to run in batches of ``self.batchsize``.
-            out (Path): Directory to write ``detections.json`` into.
+            path: A single image, a directory, or an ordered list of image paths.
+            out: Directory in which to write ``detections.json``.
 
         Returns:
-            list: The Ultralytics ``Results`` objects for all processed images, with
-            their ``path`` attributes restored to the original source paths.
+            Ultralytics result objects for all processed images, with original
+            source paths restored for list inputs.
         """
 
         # Load the local YOLOE model. Resolve the weights relative to this file so
@@ -252,14 +243,11 @@ class YOLOE_Detector(YOLO_Detector):
 
 
 class DetectionExperiment:
-    """Runs one detector configuration across the groups of a dataset.
+    """Run one detector configuration across grouped dataset images.
 
-    ``run_dir``, ``dataset_name``, ``experiment_name`` and ``conf`` are shared by every
-    group processed in the experiment, so they are fixed once here rather than being
-    re-passed on each call. The detector itself is also owned by this class: give it the
-    detector's class name plus the positional/keyword arguments it needs, and this class
-    resolves the name to a ``DetectorBase`` subclass and builds a fresh instance per group
-    (each group needs its own ``project`` output directory).
+    Shared experiment settings are fixed at initialization. A fresh detector is
+    created for each group so backend-native output is written to that group's
+    project directory.
     """
 
     def __init__(
@@ -272,24 +260,21 @@ class DetectionExperiment:
         detector_args: list | None = None,
         detector_kwargs: dict | None = None,
     ):
-        """Store shared experiment settings and resolve the detector to build per group.
+        """Initialize shared experiment settings.
 
         Args:
-            run_dir (str | Path): Root directory that all experiment runs are written under.
-            dataset_name (str): Name of the dataset being processed.
-            experiment_name (str): Name of this experiment, used in the output path.
-            conf (float): Confidence threshold passed to every detector instance.
-            detector_type (str): Name of a ``DetectorBase`` subclass defined in this
-                module, e.g. ``"YOLO_Detector"``.
-            detector_args (list | None, optional): Positional args forwarded to the
-                detector constructor. Defaults to none.
-            detector_kwargs (dict | None, optional): Keyword args forwarded to the
-                detector constructor. ``batchsize`` may be included here and defaults
-                to 1 if omitted. Defaults to none.
+            run_dir: Root directory for experiment output.
+            dataset_name: Name of the dataset being processed.
+            experiment_name: Name used in the experiment output path.
+            conf: Confidence threshold passed to each detector instance.
+            detector_type: Name of a ``DetectorBase`` subclass in this module.
+            detector_args: Optional positional arguments for the detector.
+            detector_kwargs: Optional keyword arguments for the detector. The
+                ``batchsize`` value defaults to ``1`` and is handled separately.
 
         Raises:
-            ValueError: If ``detector_type`` is not a ``DetectorBase`` subclass defined
-                in this module.
+            ValueError: If ``detector_type`` does not identify a concrete
+                ``DetectorBase`` subclass in this module.
         """
         self.run_dir = Path(run_dir)
         self.dataset_name = dataset_name
@@ -314,7 +299,14 @@ class DetectionExperiment:
         self.batchsize = self.detector_kwargs.pop("batchsize", 1)
 
     def build_detector(self, project: Path) -> DetectorBase:
-        """Instantiate the configured detector for a single group's output directory."""
+        """Build the configured detector for one image group.
+
+        Args:
+            project: Backend-native output directory for the group.
+
+        Returns:
+            A newly initialized detector instance.
+        """
         return self.detector_cls(
             *self.detector_args,
             name="boxed",
@@ -326,14 +318,14 @@ class DetectionExperiment:
         )
 
     def run_detector_on_group(self, group_name: str, imgs: list[Path]):
-        """Run the configured detector on one group of images.
+        """Run the configured detector on one image group.
 
         Args:
-            group_name (str): Name of the image group, used in the output path.
-            imgs (list[Path]): Images belonging to this group.
+            group_name: Name used for the group's output directory.
+            imgs: Ordered image paths belonging to the group.
 
         Returns:
-            list: The detector's per-image results, as returned by ``detect``.
+            Results returned by the detector's ``detect`` method.
         """
         out = (
             self.run_dir
@@ -349,15 +341,31 @@ class DetectionExperiment:
 
     ## Experimentation driver functions
     def conf_to_string(self, conf: float) -> str:
-        """Convert a confidence value into the run-folder suffix used by experiments.
+        """Convert a confidence value to its run-directory suffix.
 
-        For example, ``0.05`` becomes ``"005"`` so outputs land under folders such as
-        ``runs/detect005/...``. This preserves the historical directory layout.
+        Args:
+            conf: Detection confidence value.
+
+        Returns:
+            The confidence string with punctuation removed. For example, ``0.05``
+            becomes ``"005"``.
         """
         return str(conf).translate(str.maketrans("", "", string.punctuation))
 
     def resolve_lookups(self, value, class_sets: dict[str, list[str]]):
-        """Replace {"lookup": "name"} markers with lists from config.class_sets."""
+        """Resolve class-set lookup markers recursively.
+
+        Args:
+            value: Configuration value that may contain lookup mappings.
+            class_sets: Named class lists available to lookup mappings.
+
+        Returns:
+            The value with every ``{"lookup": "name"}`` mapping replaced by the
+            corresponding class list.
+
+        Raises:
+            KeyError: If a lookup refers to an unknown class-set name.
+        """
         if isinstance(value, dict):
             if set(value) == {"lookup"}:
                 lookup_name = value["lookup"]
@@ -379,11 +387,14 @@ class DetectionExperiment:
         return value
 
     def load_experiment_config(self, config_path: Path) -> dict:
-        """Load detector experiment settings and resolve class-set references.
+        """Load an experiment configuration and resolve class-set references.
 
-        The JSON file can keep long class lists under ``class_sets`` and refer to them
-        from an experiment with ``{"lookup": "class_set_name"}``. This function expands
-        those references before the main loop instantiates detector classes.
+        Args:
+            config_path: Path to the JSON configuration file.
+
+        Returns:
+            The parsed configuration with lookup mappings expanded in its
+            ``experiments`` value.
         """
         with config_path.open() as config_file:
             config = json.load(config_file)
@@ -393,10 +404,14 @@ class DetectionExperiment:
         return config
 
     def image_groups(self, root: Path):
-        """Yield named image batches from immediate subdirectories of ``root``.
+        """Yield image groups from immediate subdirectories.
 
-        The current dataset layout groups images by folder. Each yielded tuple is
-        ``(folder_name, sorted_image_paths)`` and empty/non-directory entries are ignored.
+        Args:
+            root: Root directory containing one subdirectory per image group.
+
+        Yields:
+            Tuples containing the group directory name and its sorted image paths.
+            Files, empty directories, and nested groups are ignored.
         """
         for imgpath in sorted(root.iterdir()):
             if not imgpath.is_dir():
