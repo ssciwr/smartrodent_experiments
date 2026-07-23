@@ -1,47 +1,36 @@
 [project]
 name = "rodent-experiments"
 version = "0.1.0"
-description = "Add your description here"
+description = "Machine-learning for the SENTINEL-RAT/SmartRodent project"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14, <3.15"
 dependencies = [
-    "datasets>=5.0.0",
-    "hf-datasets>=0.3.0",
-    "matplotlib>=3.11.0",
-    "numpy>=2.4.6",
-    "polars>=1.41.2",
-    "pyaml>=26.2.1",
-    "speciesnet>=1.0",
-    "ultralytics>=8.4.68",
+    "datasets",
+    "hf-datasets",
+    "matplotlib",
+    "numpy",
+    "polars",
+    "pyyaml",
+    "ultralytics",
     "torch",
     "torchvision",
-    "pyaml",
-    "open-clip-torch>=3.3.0",
-    "seaborn>=0.13.2",
-    "scikit-learn>=1.9.0",
-    "ollama>=0.6.2",
-    "pytorchwildlife>=1.3.0",
-    "soundfile>=0.14.0",
-    "librosa>=0.11.0",
-    "pyinaturalist>=0.21.1",
-    "dvclive>=3.49.1",
+    "open-clip-torch",
+    "seaborn",
+    "scikit-learn",
+    "ollama",
+    "pytorchwildlife",
+    "soundfile",
+    "pyinaturalist",
+    "dvclive",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
-vlm = ["ammico[api]"]
-
-[tool.uv.sources]
-# The PyPI release of ammico (<=0.2.6) still depends on the old, unmaintained
-# stack (numpy<=1.23.4, deepface, tensorflow, googletrans==4.0.0rc1 prerelease)
-# which cannot be resolved alongside modern torch/numpy/ultralytics. The GitHub
-# main branch dropped all of that in favor of VLM inference over an
-# OpenAI-compatible HTTP API (the "api" extra), so pin to it instead of PyPI.
-ammico = { git = "https://github.com/ssciwr/AMMICO.git" }
 
 [tool.coverage.run]
 branch = true
 source = ["./src/smartrodent"]
+omit = ["tests/*"]
 
 [tool.coverage.report]
 # Regexes for lines to exclude from consideration
