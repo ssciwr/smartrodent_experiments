@@ -1,240 +1,281 @@
-# Rodent Experiments
+# SmartRodent experiments
 
-Experimental code for building rodent and rodent-adjacent wildlife image datasets and trying baseline computer-vision models for detection, cropping, and species classification.
+Experimental machine-learning code for the SENTINEL-RAT/SmartRodent project.
+The repository currently focuses on running and comparing image detectors for
+rodents and other small wildlife, normalizing their predictions, and recording
+ideas and results for future model development.
 
-The repository is currently exploratory. It combines:
+This is research code, not a finished application or stable Python API.
 
-- BioTrove metadata filtering for region-specific target species,
-- image download and image/text-pair generation from filtered BioTrove metadata,
-- CLIP-based visual filtering of unsuitable images,
-- YOLO object-detection experiments,
-- Google SpeciesNet species prediction experiments,
-- helper code for saving boxed preview images and object crops for manual inspection.
+## Current status
 
-See `notes/notes.md` for dataset notes, target-species rationale, references, and open modeling/deployment questions.
+The current implementation provides:
+
+- a shared `DetectorBase` interface and normalized `detections.json` output;
+- an Ultralytics YOLO detector wrapper;
+- an Ultralytics YOLOE open-vocabulary detector wrapper with text prompts;
+- batching that bounds the number of images passed to Ultralytics at once;
+- a `DetectionExperiment` helper for running one detector configuration over
+  folder-based image groups;
+- helpers for loading JSON experiment settings and expanding reusable class
+  lists;
+- an AMMICO notebook and script for experimental VLM inference through an
+  OpenAI-compatible API;
+- unit tests for detector configuration, batching, output normalization, and
+  experiment orchestration.
+
+There is currently **no command-line interface or complete end-to-end pipeline**.
+The detector classes are the main maintained code. Dataset preparation,
+fine-tuning, evaluation aggregation, and deployment integration remain
+experimental or documented as notes.
 
 ## Repository layout
 
 ```text
-configs/                                  BioTrove workflow configs and target species lists
-notebooks/process_biotrove.ipynb          notebook workflow for BioTrove processing and CLIP filtering
-src/smartrodent/biotrove_process/         local modified BioTrove processing package
-src/smartrodent/dataprocessing.py         CLIP-based image filtering and plotting helpers
-src/smartrodent/main.py                   YOLO and SpeciesNet experiment entry points
-src/smartrodent/utils.py                  image-path, country-code, crop, and visualization helpers
-src/smartrodent/yolo26*.pt                local YOLO weights used by experiments
-requirements_processing.txt               notebook/processing dependencies, including OpenAI CLIP
-datasets/                                 local data directory; large datasets are not meant for git
-notes/notes.md                            dataset notes, species lists, references, open questions
+.
+├── notebooks/
+│   ├── ammico_demo_getting_started.ipynb  AMMICO image-summary/VQA walkthrough
+│   └── yolo26n.pt                          local model artifact, ignored by git
+├── notes/
+│   ├── notes.md                            datasets, model findings, architecture ideas
+│   ├── species.md                          target species and references
+│   ├── yolo26_dataset_preparation.md       notes for preparing YOLO fine-tuning data
+│   ├── smartrodent architecture.drawio     draft system architecture
+│   └── overview_faunanet*.html             saved architecture/reference material
+├── scripts/
+│   └── species_script.py                   experimental batch AMMICO VQA script
+├── src/smartrodent/
+│   ├── __init__.py
+│   ├── base.py                             detector interface and shared helpers
+│   └── detection.py                        YOLO, YOLOE, and experiment wrappers
+├── tests/
+│   ├── conftest.py
+│   ├── test_detectorbase.py
+│   ├── test_detectorexperiment.py
+│   ├── test_yolodetector.py
+│   └── test_yoloedetector.py
+├── pyproject.toml                          project and dependency metadata
+├── uv.lock                                reproducible Python 3.14 dependency lock
+└── requirements_processing.txt            legacy processing/notebook requirements
 ```
 
-## What it does
+Large datasets, generated runs, virtual environments, and model weights are
+excluded through `.gitignore` and should not be committed.
 
-### BioTrove dataset processing
+## Requirements and installation
 
-The notebook `notebooks/process_biotrove.ipynb` uses the local package `smartrodent.biotrove_process` to:
-
-1. load a JSON config from `configs/`,
-2. filter BioTrove parquet metadata by taxonomic category or scientific name,
-3. compute per-species/category counts,
-4. shuffle and chunk filtered metadata,
-5. download source images,
-6. generate image/text pairs and optional tar files,
-7. organize classifier-style image folders by scientific name,
-8. run CLIP prompt-based filtering to separate likely useful live-animal images from non-animal/specimen/dead-animal images.
-
-The BioTrove processing code under `src/smartrodent/biotrove_process/` is a local modified copy of the original BioTrove processing utilities. The notebook imports it through `smartrodent.biotrove_process`, not from an external checkout.
-
-### Target species configs
-
-The currently maintained region configs are:
-
-- `configs/config_central_europe.json`
-  - `Rattus norvegicus`, `Rattus rattus`, `Mus musculus`, `Myodes glareolus`, `Apodemus agrarius`, `Apodemus flavicollis`, `Apodemus sylvaticus`, `Microtus arvalis`, `Microtus agrestis`, `Arvicola amphibius`, `Crocidura leucodon`
-- `configs/config_srilanka.json`
-  - `Rattus norvegicus`, `Rattus rattus`, `Suncus murinus`, `Bandicota indica`, `Bandicota bengalensis`, `Mus booduga`, `Vandeleuria`, `Mus musculus`
-
-You have to adjust the paths to your setup before using. You also have to download the biotrove dataset from huggingface first (see 'Data requirements').
-
-### Model experiments
-
-`src/smartrodent/main.py` exposes two main experiment functions:
-
-- `main(...)`: run local YOLO weights on one image or a batch of images. Ultralytics saves boxed previews and optional crops under `runs/`.
-- `run_speciesnet(...)`: run SpeciesNet with optional country geofencing, write prediction JSON, save boxed previews, and optionally save detector crops.
-
-`src/smartrodent/utils.py` contains shared helpers for image path expansion, country-code normalization, SpeciesNet label formatting, preview rendering, and crop extraction.
-
-`src/smartrodent/dataprocessing.py` contains the `ImageFilter` class used by the BioTrove notebook for CLIP-based prompt filtering and visualization.
-
-## Dependencies
-
-The package is configured in `pyproject.toml` and requires Python **3.13 or newer**.
-
-Main package dependencies:
-
-- `datasets` / `hf-datasets`
-- `polars`, `numpy`, `pyaml`
-- `matplotlib`, `Pillow`
-- `torch`, `torchvision`
-- `ultralytics`
-- `speciesnet`
-
-Additional notebook/processing dependencies are listed in `requirements_processing.txt`. Important ones include:
-
-- `git+https://github.com/openai/CLIP.git`
-- `aiohttp`
-- `pandas`, `pyarrow`, `fastparquet`, `polars`
-- `ipykernel`, `ipython`
-- `seaborn`, `scikit-image`, `tqdm`
-
-Development dependencies are available through the `dev` extra:
-
-- `pytest`
-- `pytest-cov`
-- `coverage`
-- `pre-commit`
-- `pytest-mock`
-
-## Data prerequisites
-
-Download BioTrove before running the BioTrove notebook:
-
-- <https://huggingface.co/datasets/BGLab/BioTrove>
-
-Place or symlink the dataset under `datasets/BioTrove/BioTrove`, or update the `source_folder` value in the relevant config file to point to the local BioTrove parquet directory.
-
-Large datasets, generated parquet chunks, downloaded images, model outputs, and `runs/` outputs are local working data and should not be committed.
-
-## Installation
-
-This repository has a `uv.lock`, so `uv` is the preferred installer.
+The main environment requires Python **3.14.x**. The project is locked with
+[`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-# from the repository root
 uv sync
 ```
 
-For development tools:
+Install the development and test tools with:
 
 ```bash
 uv sync --extra dev
 uv run pre-commit install
 ```
 
-For the notebook/BioTrove processing environment, install the additional processing requirements into the same environment:
+The repository currently uses a `src/` layout but does not define a packaging
+build backend, so `smartrodent` is not installed into the environment by
+`uv sync`. When running a script or interactive session directly from this
+checkout, expose `src/` explicitly:
 
 ```bash
-uv pip install -r requirements_processing.txt
+PYTHONPATH=src uv run python your_script.py
 ```
 
-Without `uv`, use a Python 3.13+ virtual environment:
+The test configuration already adds `src/` to `sys.path`, so no additional
+setting is needed for `pytest`.
 
-```bash
-python3.13 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-python -m pip install -r requirements_processing.txt   # optional: notebook processing
-python -m pip install -e '.[dev]'                       # optional: development tools
-```
+`requirements_processing.txt` is retained for older data-processing and
+notebook work. It is not part of the current locked environment and should not
+be installed into the main `.venv` without reviewing its packages first.
 
-## Basic usage
+## Detector API
 
-### Run YOLO
+### YOLO
 
 ```python
-from smartrodent.main import main
+from pathlib import Path
 
-main(
-    "path/to/image.jpg",
-    batchsize=1,
-    project="runs/yolo",
+from smartrodent.detection import YOLO_Detector
+
+images = sorted(Path("datasets/example").glob("*.jpg"))
+out = Path("runs/yolo/example")
+
+detector = YOLO_Detector(
+    name="boxed",
     crop=True,
+    batchsize=8,
+    img_outname="boxed",  # retained for backend interface compatibility
+    conf=0.25,
+    model_name="/path/to/yolo-model.pt",
+    project=str(out),
 )
+results = detector.detect(images, out)
 ```
 
-### Run SpeciesNet
+### YOLOE with text-prompt classes
 
 ```python
-from smartrodent.main import run_speciesnet
+from pathlib import Path
 
-predictions = run_speciesnet(
-    "path/to/images",
-    output_json="runs/speciesnet/predictions.json",
-    preview_dir="runs/speciesnet/boxed",
-    crop_dir="runs/speciesnet/crops",
-    batch_size=16,
-    country="LKA",  # examples: DEU, LKA, USA
+from smartrodent.detection import YOLOE_Detector
+
+images = sorted(Path("datasets/example").glob("*.jpg"))
+out = Path("runs/yoloe/example")
+
+detector = YOLOE_Detector(
+    name="boxed",
+    crop=True,
+    batchsize=8,
+    img_outname="boxed",
+    conf=0.20,
+    model_name="/path/to/yoloe-model.pt",
+    classes=["animal", "rat", "mouse", "shrew"],
+    project=str(out),
 )
+results = detector.detect(images, out)
 ```
 
-### Use the local BioTrove processing package
+Both wrappers accept a single image path, a directory supported by
+Ultralytics, or a list of image paths. List inputs are chunked according to
+`batchsize` to avoid sending an unbounded in-memory batch to the model.
+
+Each run writes a normalized summary to `<out>/detections.json`:
+
+```json
+{
+  "example.jpg": [
+    {"class": "mouse", "conf": 0.873},
+    {"class": "animal", "conf": 0.641}
+  ],
+  "empty.jpg": []
+}
+```
+
+Ultralytics-native previews and crops are written under the configured
+`project` and run name.
+
+## Grouped experiments
+
+`DetectionExperiment` builds a fresh detector for each immediate subdirectory
+of a dataset. Its output path is:
+
+```text
+<run_dir>/detect<confidence>/<experiment_name>/<dataset_name>/<group_name>/
+```
+
+Example construction:
 
 ```python
-from smartrodent.biotrove_process import (
-    MetadataProcessor,
-    GenShuffledChunks,
-    GetImages,
-    GenImgTxtPair,
-    load_config,
+from pathlib import Path
+
+from smartrodent.detection import DetectionExperiment
+
+experiment = DetectionExperiment(
+    run_dir="runs",
+    dataset_name="biotrove-small-mammals",
+    experiment_name="yoloe-prompts",
+    conf=0.20,
+    detector_type="YOLOE_Detector",
+    detector_kwargs={
+        "batchsize": 8,
+        "crop": True,
+        "model_name": "/path/to/yoloe-model.pt",
+        "classes": ["animal", "rat", "mouse", "shrew"],
+    },
 )
 
-config = load_config("configs/config_central_europe.json")
-processor = MetadataProcessor(**config["metadata_processor_info"])
-processor.process_all_files()
+for group_name, images in experiment.image_groups(Path("datasets/grouped")):
+    experiment.run_detector_on_group(group_name, images)
 ```
 
-For the full workflow, open `notebooks/process_biotrove.ipynb`, choose one of the configs in `configs/`, verify all paths, and run the notebook cells in order.
+The class also contains `load_experiment_config(...)`, which reads JSON and
+expands values such as `{"lookup": "small_mammals"}` from a top-level
+`class_sets` mapping. A full config-driven runner has not yet been implemented.
 
-### Use CLIP image filtering helpers
+## AMMICO/VLM experiment
 
-```python
-from smartrodent.dataprocessing import ImageFilter
+The AMMICO material is currently isolated from the main environment. Upstream
+AMMICO pins `torch<2.9`, while the Python 3.14 environment uses a newer PyTorch,
+so adding AMMICO to the main lock would downgrade PyTorch to a version that does
+not support Python 3.14.
 
-image_filter = ImageFilterCLIP(
-    model="RN50x16",
-    prompts=["not an animal at all", "a mouse, rat or other rodent"],
-    id_tol=0.02,
-)
-```
-
-### Use VLM inference with ammico
-
-For this you need to install the latest ammico version from the GitHub repo:
-```
-uv pip install git+https://github.com/ssciwr/AMMICO.git
-```
-You also need to start the model using `ollama` or `vllm`, for example with
-```
-docker run --rm --gpus all --ipc=host -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface vllm/vllm-openai:v0.10.0 --model Qwen/Qwen2.5-VL-3B-Instruct --api-key KEY     --limit-mm-per-prompt '{"image": 8}' --gpu-memory-utilization 0.80 --max-model-len 4096
-```
-
-Then there is the [ammico demo notebook](notebooks/ammico_demo_getting_started.ipynb) in the notebook folder, that allows you to inspect the VQA answers together with the images, and also a [script](scripts/species_script.py) for running this on a batch of images. Below is the result for at most 100 images from the rat subset of BioTrove:
-
-![alt text](image.png)
-
-
-## Tests and development status
-
-The project has pytest/coverage configuration in `pyproject.toml`, but the current repository is primarily notebook- and experiment-driven. Some generated caches and local data may exist in working trees; avoid committing large data, generated outputs, or `__pycache__` files.
-
-Run tests, when present and applicable, with:
+If the AMMICO notebook or `scripts/species_script.py` is needed, create a
+separate Python 3.13 environment:
 
 ```bash
+uv venv .venv-ammico --python 3.13
+uv pip install \
+  --python .venv-ammico/bin/python \
+  'ammico[api] @ git+https://github.com/ssciwr/AMMICO.git'
+```
+
+AMMICO's full dependency set may also impose platform/GPU restrictions. The
+notebook expects an OpenAI-compatible endpoint served by software such as
+Ollama or vLLM. Configure it through `AMMICO_API_BASE_URL`, `AMMICO_API_KEY`,
+and `AMMICO_MODEL_ID`.
+
+The paths, questions, endpoint, and API key placeholders in
+`scripts/species_script.py` must be adapted before use.
+
+## Tests
+
+Run the test suite with:
+
+```bash
+uv sync --extra dev
 uv run pytest
 ```
 
-or, without `uv`:
+The current suite contains 23 tests and covers the shared detector helpers,
+YOLO/YOLOE wrappers using mocked model calls, and `DetectionExperiment`.
+It does not download model weights or run real inference.
+
+Coverage configuration lives in `pyproject.toml` and currently requires at
+least 80% coverage:
 
 ```bash
-python -m pytest
+uv run pytest --cov
 ```
 
-## Notes and caveats
+## Research findings and direction
 
-- The config files currently contain absolute local paths and must be edited for other machines.
-- SpeciesNet and YOLO may download or load large model files and may require substantial compute.
-- CLIP filtering uses PyTorch and is much faster with CUDA, but the helper code currently assumes CUDA in `compute_similarity`.
-- Species lists in `notes/notes.md` are dataset targets, not complete regional fauna lists.
-- This repository is exploratory and should be treated as research code rather than a stable application API.
+The current notes record the following provisional conclusions:
+
+- SpeciesNet detects larger camera-trap species well but performed poorly on
+  the small rodents and shrews considered here.
+- YOLOE is useful for open-vocabulary animal/rodent detection, although its
+  species-level performance is limited.
+- Generic YOLO detection likely needs project-specific fine-tuning.
+- A two-stage pipeline—animal detection followed by specialized
+  classification—is a plausible direction.
+- The available thermal sensor resolution is likely useful as a detection
+  prior but insufficient for reliable species identification by itself.
+- Confidence calibration and evidence aggregation across multiple images
+  remain open research problems.
+
+These are exploratory observations rather than benchmark-quality claims. See
+`notes/notes.md` for the complete discussion and caveats.
+
+## Known limitations
+
+- No CLI or complete config-driven execution entry point exists yet.
+- The `src/` package is not installed automatically; use `PYTHONPATH=src`.
+- Real model inference requires external or downloaded weights and suitable
+  compute resources.
+- AMMICO must remain in a separate environment until its PyTorch constraints
+  are compatible with Python 3.14.
+- `scripts/species_script.py` contains machine-specific paths and placeholder
+  endpoint credentials.
+- Test coverage is focused on orchestration and normalized output, not model
+  quality or integration inference.
+- The repository remains exploratory and APIs may change without notice.
+
+## License
+
+See [LICENSE](LICENSE).
