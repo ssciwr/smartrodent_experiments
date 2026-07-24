@@ -7,6 +7,7 @@ to read and also lets other scripts import those helpers from the package.
 """
 
 import json
+import yaml
 from pathlib import Path
 
 from speciesnet import DEFAULT_MODEL
@@ -696,12 +697,12 @@ def resolve_lookups(value, class_sets: dict[str, list[str]]):
 def load_experiment_config(config_path: Path) -> dict:
     """Load detector experiment settings and resolve class-set references.
 
-    The JSON file can keep long class lists under ``class_sets`` and refer to them
+    The YAML file can keep long class lists under ``class_sets`` and refer to them
     from an experiment with ``{"lookup": "class_set_name"}``. This function expands
     those references before the main loop instantiates detector classes.
     """
     with config_path.open() as config_file:
-        config = json.load(config_file)
+        config = yaml.safe_load(config_file)
 
     class_sets = config.get("class_sets", {})
     config["experiments"] = resolve_lookups(config["experiments"], class_sets)
@@ -761,7 +762,7 @@ if __name__ == "__main__":
     # Example experiment block. Detector/run settings live in JSON so new experiments
     # can be added without editing this orchestration logic.
     CONFIG_PATH = (
-        Path(__file__).resolve().parents[2] / "configs" / "detector_experiments.json"
+        Path(__file__).resolve().parents[2] / "configs" / "detector_experiments.yaml"
     )
 
     DETECTOR_CLASSES = {

@@ -35,99 +35,27 @@ def decided_label(
     return image_filter.prompts[int(decided.argmax(dim=0).item())], similarity
 
 
-def classify_image(path: str, prompt: str) -> dict:
-    img_path = Path(path)
-    img_b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "images": [img_b64],
-        "format": "json",
-        "stream": False,
-        "think": False,
-        "options": {
-            "temperature": 0,
-        },
-    }
-
-    response = requests.post(OLLAMA_URL, json=payload, timeout=120)
-    response.raise_for_status()
-
-    raw = response.json()["response"]
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {
-            "label": "failure",
-            "visible_animal": None,
-            "evidence_alive": [],
-            "evidence_dead": [],
-            "image_quality": "unknown",
-            "needs_human_review": True,
-            "raw_response": raw,
-            "parse_error": True,
-        }
-
-    label = str(data.get("label", "failure")).strip().lower()
-
-    if label not in ["alive", "dead", "unsure"]:
-        label = "failure"
-
-    return {
-        "label": label,
-        "visible_animal": data.get("visible_animal"),
-        "evidence_alive": data.get("evidence_alive", []),
-        "evidence_dead": data.get("evidence_dead", []),
-        "image_quality": data.get("image_quality", "unsure"),
-        "needs_human_review": bool(data.get("needs_human_review", label == "unsure")),
-        "raw_response": raw,
-        "parse_error": False,
-    }
-
-
-def filter_data_ollama(
-    prompt: str,
-    raw_data_path: str,
-    alive_path: str,
-    unsure_path: str,
-    dead_path: str,
-    failure_path: str,
-) -> pd.DataFrame:
-
-    results = []
-    species_dirs = sorted(p for p in Path(raw_data_path).iterdir() if p.is_dir())
-    image_paths = [
-        image_path
-        for species_path in species_dirs
-        for image_path in sorted(species_path.iterdir())
-        if image_path.is_file() and image_path.suffix.lower() in image_suffixes
-    ]
-
-    for image_path in tqdm(image_paths, desc="OLLAMA filtering images"):
-        res = classify_image(image_path, prompt)
-        res["species"] = image_path.relative_to(raw_data_path).parts[0]
-        results.append(res)
-
-        if res["label"] == "alive":
-            copy_with_structure(image_path, alive_path)
-        elif res["label"] == "dead":
-            copy_with_structure(image_path, dead_path)
-        elif res["label"] == "unsure":
-            copy_with_structure(image_path, unsure_path)
-        elif res["label"] == "failure":
-            copy_with_structure(image_path, failure_path)
-        else:
-            raise ValueError(f"Unknown label {res['label']}")
-
-    return pd.DataFrame(results)
+# species_list = [
+#     "Rattus norvegicus",
+#     "Rattus rattus",
+#     "Mus musculus",
+#     "Myodes glareolus",
+#     "Apodemus agrarius",
+#     "Apodemus flavicollis",
+#     "Apodemus sylvaticus",
+#     "Arvicola amphibius",
+#     "Microtus arvalis",
+#     "Myodes glareolus",
+#     "Microtus agrestis",
+#     "Crocidura leucodon",
+#     "Sorex araneus",
+#     "Sorex minutus",
+#     "Sorex coronatus",
+# ]
 
 
 print("cuda? ", torch.cuda.is_available())
-# tols = [0.02, 0.05, 0.1]
-tols = [
-    0.01,
-]
+tols = [0.01, 0.02, 0.05, 0.1]
 # Source directory: one subdirectory per species; each subdirectory name is the label.
 imgs_root = Path(
     "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/raw"
@@ -149,6 +77,7 @@ for tol in tols:
         prompts=[not_rodent_prompt, rodent_prompt],
         id_tol=tol,
     )
+
     health_filter_clip = ImageFilterCLIP(
         model="ViT-L/14@336px",
         prompts=[healthy_prompt, dead_or_unsure_prompt],
@@ -159,13 +88,14 @@ for tol in tols:
     # src/smartrodent, then configured with the text prompts below via set_classes.
 
     primary_filter_yoloe = ImageFilterYoloE(
-        model="yoloe-26m-seg.pt",
+        model="yoloe-26x-seg.pt",
         prompts=[not_rodent_prompt, rodent_prompt],
         id_tol=tol,
         predict_conf=tol,
     )
+
     health_filter_yoloe = ImageFilterYoloE(
-        model="yoloe-26m-seg.pt",
+        model="yoloe-26x-seg.pt",
         prompts=[healthy_prompt, dead_or_unsure_prompt],
         id_tol=tol,
         predict_conf=tol,
@@ -178,6 +108,7 @@ for tol in tols:
         prompts=[not_rodent_prompt, rodent_prompt],
         id_tol=tol,
     )
+
     health_filter_biotrove_clip = ImageFilterBiotroveClip(
         model=biotrove_clip_checkpoint,
         prompts=[healthy_prompt, dead_or_unsure_prompt],
@@ -185,15 +116,9 @@ for tol in tols:
     )
 
     for primary_filter, health_filter, name in zip(
-        [
-            primary_filter_clip,
-        ],
-        [
-            health_filter_clip,
-        ],
-        [
-            "clip",
-        ],
+        [primary_filter_clip, primary_filter_yoloe],
+        [health_filter_clip, health_filter_yoloe],
+        ["clip", "yoloe"],
     ):
         filtered_root = imgs_root.parent / f"filtered_{name}_kept_{tol}"
         rejected_root = imgs_root.parent / f"filtered_{name}_rejected_{tol}"
@@ -220,6 +145,7 @@ for tol in tols:
             for species_dir in species_dirs
             for image_path in sorted(species_dir.rglob("*"))
             if image_path.is_file() and image_path.suffix.lower() in image_suffixes
+            # and image_path.name in species_list
         ]
 
         summary = Counter()
@@ -277,51 +203,3 @@ for tol in tols:
             for path, error in errors[:10]:
                 print(path, error)
         print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
-
-
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen3.6:27b"
-
-PROMPT = """
-   You are classifying wildlife images.
-
-   Return ONLY valid JSON with this exact schema:
-
-   {
-     "label": "alive | dead | unsure",
-     "visible_animal": true,
-     "evidence_alive": ["string"],
-     "evidence_dead": ["string"],
-     "image_quality": "clear | poor | unusable",
-     "needs_human_review": true
-   }
-
-   Rules:
-   - label must be exactly one of: "alive", "dead", "unsure".
-   - Use "dead" only for clear evidence of death: carcass, roadkill, skull, bones,
- preserved specimen, visibly dead body.
-   - Use "alive" only if a live animal is clearly visible.
-   - Use "unsure" if no animal is visible, the image is ambiguous, cropped, low
- quality, a drawing, or you cannot confidently decide.
-   - needs_human_review should be true for unsure, poor/unusable images, or conflicting
- evidence.
-   - Do not include markdown.
-   - Do not include text outside the JSON object.
-   """
-
-image_suffixes = {".jpg", ".jpeg", ".png"}
-
-
-imgs_root = Path(
-    "/home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/raw"
-)
-alive_root = imgs_root.parent / "filtered_qwen3.6_kept"
-unsure_root = imgs_root.parent / "filtered_qwen3.6_undecided"
-dead_root = imgs_root.parent / "filtered_qwen3.6_rejected"
-failure_root = imgs_root.parent / "filtere_qwen3.6_failure"
-
-res_df = filter_data_ollama(
-    PROMPT, imgs_root, alive_root, unsure_root, dead_root, failure_root
-)
-
-res_df.to_csv(imgs_root.parent / "filter_results_qwen36.csv")

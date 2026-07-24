@@ -1,6 +1,5 @@
 """Training helpers for SmartRodent YOLO experiments."""
 
-import json
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -61,10 +60,10 @@ class YoloDetectionTrainer:
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "YoloDetectionTrainer":
-        """Create a detector trainer from a JSON config file.
+        """Create a detector trainer from a YAML config file.
 
         Args:
-            config_path: Path to a JSON file with top-level trainer settings,
+            config_path: Path to a YAML file with top-level trainer settings,
                 ``train_kwargs`` for ``YOLO.train``, and optional ``tune_kwargs`` for
                 ``YOLO.tune``.
 
@@ -74,10 +73,10 @@ class YoloDetectionTrainer:
         Notes:
             ``event_callback`` and ``trainer`` are intentionally left as Python-side
             options because they are callable/runtime objects and do not map cleanly
-            to JSON.
+            to YAML.
         """
         config_path = Path(config_path)
-        config = json.loads(config_path.read_text())
+        config = yaml.safe_load(config_path.read_text())
         train_kwargs = config.pop("train_kwargs", {})
         tune_kwargs = config.pop("tune_kwargs", {})
         return cls(**config, tune_kwargs=tune_kwargs, **train_kwargs)
@@ -327,10 +326,10 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "YoloClassificationTrainer":
-        """Create a classification trainer from a JSON config file.
+        """Create a classification trainer from a YAML config file.
 
         Args:
-            config_path: Path to a JSON file with top-level trainer settings,
+            config_path: Path to a YAML file with top-level trainer settings,
                 ``train_kwargs`` for ``YOLO.train``, and optional ``tune_kwargs`` for
                 ``YOLO.tune``.
 
@@ -338,7 +337,7 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
             A configured ``YoloClassificationTrainer`` instance.
         """
         config_path = Path(config_path)
-        config = json.loads(config_path.read_text())
+        config = yaml.safe_load(config_path.read_text())
         train_kwargs = config.pop("train_kwargs", {})
         tune_kwargs = config.pop("tune_kwargs", {})
         return cls(**config, tune_kwargs=tune_kwargs, **train_kwargs)

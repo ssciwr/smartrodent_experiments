@@ -1,5 +1,5 @@
 from pyinaturalist import get_observations
-import json
+import yaml
 import requests
 from pathlib import Path
 from typing import Any
@@ -56,7 +56,7 @@ def download_inat_data(config_path: str):
 
     cfg_path = Path(config_path).resolve()
     with open(cfg_path, "r") as cfgfile:
-        config = json.load(cfgfile)["data"]["inaturalist"]
+        config = yaml.safe_load(cfgfile)["data"]["inaturalist"]
 
     print("read config: ", config)
     config = process_config(config)

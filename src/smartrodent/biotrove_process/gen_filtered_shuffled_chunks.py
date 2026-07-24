@@ -4,7 +4,7 @@ import shutil
 import glob
 import random
 import time
-import json
+import yaml
 import argparse
 from tqdm import tqdm
 
@@ -185,16 +185,16 @@ class GenShuffledChunks:
 
 def load_config(config_path):
     """
-    Load configuration from a JSON file.
+    Load configuration from a YAML file.
 
     Args:
-    - config_path: Path to the configuration JSON file.
+    - config_path: Path to the configuration YAML file.
 
     Returns:
     - config: Dictionary containing configuration parameters.
     """
     with open(config_path, "r") as config_file:
-        config = json.load(config_file)
+        config = yaml.safe_load(config_file)
     return config
 
 
