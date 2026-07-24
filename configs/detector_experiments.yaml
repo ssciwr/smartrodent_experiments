@@ -1,0 +1,117 @@
+image_dir: /home/hmack/Development/rodent_experiments/datasets/biotrove-central-europe/filtered
+runs_dir: /home/hmack/Development/rodent_experiments/runs_hardware test
+dataset_name: central-europe
+batchsize: 1
+confs:
+- 0.01
+- 0.05
+- 0.1
+- 0.2
+class_sets:
+  central_europe_species:
+  - Rattus norvegicus
+  - Rattus rattus
+  - Mus musculus
+  - Myodes glareolus
+  - Apodemus agrarius
+  - Apodemus flavicollis
+  - Apodemus sylvaticus
+  - Arvicola amphibius
+  - Microtus arvalis
+  - Myodes glareolus
+  - Microtus agrestis
+  - Crocidura leucodon
+  - Sorex araneus
+  - Sorex minutus
+  - Sorex coronatus
+  central_europe_common:
+  - brown rat
+  - black rat
+  - house mouse
+  - bank vole
+  - striped field mouse
+  - yellow-necked mouse
+  - european water vole
+  - wood mouse
+  - common vole
+  - field vole
+  - bicolored white-toothed shrew
+  - common shrew
+  - eurasian pygmy shrew
+  - crowned shrew
+experiments:
+- name: clip_animalornot
+  detector: clip
+  kwargs:
+    model_name: ViT-L/14@336px
+    classes:
+    - This is a photo with an animal like a mouse, rat, cat, fox, cow or hamster in it
+    - This is a photo without any animal at all in it, but a photo of something else entirely like trash, a car, a plastic box or a piece of wood or a leaf
+    crop: true
+- name: clip_rodentornot
+  model_name: ViT-L/14@336px
+  crop: true
+  classes:
+  - This is a photo with a rodent like a rat, mouse or vole, or similar small mammal like a shrew in it
+  - This is a photo without a rodent in it at all, but a photo of some other animal like a snake, bird or human
+- name: yolo26
+  detector: YOLO_Detector
+  kwargs:
+    model_name: yolo26l.pt
+    crop: true
+- name: yoloe_animalornot
+  detector: YOLOE_Detector
+  kwargs:
+    model_name: yoloe-26l-seg.pt
+    crop: true
+    classes:
+    - This is a photo with an animal like a mouse, rat, cat, fox, cow or hamster in it
+    - This is a photo without any animal at all in it, but a photo of something else entirely like trash, a car, a plastic box or a piece of wood or a leaf
+- name: yoloe_rodentornot
+  detector: YOLOE_Detector
+  kwargs:
+    model_name: yoloe-26l-seg.pt
+    crop: true
+    classes:
+    - This is a photo with a rodent like a rat, mouse or vole, or similar small mammal like a shrew in it
+    - This is a photo without a rodent in it at all, but a photo of some other animal like a snake, bird or human
+- name: speciesnet
+  detector: SpeciesNet_Detector
+  kwargs:
+    model_name: kaggle:google/speciesnet/pyTorch/v4.0.3b/1
+    crop: true
+    country: DEU
+- name: biotrove-clip_animalornot
+  detector: BioTroveClip_Detector
+  kwargs:
+    model_name: biotroveclip-vit-b-16-from-openai-epoch-40.pt
+    crop: false
+    classes:
+    - This is a photo with an animal like a mouse, rat, cat, fox, cow or hamster in it
+    - This is a photo without any animal at all in it, but a photo of something else entirely like trash, a car, a plastic box or a piece of wood or a leaf
+    prompt_template: '{}'
+- name: biotrove-clip_rodentornot
+  detector: BioTroveClip_Detector
+  kwargs:
+    model_name: biotroveclip-vit-b-16-from-openai-epoch-40.pt
+    crop: false
+    classes:
+    - This is a photo with a rodent like a rat, mouse or vole, or similar small mammal like a shrew in it
+    - This is a photo without a rodent in it at all, but a photo of some other animal like a snake, bird or human
+    prompt_template: '{}'
+- name: biotrove-clip_species_names
+  detector: BioTroveClip_Detector
+  kwargs:
+    model_name: biotroveclip-vit-b-16-from-openai-epoch-40.pt
+    crop: false
+    classes:
+      lookup: central_europe_species
+    prompt_template: This is a photo of {}
+- name: biotrove-clip_common_names
+  detector: BioTroveClip_Detector
+  kwargs:
+    model_name: biotroveclip-vit-b-16-from-openai-epoch-40.pt
+    crop: false
+    classes:
+      lookup: central_europe_common
+    prompt_template: This is a photo of {}
