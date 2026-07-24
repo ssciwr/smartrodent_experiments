@@ -18,6 +18,10 @@ wheels/
 # runs
 runs*
 
+# model
+*.ts
+*.pt
+
 # torch files
 *.pt
 
