@@ -8,6 +8,31 @@
 - [LiLA-BC: Labeled Information Library of Alexandria: Biology and Conservation](http://lila.science/) Collection of datasets for ML in biology and conservation. Labels inconsistent between datasets.
 - [wildlife-insights](https://app.wildlifeinsights.org/explore) Worldwide collection of camera trap projects with available data. Would be ideal for our case.
 
+**Camera-trap / small-mammal box-camera datasets (genuine CT domain):**
+- [Ohio Small Animals / AHDriFT](https://lila.science/datasets/ohio-small-animals/) (LILA) — 118k RGB images, downward-facing box camera, **45 species at species level**, COCO Camera Traps format, images pre-sorted into per-species folders, permissive license (CDLA). Species are North American (meadow vole, chipmunks, etc.), so **not our Palearctic targets**, but it's the closest analog for the small-mammal *camera-trap* domain + a clean labelled set.
+- [California Small Animals](https://lila.science/datasets/california-small-animals/) (LILA) — 2.28M images, CDFW small-mammal camera protocol, species-level. North American.
+- [Oregon Critters](https://lila.science/datasets/oregon-critters/) (LILA) — ~100k images, US Forest Service small-animal cameras, species-level. North American.
+- [LILA taxonomy-mapping trick](https://lila.science/taxonomy-mapping-for-camera-trap-data-sets/) — lets you filter *all* LILA CT datasets down to Rodentia and pull only the rodent images across sets in one pass. Worth scripting.
+- [Böhner "Small mammal classification model"](https://zenodo.org/records/7801786) (Zenodo 7801786, **CC-BY**, images bundled ~480MB) + [camera_trap_workflow repo](https://github.com/hannaboe/camera_trap_workflow) — Arctic Norway box/IR cameras. Classes = voles, lemmings, mustelids, **shrews**. Useful for our Sorex→"shrew" class + vole distractors + real CT domain. **No Apodemus/Rattus/Mus** (wrong biome).
+- [DeepFaune](https://www.deepfaune.cnrs.fr/en/) — European CT classifier/dataset, well-labelled, but all small mammals collapse into a single `micromammal` class → **not species-level**. Model useful, labels not.
+- [Democratising Camera Trap AI / Trap Tracker](https://arxiv.org/pdf/2606.10940) (arXiv 2606.10940, 2026) — open model over 28 UK mammal/bird classes (incl. wood mouse & rat). Model is open; the 48k-instance labelled set is **not clearly deposited** → request from authors (Conservation AI / Nottingham Trent).
+- UK small-mammal box-camera citizen science — [BucketBuddy / Littlewood Box comparison](https://link.springer.com/article/10.1007/s13364-026-00874-w) (Mammal Research 2026) and [Cambridge peatland small-mammal CT study](https://link.springer.com/article/10.1007/s10344-020-01449-z) (EJWR 2020). These specifically image **wood mouse + Sorex araneus + S. minutus** on camera — the rare designs that actually resolve our species. Images usually **not deposited** → email authors.
+- [SAWIT small-animal CT dataset](https://doi.org/10.5281/zenodo.14927692) (Zenodo 14927692) — check taxa fit (non-Palearctic-leaning).
+- [Böe et al. semi-automatic small-mammal CT workflow](https://www.sciencedirect.com/science/article/pii/S1574954123001796) (Ecol. Informatics) — companion to the Böhner model above.
+
+**RGB photo repositories for the target species (NOT camera-trap, but license-clean-able):**
+- **iNaturalist bulk export** — primary source for species-level RGB of all six target taxa (Rattus rattus/norvegicus, Mus musculus, Apodemus spp., Sorex araneus/minutus). Only CC0 / CC-BY / CC-BY-NC photos are exported; pull via GBIF multimedia extension, the iNat AWS Open Data mirror, or the iNat export tool. (BioTrove is already derived from this — so a direct iNat pull mainly buys us fresher/uncropped images + the license field.)
+- [Observation.org](https://observation.org) — European citizen-science, real API, strong coverage of Apodemus/Sorex/Rattus/Mus. Many photos are per-photographer rights-reserved → filter to the openly-licensed subset (smaller yield, but genuinely new vs iNat).
+- [Roboflow Universe rat-detection sets](https://universe.roboflow.com/search?q=class%3Arat) — several urban *Rattus* RGB sets (400–1000 imgs each). Labelled `rat` at genus level only, but real synanthropic imagery.
+
+**Dead ends (recorded so we don't re-check):**
+- [Artportalen](https://www.artportalen.se/) (Swedish Species Observation System) — occurrence records are CC0, **but the photos are per-photographer copyright**. No bulk image download, no media API, and images are **not** shipped in its GBIF multimedia extension (GBIF pull returns points, not pictures). Good for distribution data only. **Not viable for images.**
+- [Agouti](https://agouti.eu/) / [Snapshot Europe](https://www.ab.mpg.de/snapshot-europe) / EUROMAMMALS — the big European CT infrastructure, but explicitly scoped to mammals **>~200 g**, which excludes Mus (~20g), Apodemus (~25g) and Sorex (~5–10g) by design. Not useful for our target size class.
+
+- not directly relevant, but perhaps interesting because we might see traces of something that has run by while the machinery was off:
+[AnimalClue](https://dahlian00.github.io/AnimalCluePage/)
+- this is interesting as a modeling project in itself for other/future projects perhaps
+
 ## Dataset evaluation
 - **iRodent**: Species labels are stripped and only the class 'rodent' is retained, not useful for us unless for pose estimation, for which the dataset is intended. good thing: it's scrapped from iNaturalist, which we might be able to use, but I am not entirely sure how to get the species labels back.
 - **snakeclef21**: Have not read the paper yet, but many images retain copyright notices and the usage of flikr images is unclear wrt licensing. Provenance unclear, hence not trusted.
@@ -15,12 +40,12 @@
 - **BioTrove**: can be filtered on various taxonomic levels depending on what is needed. Started out with "[Muridae](https://en.wikipedia.org/wiki/Muridae)" (mouse-likes), which can further be filtered based on need. Because it spans essentially the entire animal tree of life (to one degree or another), we can filter the dataset for various animal species we need, and then apply OpenAI's clip model to filter out specific image types (like dead animals, animals caught in traps, bones/skulls or museum specimens) to build a dataset.
 Question here: The angles and distance at which the animals are photographed might be not representative in general of what a camera trap does?
 - **LiLA-BC**: tbd.
-- **Wildlife-insights**: Download hasn't worked for me yet? 
+- **Wildlife-insights**: Download hasn't worked for me yet?
 ### Models
 - [SpeciesNet](https://research.google/blog/where-wild-things-roam-identifying-wildlife-with-speciesnet/) Can give species classifications and goes up the taxonomic hierarchy if not sure
 - [Yolo](https://docs.ultralytics.com/models/yolo11#overview) 'The' object detection model. Retrainable, but we need data of the species in question
 - We need to find a way to sensor-fuse the thermals + rgb images?
-- [Megadetector](https://github.com/agentmorris/MegaDetector) The detector backbone that SpeciesNet is built upon. Only finds animals in images, doesn't classify anything. 
+- [Megadetector](https://github.com/agentmorris/MegaDetector) The detector backbone that SpeciesNet is built upon. Only finds animals in images, doesn't classify anything.
 ### Remarks
 - we could perhaps try to become a member of wildlifeinsights to help the community with camera trap data?
 
