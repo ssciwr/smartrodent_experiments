@@ -52,7 +52,9 @@ def fetch_image_from_inat(photo: dict, img_path: Path, id: int, index: int):
             f.write(img_bytes)
 
 
-def download_inat_data(config_path: str):
+def download_inat_data(
+    config_path: str, maxlen: int = 2000, seed: int = 42, page: str | None = None
+):
 
     cfg_path = Path(config_path).resolve()
     with open(cfg_path, "r") as cfgfile:
@@ -71,6 +73,15 @@ def download_inat_data(config_path: str):
     for species in config["species"]:
         all_records = []
         print(f"current species {species}")
+
+        save_path = output_path / f"{species}"
+
+        if save_path.exists():
+            print(f"{species} exists, skipping")
+            continue
+        else:
+            save_path.mkdir(parents=True, exist_ok=True)
+
         for year in config["years"]:
             print(f"  current year: {year}")
             response = get_observations(
@@ -78,17 +89,17 @@ def download_inat_data(config_path: str):
                 quality_grade=quality,
                 per_page=200,
                 year=year,
-                page="all",
                 photos=True,
                 geo=True,
+                page=page,
             )
 
             all_records.extend(response["results"])
 
         df = pd.json_normalize(all_records)
 
-        save_path = output_path / f"{species}"
-        save_path.mkdir(parents=True, exist_ok=True)
+        if maxlen < len(df):
+            df = df.sample(maxlen, random_state=seed)
 
         df.to_csv(save_path / "records.csv", index=False)
 

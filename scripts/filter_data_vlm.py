@@ -10,10 +10,6 @@ import torch
 import yaml
 from tqdm.auto import tqdm
 
-CONFIG_PATH = (
-    Path(__file__).resolve().parents[1] / "configs" / "filter_data_vlm_config.yaml"
-)
-
 
 def decided_label(
     image_filter, preprocessed_images: list
@@ -337,7 +333,10 @@ class DetectorVLLM(Detector):
 
 if __name__ == "__main__":
     print("cuda? ", torch.cuda.is_available())
+    config_path = (
+        Path(__file__).resolve().parents[1] / "configs" / "filter_data_vlm_config.yaml"
+    )
 
-    detector = Detector.from_config(CONFIG_PATH)
+    detector = Detector.from_config(config_path)
     res_df = detector.filter_data()
     detector.save_results(res_df)
