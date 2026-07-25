@@ -350,7 +350,8 @@ class SpeciesNet_Detector(DetectorBase):
 
         # Enable all SpeciesNet components: detector, classifier, and ensemble. Geofence
         # is useful for this dataset because location can reduce implausible species.
-        self.model = SpeciesNet(self.model_name, geofence=True, components="all")
+        if self.model is None:
+            self.model = SpeciesNet(self.model_name, geofence=True, components="all")
         self.model.detector.DETECTION_THRESHOLD = self.conf
         predictions = self.model.predict(
             filepaths=image_paths(path),
@@ -469,6 +470,7 @@ class SpeciesNet_Detector(DetectorBase):
         predictions: dict,
         output_dir: str | Path = "runs/speciesnet/boxed",
     ) -> None:
+        # TODO: Using classification here is probably wrong
         """Save boxed preview images from SpeciesNet prediction JSON.
 
         SpeciesNet's standard output is JSON. Each prediction can contain a ``detections``
