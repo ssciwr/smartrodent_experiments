@@ -5,7 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
-
+.python_version
 # Virtual environments
 .venv
 
@@ -16,5 +16,9 @@ runs*
 # torch files
 *.pt
 
-# pi coding agent stuff
+# macos
+.DS_Store
+
+# vscode and coding agents
 .pi
+.vscode
