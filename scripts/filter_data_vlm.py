@@ -23,7 +23,7 @@ def decided_label(
     return image_filter.prompts[int(decided.argmax(dim=0).item())], similarity
 
 
-class Detector:
+class Filter:
     """Shared scaffolding for kept/rejected/unsure wildlife image classification.
 
     Subclasses provide the actual inference backend by overriding filter_data().
@@ -61,7 +61,7 @@ class Detector:
         else: 
             raise ValueError("Error, mode must be 'move' or 'copy'")
     @classmethod
-    def from_config(cls, config_path: str | Path) -> "Detector":
+    def from_config(cls, config_path: str | Path) -> "Filter":
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
@@ -79,7 +79,7 @@ class Detector:
         if backend == "ollama":
             model_tag = config["ollama"]["model"]
             detector_cls, extra = (
-                DetectorOllama,
+                FilterOllama,
                 dict(
                     url=config["ollama"]["url"],
                     model=config["ollama"]["model"],
@@ -88,7 +88,7 @@ class Detector:
         elif backend == "vllm":
             model_tag = config["vllm"]["model"].split("/")[-1]
             detector_cls, extra = (
-                DetectorVLLM,
+                FilterVLLM,
                 dict(
                     model_name=config["vllm"]["model"],
                     gpu_memory_utilization=config["vllm"]["gpu_memory_utilization"],
@@ -194,7 +194,7 @@ class Detector:
         }
 
 
-class DetectorOllama(Detector):
+class FilterOllama(Filter):
     """Classifies images one at a time via a local Ollama server. Fallback backend."""
 
     def __init__(self, *, url: str, model: str, **kwargs):
@@ -240,7 +240,7 @@ class DetectorOllama(Detector):
         return pd.DataFrame(results)
 
 
-class DetectorVLLM(Detector):
+class FilterVLLM(Filter):
     """Classifies images in batches via a local vLLM offline inference engine."""
 
     RESPONSE_JSON_SCHEMA = {
@@ -365,22 +365,30 @@ def parse_args() -> argparse.Namespace:
     default_config = (
         Path(__file__).resolve().parents[1]
         / "configs"
-        / "filter_data_vlm_config.yaml"
+        / "filter_data_vlm_config_animal.yaml"
     )
     parser = argparse.ArgumentParser(description="Filter image data using a VLM backend.")
     parser.add_argument(
         "-c",
         "--config",
+        nargs='+',
         type=Path,
         default=default_config,
-        help=f"Path to YAML config file (default: {default_config})",
+        help=f"Path or list of paths to YAML config file (default: {default_config})",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    print("cuda? ", torch.cuda.is_available())
-    detector = Detector.from_config(args.config)
-    res_df = detector.filter_data()
-    detector.save_results(res_df)
+    # chain configs together in the order given if we have multiple. 
+    # we can run a filter pipeline in this way. 
+    if isinstance(args.config, list): 
+        for cfg in args.config:
+            detector = Filter.from_config(cfg)
+            res_df = detector.filter_data()
+            detector.save_results(res_df)
+    else:
+            detector = Filter.from_config(args.config)
+            res_df = detector.filter_data()
+            detector.save_results(res_df)
