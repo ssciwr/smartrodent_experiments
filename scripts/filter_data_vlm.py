@@ -11,6 +11,17 @@ import torch
 import yaml
 from tqdm.auto import tqdm
 
+# Configs express dataset paths relative to the directory that *contains* the
+# repo (e.g. "smartrodent_experiments/datasets/..."), so the same config works
+# whether the repo is checked out under .../Development/ or .../projects/.
+# dvc runs stages from the repo root, so cwd alone can't resolve that prefix.
+REPO_PARENT = Path(__file__).resolve().parents[2]
+
+
+def resolve_data_path(path: str | Path) -> Path:
+    path = Path(path)
+    return path if path.is_absolute() else (REPO_PARENT / path).resolve()
+
 
 def decided_label(
     image_filter, preprocessed_images: list
@@ -67,7 +78,7 @@ class Filter:
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
-        imgs_root = Path(config["paths"]["imgs_root"])
+        imgs_root = resolve_data_path(config["paths"]["imgs_root"])
         backend = config["backend"]
         common = dict(
             prompt=config["prompt"],
