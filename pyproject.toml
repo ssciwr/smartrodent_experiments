@@ -25,6 +25,11 @@ dependencies = [
     "librosa>=0.11.0",
     "pyinaturalist>=0.21.1",
     "dvclive>=3.49.1",
+    "dvc>=3.67.1",
+    "pandas>=3.0.3",
+    "requests>=2.34.2",
+    "tqdm>=4.69.0",
+    "vllm>=0.8",
 ]
 
 [project.optional-dependencies]
