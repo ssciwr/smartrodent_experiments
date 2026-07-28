@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+.python-version
 
 # Virtual environments
 .venv
@@ -27,6 +28,10 @@ runs*
 
 # pi coding agent stuff
 .pi
+.vscode
 
 # training
 training
+
+# macos
+.DS_Store
