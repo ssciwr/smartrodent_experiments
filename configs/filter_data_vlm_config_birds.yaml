@@ -8,7 +8,6 @@ ollama:
   url: http://localhost:11434/api/generate
   model: qwen3.6:35b-a3b
   # model: qwen3-vl:8b
-
 vllm:
   # model: Qwen/Qwen2.5-VL-3B-Instruct
   model:  Qwen/Qwen3.6-35B-A3B
@@ -16,8 +15,15 @@ vllm:
   max_model_len: 131072
   max_new_tokens: 300
   max_num_seqs: 138
-  batch_size: 16
+  batch_size: 24
 mode: move
+species: 
+  - Buteo buteo # common buzzard
+  - Ciconia ciconia # white stork
+  - Ardea cinerea # grey heron
+  - Spilornis cheela # crested serpent eagle
+  - Centropus sinensis #  crow pheasant
+  - Pavo cristatus # indian pea fowl
 system_prompt: |
   You are a meticulous wildlife biologist and camera-trap image analyst. You
   have extensive experience reviewing motion-triggered wildlife camera
@@ -41,8 +47,8 @@ prompt: |
 
   Rules:
   - label must be exactly one of: "kept", "rejected" or "unsure".
-  - Use "rejected" only for clear evidence of an infrared or thermal image: greyscale or thermal images taken with an infrared or thermal camera.
-  - Use "kept" only if it's clearly an rgb image that shows a color picture taken with a normal rgb camera.
+  - Use "rejected" only for clear evidence is present that the image does depict a bird in flight before a sky-like background.
+  - Use "kept" only if a bird sitting, perching or standing in a natural environment is clearly visible in the image.
   - Use "unsure" if the image is ambiguous, cropped, low quality, a drawing, or you cannot confidently decide.
   - needs_human_review should be true for unsure, poor/unusable images, or conflicting
     evidence.
