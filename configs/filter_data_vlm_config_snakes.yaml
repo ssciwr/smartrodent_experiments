@@ -16,7 +16,7 @@ vllm:
   max_new_tokens: 300
   max_num_seqs: 138
   batch_size: 24
-mode: "move"
+mode: move
 species: 
   - Vipera berus
   - Coronella austriaca
