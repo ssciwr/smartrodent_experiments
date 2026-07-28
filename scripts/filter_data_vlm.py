@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import ClassVar
+import argparse
 import base64
 import json
 import shutil
@@ -23,7 +24,7 @@ def decided_label(
 
 
 class Detector:
-    """Shared scaffolding for alive/dead/unsure wildlife image classification.
+    """Shared scaffolding for kept/rejected/unsure wildlife image classification.
 
     Subclasses provide the actual inference backend by overriding filter_data().
     """
@@ -33,23 +34,34 @@ class Detector:
         prompt: str,
         system_prompt: str,
         imgs_root: Path,
-        alive_root: Path,
+        kept_root: Path,
         unsure_root: Path,
-        dead_root: Path,
+        rejected_root: Path,
         failure_root: Path,
         image_suffixes: set[str],
+        species: list[str] | None = None,
+        mode: str = "copy"
     ):
         self.prompt = prompt
         self.system_prompt = system_prompt
         self.imgs_root = Path(imgs_root)
-        self.alive_root = Path(alive_root)
+        self.kept_root = Path(kept_root)
         self.unsure_root = Path(unsure_root)
-        self.dead_root = Path(dead_root)
+        self.rejected_root = Path(rejected_root)
         self.failure_root = Path(failure_root)
         self.image_suffixes = set(image_suffixes)
-
+        self.species = species
+        print("self.species: ", self.species)
+        if self.species is not None:
+            self.species = [s.lower() for s in self.species]
+        if mode == "copy": 
+            self.data_func = shutil.copy2 
+        elif mode == "move": 
+            self.data_func = shutil.move 
+        else: 
+            raise ValueError("Error, mode must be 'move' or 'copy'")
     @classmethod
-    def from_config(cls, config_path: str | Path = CONFIG_PATH) -> "Detector":
+    def from_config(cls, config_path: str | Path) -> "Detector":
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
@@ -60,13 +72,18 @@ class Detector:
             system_prompt=config["system_prompt"],
             imgs_root=imgs_root,
             image_suffixes=set(config["paths"]["image_suffixes"]),
+            species=config.get("species"),
+            mode = config.get("mode", "copy")
         )
 
         if backend == "ollama":
             model_tag = config["ollama"]["model"]
             detector_cls, extra = (
                 DetectorOllama,
-                dict(url=config["ollama"]["url"], model=config["ollama"]["model"]),
+                dict(
+                    url=config["ollama"]["url"],
+                    model=config["ollama"]["model"],
+                ),
             )
         elif backend == "vllm":
             model_tag = config["vllm"]["model"].split("/")[-1]
@@ -85,9 +102,9 @@ class Detector:
 
         return detector_cls(
             **common,
-            alive_root=imgs_root.parent / f"filtered_{model_tag}_kept",
+            kept_root=imgs_root.parent / f"filtered_{model_tag}_kept",
             unsure_root=imgs_root.parent / f"filtered_{model_tag}_undecided",
-            dead_root=imgs_root.parent / f"filtered_{model_tag}_rejected",
+            rejected_root=imgs_root.parent / f"filtered_{model_tag}_rejected",
             failure_root=imgs_root.parent / f"filtere_{model_tag}_failure",
             **extra,
         )
@@ -109,7 +126,12 @@ class Detector:
         relative_path = src.relative_to(self.imgs_root)
         dst = dst_root / relative_path
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        try:
+            self.data_func(src, dst)
+        except shutil.SameFileError:
+            pass
+        except Exception as e:
+            raise e
         return dst
 
     @staticmethod
@@ -121,8 +143,8 @@ class Detector:
             return {
                 "label": "failure",
                 "visible_animal": None,
-                "evidence_alive": [],
-                "evidence_dead": [],
+                "evidence_kept": [],
+                "evidence_rejected": [],
                 "image_quality": "unknown",
                 "needs_human_review": True,
                 "raw_response": raw,
@@ -131,14 +153,14 @@ class Detector:
 
         label = str(data.get("label", "failure")).strip().lower()
 
-        if label not in ["alive", "dead", "unsure"]:
+        if label not in ["kept", "rejected", "unsure"]:
             label = "failure"
 
         return {
             "label": label,
             "visible_animal": data.get("visible_animal"),
-            "evidence_alive": data.get("evidence_alive", []),
-            "evidence_dead": data.get("evidence_dead", []),
+            "evidence_kept": data.get("evidence_kept", []),
+            "evidence_rejected": data.get("evidence_rejected", []),
             "image_quality": data.get("image_quality", "unsure"),
             "needs_human_review": bool(
                 data.get("needs_human_review", label == "unsure")
@@ -149,18 +171,24 @@ class Detector:
 
     def collect_image_paths(self) -> list[Path]:
         species_dirs = sorted(p for p in self.imgs_root.iterdir() if p.is_dir())
-        return [
+
+        if self.species is not None:
+            species_dirs = [s for s in species_dirs if s.name.lower() in self.species]
+
+        image_paths = [
             image_path
             for species_path in species_dirs
             for image_path in sorted(species_path.iterdir())
             if image_path.is_file() and image_path.suffix.lower() in self.image_suffixes
         ]
 
+        return image_paths
+
     @property
     def dest_by_label(self) -> dict[str, Path]:
         return {
-            "alive": self.alive_root,
-            "dead": self.dead_root,
+            "kept": self.kept_root,
+            "rejected": self.rejected_root,
             "unsure": self.unsure_root,
             "failure": self.failure_root,
         }
@@ -218,18 +246,18 @@ class DetectorVLLM(Detector):
     RESPONSE_JSON_SCHEMA = {
         "type": "object",
         "properties": {
-            "label": {"type": "string", "enum": ["alive", "dead", "unsure"]},
+            "label": {"type": "string", "enum": ["kept", "rejected", "unsure"]},
             "visible_animal": {"type": "boolean"},
-            "evidence_alive": {"type": "array", "items": {"type": "string"}},
-            "evidence_dead": {"type": "array", "items": {"type": "string"}},
+            "evidence_kept": {"type": "array", "items": {"type": "string"}},
+            "evidence_rejected": {"type": "array", "items": {"type": "string"}},
             "image_quality": {"type": "string", "enum": ["clear", "poor", "unusable"]},
             "needs_human_review": {"type": "boolean"},
         },
         "required": [
             "label",
             "visible_animal",
-            "evidence_alive",
-            "evidence_dead",
+            "evidence_kept",
+            "evidence_rejected",
             "image_quality",
             "needs_human_review",
         ],
@@ -316,6 +344,7 @@ class DetectorVLLM(Detector):
     def filter_data(self) -> pd.DataFrame:
         self._ensure_engine()
         image_paths = self.collect_image_paths()
+
         dest_by_label = self.dest_by_label
 
         results = []
@@ -324,6 +353,7 @@ class DetectorVLLM(Detector):
                 chunk = image_paths[start : start + self.batch_size]
                 for image_path, res in zip(chunk, self.classify_images_batch(chunk)):
                     res["species"] = image_path.relative_to(self.imgs_root).parts[0]
+
                     results.append(res)
                     self.copy_with_structure(image_path, dest_by_label[res["label"]])
                 pbar.update(len(chunk))
@@ -331,12 +361,26 @@ class DetectorVLLM(Detector):
         return pd.DataFrame(results)
 
 
-if __name__ == "__main__":
-    print("cuda? ", torch.cuda.is_available())
-    config_path = (
-        Path(__file__).resolve().parents[1] / "configs" / "filter_data_vlm_config.yaml"
+def parse_args() -> argparse.Namespace:
+    default_config = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "filter_data_vlm_config.yaml"
     )
+    parser = argparse.ArgumentParser(description="Filter image data using a VLM backend.")
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=default_config,
+        help=f"Path to YAML config file (default: {default_config})",
+    )
+    return parser.parse_args()
 
-    detector = Detector.from_config(config_path)
+
+if __name__ == "__main__":
+    args = parse_args()
+    print("cuda? ", torch.cuda.is_available())
+    detector = Detector.from_config(args.config)
     res_df = detector.filter_data()
     detector.save_results(res_df)
