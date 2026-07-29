@@ -34,7 +34,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
-vlm = ["ammico[api]"]
 
 [tool.uv.sources]
 # The PyPI release of ammico (<=0.2.6) still depends on the old, unmaintained
