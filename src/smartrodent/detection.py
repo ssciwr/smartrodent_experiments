@@ -58,6 +58,8 @@ class DetectorBase(ABC):
         admin1_region: str | None = None,
         model_name: str = DEFAULT_MODEL,
         resume: bool = False,
+        geofence: bool = False,
+        components: str = "all",
         # yoloe
         task: str = "detect",
         classes: list[str] | None = None,
@@ -93,6 +95,8 @@ class DetectorBase(ABC):
         self.country = country
         self.admin1_region = admin1_region
         self.resume = resume
+        self.components = components
+        self.geofence = geofence
 
         # yoloe
         self.task = task
@@ -334,7 +338,7 @@ class SpeciesNet_Detector(DetectorBase):
         # the model starts. This also makes failures easier to diagnose because the target
         # path is explicit.
         output_json = Path(out) / "predictions.json"
-        preview_dir = Path(out) / "boxed"
+        # preview_dir = Path(out) / "boxed"
         crop_dir = Path(out) / "crops"
         output_json = Path(output_json)
         output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -351,7 +355,9 @@ class SpeciesNet_Detector(DetectorBase):
         # Enable all SpeciesNet components: detector, classifier, and ensemble. Geofence
         # is useful for this dataset because location can reduce implausible species.
         if self.model is None:
-            self.model = SpeciesNet(self.model_name, geofence=True, components="all")
+            self.model = SpeciesNet(
+                self.model_name, components=self.components, geofence=self.geofence
+            )
         self.model.detector.DETECTION_THRESHOLD = self.conf
         predictions = self.model.predict(
             filepaths=image_paths(path),
@@ -369,8 +375,8 @@ class SpeciesNet_Detector(DetectorBase):
 
         # Preview images are optional because they add extra image I/O. They are useful
         # for quick visual inspection of MegaDetector boxes and final SpeciesNet labels.
-        if preview_dir is not None:
-            self.save_speciesnet_previews(predictions, preview_dir)
+        # if preview_dir is not None:
+        #     self.save_speciesnet_previews(predictions, preview_dir)
 
         # Crops are also optional. When enabled, detections are saved into folders named
         # after detector labels so they can be inspected or used for later experiments.
@@ -448,21 +454,33 @@ class SpeciesNet_Detector(DetectorBase):
                 ``pad=0.2`` makes each crop 20% wider and taller overall.
         """
         crop_paths = []
+
+        # get best prediction
+
         for item in predictions["predictions"]:
             image_path = Path(item["filepath"])
-            with Image.open(image_path) as image:
-                for crop_index, detection in enumerate(item.get("detections", [])):
+
+            if len(item["detections"]) > 0:
+                # only get maximum detection confidence, b/c the conf usually falls quickly
+                confs = [detect["conf"] for detect in item["detections"]]
+                maxconf = max(confs)
+                maxconfidx = confs.index(maxconf)
+                maxdetect = item["detections"][maxconfidx]
+
+                with Image.open(image_path) as image:
                     crop_path = extract_crop(
                         image,
-                        detection,
+                        maxdetect,
                         output_dir=output_dir,
                         source_path=image_path,
-                        crop_index=crop_index,
+                        crop_index=maxconfidx,
                         pad=pad,
                     )
                     if crop_path is not None:
                         crop_paths.append(crop_path)
-
+            else:
+                print("warning, no detections found: ")
+                print(item)
         return crop_paths
 
     def save_speciesnet_previews(

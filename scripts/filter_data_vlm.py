@@ -40,7 +40,7 @@ class Filter:
         failure_root: Path,
         image_suffixes: set[str],
         species: list[str] | None = None,
-        mode: str = "copy"
+        mode: str = "copy",
     ):
         self.prompt = prompt
         self.system_prompt = system_prompt
@@ -54,12 +54,13 @@ class Filter:
         print("self.species: ", self.species)
         if self.species is not None:
             self.species = [s.lower() for s in self.species]
-        if mode == "copy": 
-            self.data_func = shutil.copy2 
-        elif mode == "move": 
-            self.data_func = shutil.move 
-        else: 
+        if mode == "copy":
+            self.data_func = shutil.copy2
+        elif mode == "move":
+            self.data_func = shutil.move
+        else:
             raise ValueError("Error, mode must be 'move' or 'copy'")
+
     @classmethod
     def from_config(cls, config_path: str | Path) -> "Filter":
         with open(config_path) as f:
@@ -73,7 +74,7 @@ class Filter:
             imgs_root=imgs_root,
             image_suffixes=set(config["paths"]["image_suffixes"]),
             species=config.get("species"),
-            mode = config.get("mode", "copy")
+            mode=config.get("mode", "copy"),
         )
 
         if backend == "ollama":
@@ -102,10 +103,10 @@ class Filter:
 
         return detector_cls(
             **common,
-            kept_root=imgs_root.parent / f"filtered_{model_tag}_kept",
-            unsure_root=imgs_root.parent / f"filtered_{model_tag}_undecided",
-            rejected_root=imgs_root.parent / f"filtered_{model_tag}_rejected",
-            failure_root=imgs_root.parent / f"filtere_{model_tag}_failure",
+            kept_root=imgs_root.parent / "filtered_kept",
+            unsure_root=imgs_root.parent / "filtered_undecided",
+            rejected_root=imgs_root.parent / "filtered_rejected",
+            failure_root=imgs_root.parent / "filtere_failure",
             **extra,
         )
 
@@ -201,6 +202,7 @@ class FilterOllama(Filter):
         super().__init__(**kwargs)
         self.url = url
         self.model = model
+        self.temp = kwargs.get("temperature", 0)
 
     @property
     def model_tag(self) -> str:
@@ -217,7 +219,7 @@ class FilterOllama(Filter):
             "stream": False,
             "think": False,
             "options": {
-                "temperature": 0,
+                "temperature": self.temp,
             },
         }
 
@@ -367,11 +369,13 @@ def parse_args() -> argparse.Namespace:
         / "configs"
         / "filter_data_vlm_config_animal.yaml"
     )
-    parser = argparse.ArgumentParser(description="Filter image data using a VLM backend.")
+    parser = argparse.ArgumentParser(
+        description="Filter image data using a VLM backend."
+    )
     parser.add_argument(
         "-c",
         "--config",
-        nargs='+',
+        nargs="+",
         type=Path,
         default=default_config,
         help=f"Path or list of paths to YAML config file (default: {default_config})",
@@ -381,14 +385,14 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    # chain configs together in the order given if we have multiple. 
-    # we can run a filter pipeline in this way. 
-    if isinstance(args.config, list): 
+    # chain configs together in the order given if we have multiple.
+    # we can run a filter pipeline in this way.
+    if isinstance(args.config, list):
         for cfg in args.config:
             detector = Filter.from_config(cfg)
             res_df = detector.filter_data()
             detector.save_results(res_df)
     else:
-            detector = Filter.from_config(args.config)
-            res_df = detector.filter_data()
-            detector.save_results(res_df)
+        detector = Filter.from_config(args.config)
+        res_df = detector.filter_data()
+        detector.save_results(res_df)
