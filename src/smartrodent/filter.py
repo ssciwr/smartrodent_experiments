@@ -8,6 +8,7 @@ import yaml
 from tqdm.auto import tqdm
 
 from .base import Filterable
+from .utils import resolve_data_path
 
 
 class VLMFilter(Filterable):
