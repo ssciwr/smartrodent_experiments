@@ -6,9 +6,6 @@ from urllib.parse import urlparse, urlunparse
 import pytest
 import requests
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 SYSTEM_PROMPT = (
     "You are a careful wildlife camera-trap image classifier. "
     "Return only a valid JSON object."
