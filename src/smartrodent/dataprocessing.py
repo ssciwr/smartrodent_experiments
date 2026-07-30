@@ -546,12 +546,23 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
             "animal",
         ],
         create_detection_dirs: bool = True,
+        background_image_dir: str | Path | None = None,
+        background_class_names: list[str] | tuple[str, ...] = ("empty",),
     ):
+        self.background_image_dir = (
+            Path(background_image_dir) if background_image_dir else None
+        )
+        self.background_class_names = set(background_class_names)
+        detection_class_names = [
+            class_name
+            for class_name in class_names
+            if class_name not in self.background_class_names
+        ]
         super().__init__(
             path_to_image_data,
             path_to_labels,
             dataset_output_path,
-            class_names,
+            detection_class_names,
             train_val_test_split,
             rng_seed=rng_seed,
             confidence_threshold=confidence_threshold,
@@ -661,16 +672,38 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
         """
         return [detection for _, detection in self._filter_label_items(detections)]
 
+    def _filter_by_observation(self, labels: dict) -> dict:
+
+        retained_predictions = []
+        for item in labels["predictions"]:
+            path = Path(item["filepath"]).name
+            splitpath = path.split("_")
+
+            if len(splitpath) > 1:
+                print("splitpath: ", splitpath)
+            # use only the _0 (i.e., first) observation
+            if len(splitpath) > 1 and splitpath[1][0] != "0":
+                print("skipping: ", path)
+                continue
+            else:
+                retained_predictions.append(item)
+
+        labels["predictions"] = retained_predictions
+
+        return labels
+
     def _preprocess_labels(self, raw_labels: dict) -> dict:
-        label_data = dict()
+        label_data = {}
         for pred in raw_labels["predictions"]:
             filepath = Path(pred["filepath"])
 
             key = filepath.name  # Use the filename as the key for label_data
             label = filepath.parent.name  # Parent directory name is the species name
+            if label in self.background_class_names:
+                continue
 
             if key not in label_data:
-                label_data[key] = dict()
+                label_data[key] = {}
 
             filtered_detections = self._filter_labels(pred["detections"])
 
@@ -704,8 +737,50 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
 
         return label_data
 
+    def _background_image_paths(self) -> list[Path]:
+        """Return background/empty full-image examples, if configured.
+
+        For YOLO detection these images are copied with empty ``.txt`` label files;
+        background is not added as a detector class. For classification subclasses the
+        same paths are copied into the background class directory.
+        """
+        if self.background_image_dir is None:
+            return []
+
+        if not self.background_image_dir.exists():
+            raise ValueError(
+                f"Background image directory {self.background_image_dir} does not exist"
+            )
+
+        return sorted(
+            p
+            for p in self.background_image_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in self.img_types
+        )
+
+    def _split_paths(self, img_paths: list[Path]) -> dict[str, list[Path]]:
+        """Shuffle and split image paths according to the configured fractions."""
+        img_paths = list(img_paths)
+        self.rng.shuffle(img_paths)
+        n_images = len(img_paths)
+        n_train = int(ceil(n_images * self.train_frac))
+        n_val = int(floor(n_images * self.val_frac))
+        n_test = n_images - n_train - n_val
+
+        if n_train + n_val + n_test != n_images:
+            raise ValueError(
+                "Image split counts do not sum to total: "
+                f"{n_train} + {n_val} + {n_test} != {n_images}"
+            )
+
+        return {
+            "train": img_paths[:n_train],
+            "val": img_paths[n_train : n_train + n_val],
+            "test": img_paths[n_train + n_val :],
+        }
+
     def _split_train_val_test(
-        self,
+        self, processed_labels
     ) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
         paths: dict[str, list[Path]] = {
             "img_paths": [],
@@ -726,30 +801,32 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
 
         # Split independently within each label directory. This keeps the label folders
         # in each split and prevents an image path from entering more than one split.
+        # Only include images retained in ``processed_labels``. ``__call__`` passes labels
+        # through ``_filter_by_observation`` first, so this excludes X_1, X_2, ...
+        # observations and prevents observation-level data leakage. Requiring at least
+        # one processed label also means images whose detections were removed by the
+        # confidence/class/NMS filters are not copied into the split.
+        retained_labels_by_image = {
+            image_name: {
+                label_info["label"]
+                for label_info in label_list
+                if label_info is not None and label_info != {}
+            }
+            for image_name, label_list in processed_labels.items()
+        }
         for label_dir in Path(self.path_to_image_data).iterdir():
+            if label_dir.name in self.background_class_names:
+                continue
+
             img_paths = [
                 p
                 for p in Path(label_dir).iterdir()
-                if p.is_file() and p.suffix.lower() in self.img_types
+                if p.is_file()
+                and p.suffix.lower() in self.img_types
+                and label_dir.name in retained_labels_by_image.get(p.name, set())
             ]
 
-            self.rng.shuffle(img_paths)
-            n_images = len(img_paths)
-            n_train = int(ceil(n_images * self.train_frac))
-            n_val = int(floor(n_images * self.val_frac))
-            n_test = n_images - n_train - n_val
-
-            if n_train + n_val + n_test != n_images:
-                raise ValueError(
-                    f"Image split counts do not sum to total for {label_dir}: "
-                    f"{n_train} + {n_val} + {n_test} != {n_images}"
-                )
-
-            split_images = {
-                "train": img_paths[:n_train],
-                "val": img_paths[n_train : n_train + n_val],
-                "test": img_paths[n_train + n_val :],
-            }
+            split_images = self._split_paths(img_paths)
 
             if (
                 set(split_images["train"]).intersection(split_images["val"])
@@ -781,6 +858,14 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
                     )
                     shutil.copy(src, dst)
                     assignments[split_name].append(dst)
+
+        background_split_images = self._split_paths(self._background_image_paths())
+        for split_name, split_paths in background_split_images.items():
+            for src in split_paths:
+                dst = Path(self.dataset_output_path) / "images" / split_name / src.name
+                shutil.copy(src, dst)
+                assignments[split_name].append(dst)
+
         return paths, assignments
 
     def _write_labels(
@@ -795,7 +880,8 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
         for split_name in ["train", "val", "test"]:
             for img_path in assignments[split_name]:
                 img_name = img_path.name
-                label_list = preprocessed_labels.get(img_name)
+                print("image name: ", img_name)
+                label_list = preprocessed_labels.get(img_name, [])
                 yolo_labels = []
                 for label_info in label_list:
                     if label_info is None or label_info == {}:
@@ -839,6 +925,14 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
 
         return self.dataset_output_path
 
+    def __call__(self):
+        """Generate the classifier dataset and return its output path."""
+
+        filtered_labels = self._filter_by_observation(self.labels)
+        preprocessed_labels = self._preprocess_labels(filtered_labels)
+        paths, assignments = self._split_train_val_test(preprocessed_labels)
+        return self._write_labels(paths, assignments, preprocessed_labels)
+
 
 class YoloClassifierDatasetCreatorFromSpeciesnet(
     YoloDetectorDatasetCreatorFromSpeciesnet
@@ -870,6 +964,8 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
             "animal",
         ],
         image_directory: str = "crops",
+        background_image_dir: str | Path | None = None,
+        background_class_name: str = "empty",
     ):
         """Configure classifier dataset creation from a SpeciesNet output tree.
 
@@ -888,8 +984,13 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
             labels_to_filter: SpeciesNet detector labels to keep, for example
                 ``["animal", "rodent"]``.
             image_directory: Name of the crop folder inside each species directory.
+            background_image_dir: Directory containing full-frame background/empty
+                examples.
+            background_class_name: Classification class directory used for background
+                examples. Defaults to ``"empty"``.
         """
         self.image_directory = image_directory
+        self.background_class_name = background_class_name
         self.crop_records: dict[str, list[dict]] = {}
         self.missing_crops: list[dict] = []
         super().__init__(
@@ -903,6 +1004,8 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
             IoU_threshold=IoU_threshold,
             labels_to_filter=labels_to_filter,
             create_detection_dirs=False,
+            background_image_dir=background_image_dir,
+            background_class_names=(),
         )
 
     def _find_crop_path(
@@ -986,6 +1089,16 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
                         "species": species,
                         "source_path": source_path,
                         "crop_path": crop_path,
+                    }
+                )
+
+        if self.background_class_name in records_by_species:
+            for image_path in self._background_image_paths():
+                records_by_species[self.background_class_name].append(
+                    {
+                        "species": self.background_class_name,
+                        "source_path": image_path,
+                        "crop_path": image_path,
                     }
                 )
 
@@ -1083,8 +1196,29 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
 
         return self.dataset_output_path
 
+    def _filter_by_observation(self) -> dict:
+        filtered_elements: dict[str, list[Path]] = {
+            species: [] for species in self.class_names
+        }
+
+        for species, records in self.crop_records.items():
+            for record in records:
+                path = record["source_path"].name
+                splitpath = path.split("_")
+                if len(splitpath) > 1:
+                    print("splitpath: ", splitpath)
+                # use only the _0 (i.e., first) observation
+                if len(splitpath) > 1 and splitpath[1][0] != "0":
+                    print("skipping: ", record["source_path"])
+                    continue
+                else:
+                    filtered_elements[species].append(record)
+
+        return filtered_elements
+
     def __call__(self) -> str | Path:
         """Generate the classifier dataset and return its output path."""
         preprocessed_labels = self._preprocess_labels(self.labels)
+        self.crop_records = self._filter_by_observation()
         paths, assignments = self._split_train_val_test()
         return self._write_labels(paths, assignments, preprocessed_labels)

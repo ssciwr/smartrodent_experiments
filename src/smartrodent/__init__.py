@@ -1,6 +1,6 @@
 """SmartRodent model experiment package."""
 
-from .base import DataPreprocessorBase, YoloDatasetCreatorBase
+from .base import YoloDatasetCreatorBase
 from .dataprocessing import (
     ImageFilterBiotroveClip,
     ImageFilterCLIP,
@@ -10,7 +10,6 @@ from .dataprocessing import (
 )
 from .detection import (
     BioTroveClip_Detector,
-    DetectorBase,
     SpeciesNet_Detector,
     YOLO_Detector,
     YOLOE_Detector,
@@ -35,7 +34,6 @@ from .utils import (
 __all__ = [
     "BioTroveClip_Detector",
     "COUNTRY_ALIASES",
-    "DataPreprocessorBase",
     "DetectorBase",
     "IMAGE_SUFFIXES",
     "ImageFilterBiotroveClip",

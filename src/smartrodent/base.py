@@ -40,24 +40,6 @@ class ImageFilterBase(ABC):
         pass
 
 
-class DataPreprocessorBase(ABC):
-    def __init__(self, raw_data_path: str, processed_data_path: str):
-        self.raw_data_path = raw_data_path
-        self.processed_data_path = processed_data_path
-
-    @abstractmethod
-    def filter_raw_data(self):
-        pass
-
-    @abstractmethod
-    def process_raw_data(self):
-        pass
-
-    @abstractmethod
-    def finalize(self):
-        pass
-
-
 class YoloDatasetCreatorBase(ABC):
     def __init__(
         self,
@@ -66,7 +48,7 @@ class YoloDatasetCreatorBase(ABC):
         dataset_output_path: str,
         class_names: list[str],
         train_val_test_split: tuple[float, float, float] = (0.7, 0.2, 0.1),
-        img_types=[".jpg", ".jpeg", ".png"],
+        img_types=(".jpg", ".jpeg", ".png"),
         rng_seed: int = 42,
         confidence_threshold: float = 0.1,
         IoU_threshold: float = 0.45,
@@ -113,7 +95,7 @@ class YoloDatasetCreatorBase(ABC):
         self.rng_seed = rng_seed
         self.rng = np.random.default_rng(self.rng_seed)
 
-        self.classes = dict()
+        self.classes = {}
         for i, class_name in enumerate(class_names):
             self.classes[i] = class_name
 
@@ -124,6 +106,10 @@ class YoloDatasetCreatorBase(ABC):
         if create_detection_dirs:
             (p / "labels").mkdir(parents=True, exist_ok=True)
             (p / "images").mkdir(parents=True, exist_ok=True)
+
+    @abstractmethod
+    def _filter_by_observation(self) -> dict[str, list[Path]]:
+        pass
 
     @abstractmethod
     def _filter_labels(self, detections: list) -> list:
@@ -147,10 +133,3 @@ class YoloDatasetCreatorBase(ABC):
         preprocessed_labels: dict,
     ) -> Path:
         pass
-
-    def __call__(self) -> str | Path:
-        paths, assignments = self._split_train_val_test()
-
-        preprocessed_labels = self._preprocess_labels(self.labels)
-
-        return self._write_labels(paths, assignments, preprocessed_labels)
