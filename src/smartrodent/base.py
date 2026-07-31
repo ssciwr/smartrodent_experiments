@@ -17,6 +17,7 @@ class Configurable(Protocol):
         Returns:
             Configurable: A new instance configured from the file.
         """
+        ...
 
 
 @runtime_checkable
@@ -29,6 +30,7 @@ class Filterable(Configurable, Protocol):
         Returns:
             pd.DataFrame: One row per processed item describing the outcome.
         """
+        ...
 
     def save_results(self, res_df: pd.DataFrame) -> Path:
         """Persist filtering results to disk.
@@ -39,6 +41,7 @@ class Filterable(Configurable, Protocol):
         Returns:
             Path: The path the results were written to.
         """
+        ...
 
     def collect_image_paths(self) -> list[Path]:
         """Gather the image paths that should be filtered.
@@ -46,3 +49,4 @@ class Filterable(Configurable, Protocol):
         Returns:
             list[Path]: Paths of the images to process.
         """
+        ...
