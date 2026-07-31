@@ -1,11 +1,14 @@
-from pathlib import Path
 import base64
+import gc
 import json
+import logging
 import shutil
+from pathlib import Path
+
 import pandas as pd
-import requests
 import yaml
 from tqdm.auto import tqdm
+import ollama
 
 from .base import Filterable
 from .utils import resolve_data_path
@@ -29,6 +32,7 @@ class VLMFilter(Filterable):
         image_suffixes: set[str],
         species: list[str] | None = None,
         mode: str = "copy",
+        log_level=logging.INFO,
     ):
         """Initialize the filter.
 
@@ -58,7 +62,7 @@ class VLMFilter(Filterable):
         self.failure_root = Path(failure_root)
         self.image_suffixes = set(image_suffixes)
         self.species = species
-        print("self.species: ", self.species)
+        self.log_level = log_level
         if self.species is not None:
             self.species = [s.lower() for s in self.species]
         if mode == "copy":
@@ -68,8 +72,19 @@ class VLMFilter(Filterable):
         else:
             raise ValueError("Error, mode must be 'move' or 'copy'")
 
+    def __enter__(self):
+        """Return this filter for use in a context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Release backend resources when leaving a context manager."""
+        self.close()
+
+    def close(self) -> None:
+        """Release resources held by a backend, if any."""
+
     @classmethod
-    def from_config(cls, config_path: str | Path) -> "Filter":
+    def from_config(cls, config_path: str | Path) -> "VLMFilter":
         """Build a filter instance from a YAML config file.
 
         Reads paths, prompts, species, and backend-specific settings from the
@@ -107,8 +122,8 @@ class VLMFilter(Filterable):
             detector_cls, extra = (
                 FilterOllama,
                 dict(
-                    url=config["ollama"]["url"],
                     model=config["ollama"]["model"],
+                    pull_model=config["ollama"].get("pull_model", True),
                 ),
             )
         elif backend == "vllm":
@@ -273,26 +288,38 @@ class VLMFilter(Filterable):
 
 
 class FilterOllama(VLMFilter):
-    """Classifies images one at a time via a local Ollama server. Fallback backend."""
+    """Classify images through one persistent Ollama server connection.
 
-    def __init__(self, *, url: str, model: str, **kwargs):
+    SmartRodent does not start or stop the Ollama daemon: it may be shared by
+    other work.  ``close`` unloads this filter's model from GPU memory.
+    """
+
+    def __init__(self, *, model: str, pull_model: bool = True, **kwargs):
         """Initialize the Ollama-backed filter.
 
         Args:
-            url: URL of the Ollama server's generate endpoint.
             model: Name of the Ollama model to use for classification.
+            pull_model: Whether to download the model when it is not already available locally.
             **kwargs: Additional arguments forwarded to :class:`VLMFilter`.
         """
         super().__init__(**kwargs)
-        self.url = url
+        self.logger = logging.getLogger("FilterOllama")
+        self.logger.setLevel(self.log_level)
+        self.client = ollama.Client()
         self.model = model
+        self._closed = False
+
+        if pull_model:
+            self.logger.info("Download model")
+            output = self.client.pull(model, stream=False)
+            self.logger.info("Model download result: %s", output)
 
     @property
     def model_tag(self) -> str:
         """str: The Ollama model name."""
         return self.model
 
-    def classify_image(self, path: Path) -> dict:
+    def classify(self, path: Path) -> dict:
         """Classify a single image via the Ollama server.
 
         Args:
@@ -316,10 +343,33 @@ class FilterOllama(VLMFilter):
             },
         }
 
-        response = requests.post(self.url, json=payload, timeout=120)
-        response.raise_for_status()
+        response = self.client.generate(
+            model=payload["model"],
+            system=payload["system"],
+            prompt=payload["prompt"],
+            images=payload["images"],
+            format=payload["format"],
+            stream=payload["stream"],
+            think=payload["think"],
+            options=payload["options"],
+        )
 
-        return self.parse_response(response.json()["response"])
+        return self.parse_response(response.response)
+
+    def close(self) -> None:
+        """Unload the model while leaving the externally managed daemon alive."""
+        if self._closed:
+            return
+
+        try:
+            self.client.generate(model=self.model, keep_alive=0)
+        except Exception:
+            # Cleanup must not hide an earlier classification exception.
+            self.logger.warning(
+                "Could not unload Ollama model %s", self.model, exc_info=True
+            )
+        else:
+            self._closed = True
 
     def filter_data(self) -> pd.DataFrame:
         """Classify each collected image one at a time via Ollama.
@@ -336,11 +386,14 @@ class FilterOllama(VLMFilter):
         image_paths = self.collect_image_paths()
         dest_by_label = self.dest_by_label
 
-        for image_path in tqdm(image_paths, desc="OLLAMA filtering images"):
-            res = self.classify_image(image_path)
-            res["species"] = image_path.relative_to(self.imgs_root).parts[0]
-            results.append(res)
-            self.copy_with_structure(image_path, dest_by_label[res["label"]])
+        try:
+            for image_path in tqdm(image_paths, desc="OLLAMA filtering images"):
+                res = self.classify(image_path)
+                res["species"] = image_path.relative_to(self.imgs_root).parts[0]
+                results.append(res)
+                self.copy_with_structure(image_path, dest_by_label[res["label"]])
+        finally:
+            self.close()
 
         return pd.DataFrame(results)
 
@@ -398,6 +451,7 @@ class FilterVLLM(VLMFilter):
         self.batch_size = batch_size
         self._llm = None
         self._sampling_params = None
+        self._closed = False
 
     @property
     def model_tag(self) -> str:
@@ -469,7 +523,7 @@ class FilterVLLM(VLMFilter):
             },
         ]
 
-    def classify_images_batch(self, image_paths: list[Path]) -> list[dict]:
+    def _classify_batch(self, image_paths: list[Path]) -> list[dict]:
         """Run one batched vLLM chat call and return parsed results in input order.
 
         Args:
@@ -486,6 +540,38 @@ class FilterVLLM(VLMFilter):
         )
         return [self.parse_response(output.outputs[0].text) for output in outputs]
 
+    def classify(self, path: Path) -> dict:
+        """Classify one image through the lazily-created vLLM engine."""
+        return self._classify_batch([path])[0]
+
+    def close(self) -> None:
+        """Shut down a lazily-created vLLM engine and release GPU references."""
+        if self._closed:
+            return
+
+        try:
+            engine = getattr(self._llm, "llm_engine", None)
+            shutdown = getattr(engine, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+        except Exception:
+            logging.getLogger("FilterVLLM").warning(
+                "Could not shut down vLLM engine", exc_info=True
+            )
+        finally:
+            self._llm = None
+            self._sampling_params = None
+            self._closed = True
+            gc.collect()
+
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
     def filter_data(self) -> pd.DataFrame:
         """Classify each collected image in batches via vLLM.
 
@@ -497,20 +583,23 @@ class FilterVLLM(VLMFilter):
             pd.DataFrame: One row per processed image with its classification
             and species.
         """
-        self._ensure_engine()
-        image_paths = self.collect_image_paths()
-
-        dest_by_label = self.dest_by_label
-
         results = []
-        with tqdm(total=len(image_paths), desc="vLLM filtering images") as pbar:
-            for start in range(0, len(image_paths), self.batch_size):
-                chunk = image_paths[start : start + self.batch_size]
-                for image_path, res in zip(chunk, self.classify_images_batch(chunk)):
-                    res["species"] = image_path.relative_to(self.imgs_root).parts[0]
+        try:
+            self._ensure_engine()
+            image_paths = self.collect_image_paths()
+            dest_by_label = self.dest_by_label
+            with tqdm(total=len(image_paths), desc="vLLM filtering images") as pbar:
+                for start in range(0, len(image_paths), self.batch_size):
+                    chunk = image_paths[start : start + self.batch_size]
+                    for image_path, res in zip(chunk, self._classify_batch(chunk)):
+                        res["species"] = image_path.relative_to(self.imgs_root).parts[0]
 
-                    results.append(res)
-                    self.copy_with_structure(image_path, dest_by_label[res["label"]])
-                pbar.update(len(chunk))
+                        results.append(res)
+                        self.copy_with_structure(
+                            image_path, dest_by_label[res["label"]]
+                        )
+                    pbar.update(len(chunk))
+        finally:
+            self.close()
 
         return pd.DataFrame(results)
