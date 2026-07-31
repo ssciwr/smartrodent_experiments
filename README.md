@@ -1,240 +1,105 @@
-# Rodent Experiments
+# SmartRodent experiments
 
-Experimental code for building rodent and rodent-adjacent wildlife image datasets and trying baseline computer-vision models for detection, cropping, and species classification.
-
-The repository is currently exploratory. It combines:
-
-- BioTrove metadata filtering for region-specific target species,
-- image download and image/text-pair generation from filtered BioTrove metadata,
-- CLIP-based visual filtering of unsuitable images,
-- YOLO object-detection experiments,
-- Google SpeciesNet species prediction experiments,
-- helper code for saving boxed preview images and object crops for manual inspection.
-
-See `notes/notes.md` for dataset notes, target-species rationale, references, and open modeling/deployment questions.
+Tools for building a licensed, species-organized wildlife image dataset from
+iNaturalist observations. The maintained package currently provides the
+iNaturalist downloader and its DVC pipeline.
 
 ## Repository layout
 
 ```text
-configs/                                  BioTrove workflow configs and target species lists
-notebooks/process_biotrove.ipynb          notebook workflow for BioTrove processing and CLIP filtering
-src/smartrodent/biotrove_process/         local modified BioTrove processing package
-src/smartrodent/dataprocessing.py         CLIP-based image filtering and plotting helpers
-src/smartrodent/main.py                   YOLO and SpeciesNet experiment entry points
-src/smartrodent/utils.py                  image-path, country-code, crop, and visualization helpers
-src/smartrodent/yolo26*.pt                local YOLO weights used by experiments
-requirements_processing.txt               notebook/processing dependencies, including OpenAI CLIP
-datasets/                                 local data directory; large datasets are not meant for git
-notes/notes.md                            dataset notes, species lists, references, open questions
+config/dataset_full.yaml              Download configuration and DVC parameters
+dvc.yaml                              iNaturalist download pipeline
+scripts/download_inaturalist_data.py  Command-line download entry point
+src/smartrodent/inaturalist.py        Downloader implementation
+tests/                                Pytest suite
+requirements_processing.txt           Optional legacy notebook/processing tools
+requirements_ammico.txt               Optional AMMICO/VLM tools
 ```
-
-## What it does
-
-### BioTrove dataset processing
-
-The notebook `notebooks/process_biotrove.ipynb` uses the local package `smartrodent.biotrove_process` to:
-
-1. load a JSON config from `configs/`,
-2. filter BioTrove parquet metadata by taxonomic category or scientific name,
-3. compute per-species/category counts,
-4. shuffle and chunk filtered metadata,
-5. download source images,
-6. generate image/text pairs and optional tar files,
-7. organize classifier-style image folders by scientific name,
-8. run CLIP prompt-based filtering to separate likely useful live-animal images from non-animal/specimen/dead-animal images.
-
-The BioTrove processing code under `src/smartrodent/biotrove_process/` is a local modified copy of the original BioTrove processing utilities. The notebook imports it through `smartrodent.biotrove_process`, not from an external checkout.
-
-### Target species configs
-
-The currently maintained region configs are:
-
-- `configs/config_central_europe.json`
-  - `Rattus norvegicus`, `Rattus rattus`, `Mus musculus`, `Myodes glareolus`, `Apodemus agrarius`, `Apodemus flavicollis`, `Apodemus sylvaticus`, `Microtus arvalis`, `Microtus agrestis`, `Arvicola amphibius`, `Crocidura leucodon`
-- `configs/config_srilanka.json`
-  - `Rattus norvegicus`, `Rattus rattus`, `Suncus murinus`, `Bandicota indica`, `Bandicota bengalensis`, `Mus booduga`, `Vandeleuria`, `Mus musculus`
-
-You have to adjust the paths to your setup before using. You also have to download the biotrove dataset from huggingface first (see 'Data requirements').
-
-### Model experiments
-
-`src/smartrodent/main.py` exposes two main experiment functions:
-
-- `main(...)`: run local YOLO weights on one image or a batch of images. Ultralytics saves boxed previews and optional crops under `runs/`.
-- `run_speciesnet(...)`: run SpeciesNet with optional country geofencing, write prediction JSON, save boxed previews, and optionally save detector crops.
-
-`src/smartrodent/utils.py` contains shared helpers for image path expansion, country-code normalization, SpeciesNet label formatting, preview rendering, and crop extraction.
-
-`src/smartrodent/dataprocessing.py` contains the `ImageFilter` class used by the BioTrove notebook for CLIP-based prompt filtering and visualization.
-
-## Dependencies
-
-The package is configured in `pyproject.toml` and requires Python **3.13 or newer**.
-
-Main package dependencies:
-
-- `datasets` / `hf-datasets`
-- `polars`, `numpy`, `pyaml`
-- `matplotlib`, `Pillow`
-- `torch`, `torchvision`
-- `ultralytics`
-- `speciesnet`
-
-Additional notebook/processing dependencies are listed in `requirements_processing.txt`. Important ones include:
-
-- `git+https://github.com/openai/CLIP.git`
-- `aiohttp`
-- `pandas`, `pyarrow`, `fastparquet`, `polars`
-- `ipykernel`, `ipython`
-- `seaborn`, `scikit-image`, `tqdm`
-
-Development dependencies are available through the `dev` extra:
-
-- `pytest`
-- `pytest-cov`
-- `coverage`
-- `pre-commit`
-- `pytest-mock`
-
-## Data prerequisites
-
-Download BioTrove before running the BioTrove notebook:
-
-- <https://huggingface.co/datasets/BGLab/BioTrove>
-
-Place or symlink the dataset under `datasets/BioTrove/BioTrove`, or update the `source_folder` value in the relevant config file to point to the local BioTrove parquet directory.
-
-Large datasets, generated parquet chunks, downloaded images, model outputs, and `runs/` outputs are local working data and should not be committed.
 
 ## Installation
 
-This repository has a `uv.lock`, so `uv` is the preferred installer.
+The project requires Python 3.13 or newer and uses [uv](https://docs.astral.sh/uv/)
+for environment and package management.
+
+Install the runtime dependencies from the lockfile:
 
 ```bash
-# from the repository root
 uv sync
 ```
 
-For development tools:
+For development, including the test tools:
 
 ```bash
 uv sync --extra dev
-uv run pre-commit install
 ```
 
-For the notebook/BioTrove processing environment, install the additional processing requirements into the same environment:
+`requirements_processing.txt` and `requirements_ammico.txt` are deliberately
+not part of the main environment. Install one only when working on its optional
+workflow:
 
 ```bash
 uv pip install -r requirements_processing.txt
+# or
+uv pip install -r requirements_ammico.txt
 ```
 
-Without `uv`, use a Python 3.13+ virtual environment:
+## iNaturalist download configuration
+
+The downloader reads a YAML configuration. [`config/dataset_full.yaml`](config/dataset_full.yaml)
+contains the current full-dataset configuration. Before running it, set
+`inaturalist.output_path` to a directory on your machine.
+
+The important settings are:
+
+- `output_path`: destination for the downloaded dataset.
+- `species`: scientific names to download.
+- Either `years`, or the inclusive `first_year` / `last_year` range.
+- `quality_grade`, `allowed_licences`, `seed`, and `max_img_num`: observation
+  filtering and download-limit settings.
+
+The downloader creates one directory per species, containing `records.csv` and
+an `imgs/` directory. It copies the YAML configuration into the output
+directory for provenance. Downloaded data stays local and is not committed.
+
+## DVC usage
+
+The `download_inaturalist` DVC stage runs the downloader with
+`config/dataset_full.yaml`. The `inaturalist` configuration mapping is tracked
+as DVC parameters, while the downloader script and implementation are tracked
+as code dependencies.
+
+Check whether the stage is up to date:
 
 ```bash
-python3.13 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-python -m pip install -r requirements_processing.txt   # optional: notebook processing
-python -m pip install -e '.[dev]'                       # optional: development tools
+uv run dvc status
 ```
 
-## Basic usage
-
-### Run YOLO
-
-```python
-from smartrodent.main import main
-
-main(
-    "path/to/image.jpg",
-    batchsize=1,
-    project="runs/yolo",
-    crop=True,
-)
-```
-
-### Run SpeciesNet
-
-```python
-from smartrodent.main import run_speciesnet
-
-predictions = run_speciesnet(
-    "path/to/images",
-    output_json="runs/speciesnet/predictions.json",
-    preview_dir="runs/speciesnet/boxed",
-    crop_dir="runs/speciesnet/crops",
-    batch_size=16,
-    country="LKA",  # examples: DEU, LKA, USA
-)
-```
-
-### Use the local BioTrove processing package
-
-```python
-from smartrodent.biotrove_process import (
-    MetadataProcessor,
-    GenShuffledChunks,
-    GetImages,
-    GenImgTxtPair,
-    load_config,
-)
-
-config = load_config("configs/config_central_europe.json")
-processor = MetadataProcessor(**config["metadata_processor_info"])
-processor.process_all_files()
-```
-
-For the full workflow, open `notebooks/process_biotrove.ipynb`, choose one of the configs in `configs/`, verify all paths, and run the notebook cells in order.
-
-### Use CLIP image filtering helpers
-
-```python
-from smartrodent.dataprocessing import ImageFilter
-
-image_filter = ImageFilterCLIP(
-    model="RN50x16",
-    prompts=["not an animal at all", "a mouse, rat or other rodent"],
-    id_tol=0.02,
-)
-```
-
-### Use VLM inference with ammico
-
-For this you need to install the latest ammico version from the GitHub repo:
-```
-uv pip install git+https://github.com/ssciwr/AMMICO.git
-```
-You also need to start the model using `ollama` or `vllm`, for example with
-```
-docker run --rm --gpus all --ipc=host -p 8000:8000 -v ~/.cache/huggingface:/root/.cache/huggingface vllm/vllm-openai:v0.10.0 --model Qwen/Qwen2.5-VL-3B-Instruct --api-key KEY     --limit-mm-per-prompt '{"image": 8}' --gpu-memory-utilization 0.80 --max-model-len 4096
-```
-
-Then there is the [ammico demo notebook](notebooks/ammico_demo_getting_started.ipynb) in the notebook folder, that allows you to inspect the VQA answers together with the images, and also a [script](scripts/species_script.py) for running this on a batch of images. Below is the result for at most 100 images from the rat subset of BioTrove:
-
-![alt text](image.png)
-
-
-## Tests and development status
-
-The project has pytest/coverage configuration in `pyproject.toml`, but the current repository is primarily notebook- and experiment-driven. Some generated caches and local data may exist in working trees; avoid committing large data, generated outputs, or `__pycache__` files.
-
-Run tests, when present and applicable, with:
+Run or reproduce the configured download:
 
 ```bash
+uv run dvc repro download_inaturalist
+```
+
+The stage deliberately has no declared DVC outputs. This lets `output_path`
+refer to an external or large local dataset without DVC attempting to cache or
+version the images. Edit the YAML to change the destination or dataset
+parameters, then rerun the stage.
+
+To run the downloader without DVC:
+
+```bash
+uv run python scripts/download_inaturalist_data.py config/dataset_full.yaml
+```
+
+## Tests
+
+Install the development extra, then run the test suite from the repository
+root:
+
+```bash
+uv sync --extra dev
 uv run pytest
 ```
 
-or, without `uv`:
-
-```bash
-python -m pytest
-```
-
-## Notes and caveats
-
-- The config files currently contain absolute local paths and must be edited for other machines.
-- SpeciesNet and YOLO may download or load large model files and may require substantial compute.
-- CLIP filtering uses PyTorch and is much faster with CUDA, but the helper code currently assumes CUDA in `compute_similarity`.
-- Species lists in `notes/notes.md` are dataset targets, not complete regional fauna lists.
-- This repository is exploratory and should be treated as research code rather than a stable application API.
+The test command does not run the iNaturalist download pipeline. Use `dvc repro`
+explicitly when you want to make network requests and write a dataset.
