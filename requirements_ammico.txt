@@ -1,0 +1,2 @@
+# AMMICO's GitHub main branch provides the maintained OpenAI-compatible API.
+ammico[api] @ git+https://github.com/ssciwr/AMMICO.git
