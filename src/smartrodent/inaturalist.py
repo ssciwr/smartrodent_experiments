@@ -21,29 +21,45 @@ class InaturalistDataset:
     The constructor performs only local setup: it validates the requested
     years, creates the output directory, and optionally copies the YAML
     configuration there for provenance. Network requests happen only when
-    :meth:`download` is called.
+    `download` is called.
+
+    Example:
+        >>> dataset = InaturalistDataset(
+        ...     "datasets/raw", ["Mus musculus"], first_year=2020, last_year=2022
+        ... )
+        >>> dataset.download()  # doctest: +SKIP
 
     Args:
         output_path: Directory in which species folders and metadata are saved.
         species: Scientific names to retrieve from iNaturalist.
         years: Explicit observation years. Mutually exclusive with a complete
-            ``first_year``/``last_year`` range.
+            `first_year`/`last_year` range.
         first_year: First year in an inclusive year range.
         last_year: Last year in an inclusive year range.
         quality_grade: iNaturalist observation quality grade to request.
         seed: Seed used to shuffle observations before applying the image limit.
         max_img_num: Maximum number of licensed images to save per species.
         allowed_licenses: iNaturalist license codes accepted for downloads.
-        config_path: Optional source YAML file to copy into ``output_path``.
+        config_path: Optional source YAML file to copy into `output_path`.
+
+    Attributes:
+        output_path (Path): Absolute path to the dataset root directory.
+        species (list[str]): Scientific names to download, in configured order.
+        years (list[int]): Resolved observation years, one API request each.
+        quality_grade (str): Quality grade passed to the iNaturalist API.
+        seed (int): Random seed for the deterministic record shuffle.
+        max_img_num (int): Per-species image cap.
+        allowed_licenses (set[str]): License codes accepted for downloads.
+        config_path (Path | None): Absolute path to the source YAML file, if any.
+        logger (logging.Logger): Logger named after this class.
 
     Raises:
         ValueError: If the year selection is missing, inconsistent, or empty,
-            or if ``max_img_num`` is negative.
+            if `species` is empty, or if `max_img_num` is negative.
     """
 
     def __init__(
         self,
-        *,
         output_path: str | Path,
         species: Sequence[str],
         years: Sequence[int] | None = None,
@@ -82,18 +98,25 @@ class InaturalistDataset:
     def from_config(cls, config_path: str | Path) -> InaturalistDataset:
         """Build a dataset downloader from an iNaturalist YAML configuration.
 
-        The loader accepts either a top-level ``inaturalist`` mapping or a
-        configuration that is itself that mapping. ``allowed_licences`` is
-        supported as a backwards-compatible spelling for ``allowed_licenses``.
+        The loader accepts either a top-level `inaturalist` mapping or a
+        configuration that is itself that mapping. `allowed_licences` is
+        supported as a backwards-compatible spelling for `allowed_licenses`.
+        Every setting other than `output_path` and `species` falls back to the
+        constructor default when it is absent. The configuration file is copied
+        into the dataset root so a download can always be traced back to it.
 
         Args:
             config_path: Path to the YAML configuration file.
 
         Returns:
-            A configured dataset downloader ready for :meth:`download`.
+            A configured dataset downloader ready for `download`.
 
         Raises:
-            ValueError: If the YAML file is empty or lacks required keys.
+            FileNotFoundError: If `config_path` does not exist.
+            TypeError: If the file is empty or neither it nor its `inaturalist`
+                entry is a mapping.
+            ValueError: If `output_path` or `species` is missing, or if the
+                remaining settings fail constructor validation.
         """
         path = Path(config_path).expanduser().resolve()
         with path.open(encoding="utf-8") as config_file:
@@ -133,7 +156,25 @@ class InaturalistDataset:
     def _resolve_years(
         years: Sequence[int] | None, first_year: int | None, last_year: int | None
     ) -> list[int]:
-        """Validate explicit years or turn an inclusive range into a list."""
+        """Validate explicit years or turn an inclusive range into a list.
+
+        Exactly one of the two ways to select years must be given: a non-empty
+        `years` sequence, or both `first_year` and `last_year`.
+
+        Args:
+            years: Explicit observation years, or None. An empty sequence counts
+                as no selection, which lets a config file keep an unused
+                `years: []` entry next to a year range.
+            first_year: First year of an inclusive range, or None.
+            last_year: Last year of an inclusive range, or None.
+
+        Returns:
+            The explicit years unchanged, or the expanded inclusive range.
+
+        Raises:
+            ValueError: If both selections are given, if neither is given, or if
+                `first_year` is greater than `last_year`.
+        """
         explicit_years = list(years or [])
         has_range = first_year is not None and last_year is not None
 
@@ -145,12 +186,15 @@ class InaturalistDataset:
             if first_year > last_year:
                 raise ValueError("first_year must be less than or equal to last_year")
             return list(range(first_year, last_year + 1))
-        if not explicit_years:
-            raise ValueError("Provide either years or first_year and last_year")
+
         return explicit_years
 
     def _copy_config(self) -> None:
-        """Copy the configuration into the dataset root when one was supplied."""
+        """Copy the configuration into the dataset root when one was supplied.
+
+        Does nothing when no configuration was given, or when the file already
+        lives in the dataset root and would be copied onto itself.
+        """
         if self.config_path is None:
             return
 
@@ -159,7 +203,21 @@ class InaturalistDataset:
             shutil.copy2(self.config_path, destination)
 
     def _get_species_records(self, species: str) -> pd.DataFrame:
-        """Fetch and deterministically shuffle observation records for one species."""
+        """Fetch and deterministically shuffle observation records for a species.
+
+        One paginated API request is made per configured year, and the combined
+        results are flattened into a table. Shuffling with `seed` keeps the
+        selection reproducible while stopping the API's ordering from biasing a
+        dataset that is later capped by `max_img_num`.
+
+        Args:
+            species: Scientific name to request from iNaturalist.
+
+        Returns:
+            The flattened observation records in shuffled order, or an empty
+            frame if no observation was found. Columns follow the iNaturalist
+            response, with nested fields flattened to dotted names.
+        """
         records: list[dict[str, Any]] = []
         for year in self.years:
             self.logger.info("Fetching %s observations from %s", species, year)
@@ -184,7 +242,25 @@ class InaturalistDataset:
     def _download_photo(
         self, photo: dict[str, Any], images_path: Path, observation_id: int, index: int
     ) -> bool:
-        """Download one allowed photo and return whether an image was saved."""
+        """Download a single photo if its license allows it.
+
+        The thumbnail URL returned by the API is rewritten to the large variant
+        before the request, and the image is saved as
+        `{observation_id}_{index}.jpg`.
+
+        Args:
+            photo: One entry of an observation's `photos` list.
+            images_path: Directory the image is written to.
+            observation_id: Identifier of the owning observation.
+            index: Position of the photo within its observation.
+
+        Returns:
+            True if an image was written, False if the photo was skipped
+            because of its license or a missing URL.
+
+        Raises:
+            requests.HTTPError: If the image request returns an error status.
+        """
         if photo.get("license_code") not in self.allowed_licenses:
             return False
 
@@ -201,7 +277,24 @@ class InaturalistDataset:
     def _download_species_images(
         self, records_df: pd.DataFrame, images_path: Path
     ) -> int:
-        """Download up to ``max_img_num`` allowed photos from a species' records."""
+        """Download up to `max_img_num` allowed photos from a species' records.
+
+        Records are processed in the shuffled order they arrive in, and records
+        without a usable id or photo list are skipped. The cap is checked both
+        between records and between the photos of one record, so an observation
+        with many photos cannot overshoot it.
+
+        Args:
+            records_df: Observation records, as returned by
+                `_get_species_records`.
+            images_path: Directory the images are written to.
+
+        Returns:
+            The number of images actually written.
+
+        Raises:
+            requests.HTTPError: If an image request returns an error status.
+        """
         downloaded_images = 0
         for _, record in tqdm(records_df.iterrows(), total=len(records_df)):
             if downloaded_images >= self.max_img_num:
@@ -209,9 +302,12 @@ class InaturalistDataset:
 
             photos = record.get("photos", [])
             observation_id = record.get("id")
-            if not isinstance(photos, list) or observation_id is None:
+            if not isinstance(photos, list) or pd.isna(observation_id):
                 continue
 
+            # A record without an id turns the whole column into floats, so the
+            # id is normalised back to an integer for the file name.
+            observation_id = int(observation_id)
             for index, photo in enumerate(photos):
                 if downloaded_images >= self.max_img_num:
                     break
@@ -225,8 +321,15 @@ class InaturalistDataset:
     def download(self) -> None:
         """Fetch records and download allowed photos for every configured species.
 
-        Each species receives a ``records.csv`` file and an ``imgs`` directory.
-        Observation records are saved even when no photo has an allowed license.
+        Each species receives a `records.csv` file and an `imgs` directory below
+        the dataset root. Records are written before any image is downloaded, so
+        they are saved even when no photo has an allowed license. Species are
+        processed one after another and existing files are overwritten, which
+        makes a re-run of an interrupted download resume at species granularity.
+
+        Raises:
+            requests.HTTPError: If an image request returns an error status.
+                Species processed before the failure keep their downloaded data.
         """
         for species in self.species:
             species_path = self.output_path / species
