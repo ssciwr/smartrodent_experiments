@@ -14,10 +14,10 @@ import yaml
 from pyinaturalist import get_observations
 from tqdm.auto import tqdm
 
-from .base import Configurable
+from .base import DatasetLoader
 
 
-class InaturalistDataset(Configurable):
+class InaturalistDataset(DatasetLoader):
     """Configure and download a reproducible iNaturalist image dataset.
 
     The constructor performs only local setup: it validates the requested

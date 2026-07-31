@@ -17,3 +17,12 @@ class Configurable(Protocol):
         Returns:
             Configurable: A new instance configured from the file.
         """
+
+
+@runtime_checkable
+class DatasetLoader(Configurable, Protocol):
+    """Protocol for objects that execute a download method to get data"""
+
+    def download(self) -> None:
+        """Fetch records and download allowed photos for every configured species."""
+        ...
