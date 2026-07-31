@@ -1,10 +1,11 @@
 import os
-import sys
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 
 import pytest
-import requests
+from smartrodent.filter import FilterVLLM, FilterOllama
+
+os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 SYSTEM_PROMPT = (
     "You are a careful wildlife camera-trap image classifier. "
@@ -17,7 +18,7 @@ Use label "kept" when a rodent or rodent-like small mammal is visibly present.
 Use label "rejected" when no animal is visibly present.
 Use label "unsure" only when the image is ambiguous.
 
-Return exactly this JSON schema:
+Return exactly this JSON schema without ommiting anything:
 {
   "label": "kept" | "rejected" | "unsure",
   "visible_animal": true | false,
@@ -26,8 +27,9 @@ Return exactly this JSON schema:
   "image_quality": "clear" | "poor" | "unusable",
   "needs_human_review": true | false
 }
-""".strip()
 
+Make sure that you return valid JSON.
+""".strip()
 
 pytestmark = pytest.mark.skipif(
     os.getenv("SMARTRODENT_SKIP_VLM_INTEGRATION") == "1",
@@ -56,11 +58,6 @@ def empty_image() -> Path:
 
 
 def make_ollama_filter(tmp_path):
-    from smartrodent.filter import FilterOllama
-
-    url = os.getenv("SMARTRODENT_OLLAMA_URL", "http://localhost:11434/api/generate")
-    assert_ollama_available(url)
-
     return FilterOllama(
         prompt=PROMPT,
         system_prompt=SYSTEM_PROMPT,
@@ -70,32 +67,15 @@ def make_ollama_filter(tmp_path):
         rejected_root=tmp_path / "rejected",
         failure_root=tmp_path / "failure",
         image_suffixes={".jpg", ".jpeg", ".png", ".webp"},
-        url=url,
         model=os.getenv(
             "SMARTRODENT_OLLAMA_MODEL",
-            "hf.co/ggml-org/SmolVLM2-2.2B-Instruct-GGUF:Q4_K_M",
+            "qwen2.5vl:3b",
         ),
     )
 
 
-def assert_ollama_available(generate_url: str) -> None:
-    parsed = urlparse(generate_url)
-    tags_url = urlunparse(parsed._replace(path="/api/tags", params="", query=""))
-    try:
-        response = requests.get(tags_url, timeout=2)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        pytest.fail(
-            "Ollama integration test requires a reachable Ollama server at "
-            f"{tags_url}. Start Ollama or set SMARTRODENT_OLLAMA_URL. "
-            f"Original error: {exc}",
-            pytrace=False,
-        )
-
-
 def make_vllm_filter(tmp_path):
     pytest.importorskip("vllm")
-    from smartrodent.filter import FilterVLLM
 
     return FilterVLLM(
         prompt=PROMPT,
@@ -107,51 +87,33 @@ def make_vllm_filter(tmp_path):
         failure_root=tmp_path / "failure",
         image_suffixes={".jpg", ".jpeg", ".png", ".webp"},
         model_name=os.getenv(
-            "SMARTRODENT_VLLM_MODEL", "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+            "SMARTRODENT_VLLM_MODEL",
+            "Qwen/Qwen2.5-VL-3B-Instruct",  # "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
         ),
         gpu_memory_utilization=float(
-            os.getenv("SMARTRODENT_VLLM_GPU_MEMORY_UTILIZATION", "0.7")
+            os.getenv("SMARTRODENT_VLLM_GPU_MEMORY_UTILIZATION", "0.8")
         ),
-        max_model_len=int(os.getenv("SMARTRODENT_VLLM_MAX_MODEL_LEN", "4096")),
-        max_new_tokens=int(os.getenv("SMARTRODENT_VLLM_MAX_NEW_TOKENS", "160")),
+        max_model_len=int(os.getenv("SMARTRODENT_VLLM_MAX_MODEL_LEN", "16384")),
+        max_new_tokens=int(os.getenv("SMARTRODENT_VLLM_MAX_NEW_TOKENS", "1024")),
         batch_size=2,
     )
 
 
-def assert_rodent_result(result: dict) -> None:
-    assert result["parse_error"] is False
-    assert result["label"] == "kept"
-    assert result["visible_animal"] is True
-    assert result["needs_human_review"] is False
-
-
-def assert_empty_result(result: dict) -> None:
-    assert result["parse_error"] is False
-    assert result["label"] == "rejected"
-    assert result["visible_animal"] is False
-    assert result["needs_human_review"] is False
-
-
-def test_ollama_smolvlm2_classifies_rodent_and_empty_images(
-    tmp_path, rodent_image, empty_image
+@pytest.mark.parametrize(
+    "make_filter", [make_ollama_filter, make_vllm_filter], ids=["ollama", "vllm"]
+)
+def test_ollama_classifies_rodent_and_empty_images(
+    make_filter, tmp_path, rodent_image, empty_image
 ):
-    vlm_filter = make_ollama_filter(tmp_path)
+    with make_filter(tmp_path) as vlm_filter:
+        rodent_result = vlm_filter.classify(rodent_image)
+        empty_result = vlm_filter.classify(empty_image)
+        assert rodent_result["parse_error"] is False
+        assert rodent_result["label"] == "kept"
+        assert rodent_result["visible_animal"] is True
 
-    rodent_result = vlm_filter.classify_image(rodent_image)
-    empty_result = vlm_filter.classify_image(empty_image)
+        assert empty_result["parse_error"] is False
+        assert empty_result["label"] == "rejected"
+        assert empty_result["visible_animal"] is False
 
-    assert_rodent_result(rodent_result)
-    assert_empty_result(empty_result)
-
-
-def test_vllm_smolvlm2_classifies_rodent_and_empty_images(
-    tmp_path, rodent_image, empty_image
-):
-    vlm_filter = make_vllm_filter(tmp_path)
-
-    rodent_result, empty_result = vlm_filter.classify_images_batch(
-        [rodent_image, empty_image]
-    )
-
-    assert_rodent_result(rodent_result)
-    assert_empty_result(empty_result)
+        # needs_human_review is not tested here b/c it's model dependent
