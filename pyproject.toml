@@ -32,6 +32,10 @@ dependencies = [
     "vllm>=0.8",
 ]
 
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
 
