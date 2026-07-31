@@ -22,3 +22,6 @@ runs*
 # vscode and coding agents
 .pi
 .vscode
+
+# dvc
+.dvc
