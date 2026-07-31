@@ -1,0 +1,9 @@
+stages:
+  download_inaturalist:
+    cmd: uv run python scripts/download_inaturalist_data.py config/dataset_full.yaml
+    deps:
+      - scripts/download_inaturalist_data.py
+      - src/smartrodent/inaturalist.py
+    params:
+      - config/dataset_full.yaml:
+          - inaturalist
