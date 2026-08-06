@@ -1,4 +1,12 @@
 stages:
+  download_inaturalist:
+    cmd: uv run python scripts/download_inaturalist_data.py config/dataset_full.yaml
+    deps:
+      - scripts/download_inaturalist_data.py
+      - src/smartrodent/inaturalist.py
+    params:
+      - config/dataset_full.yaml:
+          - inaturalist
   filter_animal:
     cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_animal.yaml
     deps:

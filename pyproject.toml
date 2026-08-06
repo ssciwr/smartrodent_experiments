@@ -11,6 +11,8 @@ dependencies = [
     "PyYAML>=6.0",
     "tqdm>=4.69.0",
     "vllm>=0.8",
+    "requests>=2.0",
+    "pyinaturalist>=0.21.1",
 ]
 
 [build-system]
@@ -20,9 +22,15 @@ build-backend = "setuptools.build_meta"
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
 
+[tool.pytest]
+markers = [
+    "network: test hits the live iNaturalist API (deselect with -m 'not network')",
+]
+
 [tool.coverage.run]
 branch = true
 source = ["./src/smartrodent"]
+omit = ["tests/*"]
 
 [tool.coverage.report]
 # Regexes for lines to exclude from consideration

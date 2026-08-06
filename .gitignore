@@ -24,4 +24,4 @@ runs*
 .vscode
 
 # dvc
-.dvc
+/.dvc/cache/
