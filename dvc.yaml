@@ -7,3 +7,36 @@ stages:
     params:
       - config/dataset_full.yaml:
           - inaturalist
+  filter_animal:
+    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_animal.yaml
+    deps:
+      - scripts/filter_data_vlm.py
+      - configs/filter_data_vlm_config_animal.yaml
+      - datasets/full_dataset/raw
+    outs:
+      - datasets/full_dataset/filtered_kept
+      - datasets/full_dataset/filtered_rejected
+      - datasets/full_dataset/filtered_undecided
+      - datasets/full_dataset/filtered_failure
+      - datasets/full_dataset/filter_results.csv
+
+  filter_thermal:
+    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_thermal.yaml
+    deps:
+      - scripts/filter_data_vlm.py
+      - configs/filter_data_vlm_config_thermal.yaml
+      - datasets/full_dataset/filtered_kept
+
+  filter_snake:
+    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_snakes.yaml
+    deps:
+      - scripts/filter_data_vlm.py
+      - configs/filter_data_vlm_config_snakes.yaml
+      - datasets/full_dataset/filtered_kept
+
+  filter_flying_bird:
+    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_birds.yaml
+    deps:
+      - scripts/filter_data_vlm.py
+      - configs/filter_data_vlm_config_birds.yaml
+      - datasets/full_dataset/filtered_kept
