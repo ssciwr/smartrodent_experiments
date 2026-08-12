@@ -29,7 +29,7 @@ prompt: |
   Return ONLY valid JSON with this exact schema:
 
   {
-    "label": "kept | rejected | unsure",
+    "label": "kept | rejected ",
     "visible_animal": true,
     "evidence_kept": ["string"],
     "evidence_rejected": ["string"],
@@ -38,11 +38,10 @@ prompt: |
   }
 
   Rules:
-  - label must be exactly one of: "kept", "rejected" or "unsure".
+  - label must be exactly one of: "kept", "rejected".
   - Use "rejected" only for clear evidence of an infrared or thermal image: greyscale or thermal images taken with an infrared or thermal camera.
   - Use "kept" only if it's clearly an rgb image that shows a color picture taken with a normal rgb camera.
-  - Use "unsure" if the image is ambiguous, cropped, low quality, a drawing, or you cannot confidently decide.
-  - needs_human_review should be true for unsure, poor/unusable images, or conflicting
+  - needs_human_review should be true for poor/unusable images, or conflicting
     evidence.
   - Do not include markdown.
   - Do not include text outside the JSON object.

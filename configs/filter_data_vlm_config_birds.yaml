@@ -35,20 +35,19 @@ prompt: |
   Return ONLY valid JSON with this exact schema:
 
   {
-    "label": "kept | rejected | unsure",
+    "label": "kept | rejected",
     "visible_animal": true,
     "evidence_kept": ["string"],
     "evidence_rejected": ["string"],
     "image_quality": "clear | poor | unusable",
-    "needs_human_review": true
+    "needs_human_review": true | false
   }
 
   Rules:
-  - label must be exactly one of: "kept", "rejected" or "unsure".
+  - label must be exactly one of: "kept", "rejected".
   - Use "rejected" only for clear evidence is present that the image does depict a bird in flight before a sky-like background.
   - Use "kept" only if a bird sitting, perching or standing in a natural environment is clearly visible in the image.
-  - Use "unsure" if the image is ambiguous, cropped, low quality, a drawing, or you cannot confidently decide.
-  - needs_human_review should be true for unsure, poor/unusable images, or conflicting
+  - needs_human_review should be true for poor/unusable images, or conflicting
     evidence.
   - Do not include markdown.
   - Do not include text outside the JSON object.
