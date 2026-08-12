@@ -86,7 +86,21 @@ error if it does not. Add a unit test with a deliberately short mocked batch.
 This is a defensive Medium finding, not a claim that current vLLM normally
 returns short batches.
 
-### 6. Per-image inference failures abort a run despite the failure-bucket contract
+### 6. README promises a lockfile install although the project intentionally has no lockfile
+
+**Locations:** `README.md:24-27`, `.gitignore:30`, deleted `uv.lock`
+
+The branch deliberately treats `pyproject.toml` constraints as the dependency
+source of truth and leaves versions open; that is a valid project policy and
+the absence of `uv.lock` is not itself a defect. However, the README still says
+runtime dependencies are installed "from the lockfile." That is now an
+incorrect installation contract.
+
+Update the README to state that dependencies are resolved from
+`pyproject.toml`, and, if useful, briefly document the intentional trade-off:
+current compatible dependencies over an exact frozen environment.
+
+### 7. Per-image inference failures abort a run despite the failure-bucket contract
 
 **Locations:** `src/smartrodent/filter.py:43-46,374-398,575-605`
 
@@ -99,7 +113,7 @@ Handle expected per-image failures by recording a failure decision and
 continuing, or document a deliberately fail-fast contract. Add failure tests
 for both backends and an end-of-run error summary.
 
-### 7. The download stage is not a producer in the new DVC graph
+### 8. The download stage is not a producer in the new DVC graph
 
 **Locations:** `dvc.yaml:2-21`, `README.md:83-86`
 
@@ -113,7 +127,7 @@ document download and filtering as separate commands.
 
 ## Low
 
-### 8. CLI docs promise multi-config chaining that is not implemented
+### 9. CLI docs promise multi-config chaining that is not implemented
 
 **Locations:** `scripts/filter_data_vlm.py:21-37`
 
@@ -121,7 +135,7 @@ document download and filtering as separate commands.
 list of paths", and comments say configs can be chained. Correct the docs or
 implement the promised behavior.
 
-### 9. `copy_with_structure` has an incorrect contract
+### 10. `copy_with_structure` has an incorrect contract
 
 **Locations:** `src/smartrodent/filter.py:189-208`
 
