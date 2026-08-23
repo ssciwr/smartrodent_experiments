@@ -7,6 +7,13 @@ stages:
     params:
       - config/dataset_full.yaml:
           - inaturalist
+  download_wildlifeinsights:
+    cmd: uv run python scripts/download_wildlifeinsights_data.py config/dataset_full.yaml
+    deps:
+      - scripts/download_wildlifeinsights_data.py
+    params:
+      - config/dataset_full.yaml:
+          - wildlifeinsights
   filter_animal:
     cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_animal.yaml
     deps:

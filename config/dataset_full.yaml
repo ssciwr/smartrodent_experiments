@@ -1,5 +1,5 @@
 inaturalist:
-  output_path: /home/hmack/Development/rodent_experiments/datasets/full_dataset/raw
+  output_path: ../datasets/full_dataset/raw
   years: []
   first_year: 2000
   last_year: 2026
@@ -52,3 +52,8 @@ inaturalist:
   max_img_num: 2000
   allowed_licences:
     - "cc-by-nc"
+wildlifeinsights:
+  output_path: ../datasets/full_dataset/raw
+  input_paths:
+    - ../datasets/wildlifeinsights/wildlife-insights_85c4d26a-acf6-4e19-b837-71a5d2c788da_all-platform-data
+    - ../datasets/wildlifeinsights/wildlife-insights_277671f0-51fc-46c2-a392-88d81350de65_all-platform-data
