@@ -21,17 +21,24 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)["wildlifeinsights"]
 
     outpath = Path(config["output_path"]).expanduser().resolve()
-    (outpath / "images").mkdir(parents=True, exist_ok=True)
+    session = requests.Session()
 
     for input_path in config["input_paths"]:
         path = Path(input_path).expanduser().resolve()
         images = pd.read_csv(path / "images.csv")
 
         for _, row in images.iterrows():
+            genus = row.genus if isinstance(row.genus, str) else "unknown"
+            species = row.species if isinstance(row.species, str) else "unknown"
+            species_dir = outpath / "images" / f"{genus.capitalize()} {species.lower()}"
+            species_dir.mkdir(parents=True, exist_ok=True)
+
             # filenames repeat across images, so key by image_id instead
-            dest = outpath / "images" / f"{row.image_id}{Path(row.filename).suffix}"
+            dest = species_dir / f"{row.image_id}{Path(row.filename).suffix}"
             if not dest.exists():
-                dest.write_bytes(requests.get(row.location).content)
+                response = session.get(row.location)
+                response.raise_for_status()
+                dest.write_bytes(response.content)
 
         # copy all the csvs in each export dir to the outpath b/c they hold
         # camera location knowledge, provenance etc for dataset building
