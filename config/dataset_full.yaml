@@ -1,5 +1,5 @@
 inaturalist:
-  output_path: ../datasets/full_dataset/raw
+  output_path: ./datasets/full_dataset/raw
   years: []
   first_year: 2000
   last_year: 2026
@@ -53,7 +53,23 @@ inaturalist:
   allowed_licences:
     - "cc-by-nc"
 wildlifeinsights:
-  output_path: ../datasets/full_dataset/raw
+  output_path: ./datasets/raw/wildlifefinsights
   input_paths:
-    - ../datasets/wildlifeinsights/wildlife-insights_85c4d26a-acf6-4e19-b837-71a5d2c788da_all-platform-data
-    - ../datasets/wildlifeinsights/wildlife-insights_277671f0-51fc-46c2-a392-88d81350de65_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_7f7af731-301d-4480-9bcd-de93c2431f48_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_53cbd6ce-3bb8-48a4-a83a-98d55c99da0f_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_85c4d26a-acf6-4e19-b837-71a5d2c788da_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_609c6a7e-ff89-42ee-a6a0-cf0228b3fe5c_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_277671f0-51fc-46c2-a392-88d81350de65_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_7220174c-4571-4cf6-9cdb-8874aa9e5308_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_99672120-5c88-4cdd-8eae-bbef4f7934fc_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_bd8d0a2f-6f81-4d3b-a30d-eeb9cd19dcf5_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_c1bc5d20-48d5-48d2-80db-43f840442ec1_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_c151c361-a31f-435b-b1c1-b2779505339f_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_cd3dd946-157a-43da-9787-e5ec0dc0245c_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_e059dd4d-9867-45a4-bd31-7102807fba13_all-platform-data
+    - ./datasets/wildlifeinsights/wildlife-insights_eb652ca5-f096-49ee-b716-97771e1220c4_all-platform-data
+  max_img_num: 2000
+  seed: 42
+  allowed_licences:
+    - "CC-BY-NC"
+    - "CC0"
