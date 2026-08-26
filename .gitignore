@@ -29,3 +29,7 @@ runs*
 
 # remove uv.lock b/c annoying and blows up prs
 uv.lock
+
+
+# training artifacts
+training
