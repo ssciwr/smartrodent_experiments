@@ -43,13 +43,27 @@ class SpeciesNetYoloInference:
         Raises:
             ValueError: If the supplied config file does not exist.
         """
-        if not Path(config).resolve().exists():
-            raise ValueError("Error, supplied config does not exist")
-
-        with open(Path(config).resolve(), "r") as f:
-            cfg = yaml.safe_load(f)
-
-        return cls(**cfg)
+        path = Path(config).resolve()
+        if not path.exists():
+            raise ValueError(f"Config file does not exist: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        if not isinstance(cfg, dict):
+            raise ValueError(f"Config must be a YAML mapping, got {type(cfg).__name__}")
+        missing = [
+            k for k in ("speciesnet_model", "classifier_weights") if not cfg.get(k)
+        ]
+        if missing:
+            raise ValueError(f"Config missing required key(s): {', '.join(missing)}")
+        extra = set(cfg) - {"speciesnet_model", "classifier_weights"}
+        if extra:
+            raise ValueError(
+                f"Config has unexpected key(s): {', '.join(sorted(extra))}"
+            )
+        return cls(
+            speciesnet_model=cfg["speciesnet_model"],
+            classifier_weights=cfg["classifier_weights"],
+        )
 
     def _detect(self, image_path: str | Path) -> Image.Image | None:
         """Detects the most confident animal and returns its RGB crop.
@@ -67,14 +81,24 @@ class SpeciesNetYoloInference:
             dict[str, Any],
             self.detector.predict(filepaths=[str(image_path)], batch_size=1),
         )
+        if not detection.get("predictions"):
+            return None
         detections: list[dict[str, Any]] = detection["predictions"][0].get(
             "detections", []
         )
-        if not detections:
+        # Skip entries missing confidence or carrying malformed bounding boxes.
+        valid = [
+            d
+            for d in detections
+            if "conf" in d
+            and isinstance(d.get("bbox"), (list, tuple))
+            and len(d["bbox"]) == 4
+        ]
+        if not valid:
             return None
 
         # Keep the single highest-confidence detection.
-        x, y, width, height = max(detections, key=lambda item: item["conf"])["bbox"]
+        x, y, width, height = max(valid, key=lambda item: item["conf"])["bbox"]
         with Image.open(image_path) as image:
             # YOLO's classifier receives a consistent, three-channel image.
             image = image.convert("RGB")
