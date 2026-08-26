@@ -10,7 +10,10 @@ wheels/
 .venv
 
 # data
-datasets
+datasets/
+data/
+
+# model eval for filtering
 runs*
 
 # torch files
