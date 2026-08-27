@@ -1,2 +1,2 @@
-speciesnet_model:
-classifier_weights:
+speciesnet_model: kaggle:google/speciesnet/pyTorch/v4.0.3a/1
+classifier_weights: training/yolo_classify/full_data_classifier_xl_with_recommended_defaults/weights/best.pt
