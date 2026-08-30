@@ -79,106 +79,31 @@ def load_image(img_path: str) -> Image.Image:
         return image.convert("RGB")
 
 
-def _load_yaml_mapping(config_path: str | Path) -> tuple[dict[str, Any], Path]:
-    """Load a YAML configuration and require a top-level mapping.
+def _load_inference_config(config_path: str | Path) -> dict[str, Any]:
+    """Load an inference YAML file and resolve its local model paths.
 
     Args:
-        config_path: Path to the YAML configuration file.
+        config_path: Path to a YAML file with a top-level ``inference`` section.
 
     Returns:
-        The loaded mapping and the absolute configuration path.
-
-    Raises:
-        FileNotFoundError: If the configuration file does not exist.
-        TypeError: If the YAML document is empty or is not a mapping.
+        Constructor arguments for :class:`Inference`.
     """
     path = Path(config_path).expanduser().resolve()
     with path.open(encoding="utf-8") as config_file:
-        config = yaml.safe_load(config_file)
+        config = yaml.safe_load(config_file)["inference"]
 
-    if not isinstance(config, dict):
-        raise TypeError(f"Expected a mapping in configuration file {path}")
-    return config, path
+    # Config files live under ``configs`` and refer to local weights relative to
+    # that directory. Remote model identifiers do not resolve and stay unchanged.
+    config = dict(config)
+    for component in ("detector", "classifier"):
+        kwargs_name = f"{component}_kwargs"
+        component_kwargs = dict(config[kwargs_name])
+        local_model = (path.parent / component_kwargs["model"]).resolve()
+        if local_model.exists():
+            component_kwargs["model"] = str(local_model)
+        config[kwargs_name] = component_kwargs
 
-
-def _resolve_config_model(model: str, config_path: Path) -> str:
-    """Resolve an existing local model path relative to its config file.
-
-    Remote SpeciesNet identifiers and Ultralytics model names are returned
-    unchanged. A relative path is resolved only when it points to an existing
-    local file or directory.
-
-    Args:
-        model: Model identifier or local path from the configuration.
-        config_path: Absolute path to the configuration file.
-
-    Returns:
-        The resolved local path or the unchanged model identifier.
-    """
-    model_path = Path(model).expanduser()
-    if model_path.is_absolute():
-        return str(model_path)
-
-    relative_path = (config_path.parent / model_path).resolve()
-    return str(relative_path) if relative_path.exists() else model
-
-
-def _load_component_config(
-    config_path: str | Path,
-    *,
-    component: str,
-    backend: str,
-) -> tuple[str, dict[str, Any]]:
-    """Load one detector or classifier section from an inference config.
-
-    The method also accepts a direct component mapping or a named section such
-    as ``yolo26_classifier``. This keeps each wrapper's ``from_config`` useful
-    independently while allowing all wrappers to share complete pipeline files.
-
-    Args:
-        config_path: Path to the YAML configuration file.
-        component: Component name, either ``"detector"`` or ``"classifier"``.
-        backend: Expected backend name for the wrapper.
-
-    Returns:
-        A resolved model identifier and the remaining wrapper options.
-
-    Raises:
-        KeyError: If the component configuration has no ``model`` entry.
-        TypeError: If a selected configuration section is not a mapping.
-        ValueError: If a pipeline selects a different backend.
-    """
-    loaded, path = _load_yaml_mapping(config_path)
-    section_name = f"{backend}_{component}"
-
-    if "inference" in loaded:
-        pipeline = loaded["inference"]
-        if not isinstance(pipeline, dict):
-            raise TypeError("The 'inference' configuration must be a mapping")
-        configured_backend = pipeline.get(component)
-        if configured_backend != backend:
-            raise ValueError(
-                f"Config selects {configured_backend!r} for {component}, "
-                f"not {backend!r}"
-            )
-        config = pipeline.get(f"{component}_kwargs")
-    elif section_name in loaded:
-        config = loaded[section_name]
-    else:
-        config = loaded
-
-    if not isinstance(config, dict):
-        raise TypeError(f"The {component} configuration must be a mapping")
-
-    options = dict(config)
-    model = _resolve_config_model(str(options.pop("model")), path)
-
-    # Direct component files may place backend arguments under ``kwargs``;
-    # complete pipeline files already keep them beside the model entry.
-    nested_kwargs = options.pop("kwargs", {})
-    if not isinstance(nested_kwargs, dict):
-        raise TypeError("Component 'kwargs' must be a mapping")
-    return model, {**nested_kwargs, **options}
+    return config
 
 
 class SpeciesNetDetector:
@@ -204,18 +129,19 @@ class SpeciesNetDetector:
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "SpeciesNetDetector":
-        """Load a SpeciesNet detector from a YAML configuration.
+        """Load a SpeciesNet detector from an inference YAML file.
 
         Args:
-            config_path: Pipeline or component YAML configuration path.
+            config_path: Inference YAML configuration path.
 
         Returns:
             A configured SpeciesNet detector.
         """
-        model, kwargs = _load_component_config(
-            config_path, component="detector", backend="speciesnet"
-        )
-        return cls(model, kwargs=kwargs)
+        config = _load_inference_config(config_path)
+        if config["detector"] != "speciesnet":
+            raise ValueError("Config does not select the SpeciesNet detector")
+        kwargs = config["detector_kwargs"]
+        return cls(kwargs.pop("model"), kwargs=kwargs)
 
     def detect(self, image: Image.Image, max_top_k: int = 1) -> list[DetectionCrop]:
         """Detect and crop the most confident image regions.
@@ -263,23 +189,14 @@ class SpeciesNetDetector:
         prediction = self.model.predict("", self.model.preprocess(image))
         min_confidence = float(self.kwargs.get("conf", 0.0))
 
-        detections = []
-        for detection in prediction.get("detections", []):
-            confidence = float(detection["conf"])
-            bbox = detection.get("bbox")
-
-            # SpeciesNet normally returns valid four-value boxes. Ignore malformed
-            # records rather than allowing one record to prevent all crop output.
-            if confidence < min_confidence or not isinstance(bbox, (list, tuple)):
-                continue
-            if len(bbox) != 4:
-                continue
-            detections.append(
-                {
-                    "bbox": [float(value) for value in bbox],
-                    "confidence": confidence,
-                }
-            )
+        detections = [
+            {
+                "bbox": [float(value) for value in detection["bbox"]],
+                "confidence": float(detection["conf"]),
+            }
+            for detection in prediction["detections"]
+            if detection["conf"] >= min_confidence
+        ]
 
         # Sorting here guarantees the same top-k semantics for both backends.
         detections.sort(key=lambda detection: detection["confidence"], reverse=True)
@@ -315,17 +232,12 @@ class SpeciesNetClassifier:
             max_top_k: Largest per-call top-k request accepted by this wrapper.
                 SpeciesNet's public prediction API returns at most five classes.
             kwargs: Arguments forwarded to ``speciesnet.SpeciesNetClassifier``,
-                such as ``device`` or ``target_species_txt``. A ``max_top_k``
-                entry is accepted for configuration through :class:`Inference`.
+                such as ``device`` or ``target_species_txt``.
 
         Raises:
             ValueError: If ``max_top_k`` is not between one and five.
         """
         self.kwargs = dict(kwargs or {})
-
-        # Inference passes backend configuration as one dictionary. Pop this
-        # wrapper-only option before forwarding SpeciesNet constructor arguments.
-        max_top_k = self.kwargs.pop("max_top_k", max_top_k)
         _validate_max_top_k(max_top_k)
         if max_top_k > 5:
             raise ValueError("SpeciesNet returns at most five classifications")
@@ -334,18 +246,21 @@ class SpeciesNetClassifier:
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "SpeciesNetClassifier":
-        """Load a SpeciesNet classifier from a YAML configuration.
+        """Load a SpeciesNet classifier from an inference YAML file.
 
         Args:
-            config_path: Pipeline or component YAML configuration path.
+            config_path: Inference YAML configuration path.
 
         Returns:
             A configured SpeciesNet classifier.
         """
-        model, kwargs = _load_component_config(
-            config_path, component="classifier", backend="speciesnet"
-        )
-        return cls(model, kwargs=kwargs)
+        config = _load_inference_config(config_path)
+        if config["classifier"] != "speciesnet":
+            raise ValueError("Config does not select the SpeciesNet classifier")
+        kwargs = config["classifier_kwargs"]
+        model = kwargs.pop("model")
+        max_top_k = kwargs.pop("max_top_k", 5)
+        return cls(model, max_top_k, kwargs=kwargs)
 
     def classify(self, image: Image.Image, max_top_k: int = 1) -> list[Classification]:
         """Classify an image and return label-confidence pairs.
@@ -392,15 +307,13 @@ class SpeciesNetClassifier:
             )
 
         prediction = self.model.predict("", self.model.preprocess(image))
-        raw_classifications = prediction.get("classifications", {})
-        classes = raw_classifications.get("classes", [])
-        scores = raw_classifications.get("scores", [])
+        raw_classifications = prediction["classifications"]
+        classes = raw_classifications["classes"]
+        scores = raw_classifications["scores"]
 
-        # zip(..., strict=False) tolerates a failed or partial backend response;
-        # every emitted record still has both a label and confidence.
         classifications = [
             {"class": class_name, "confidence": float(score)}
-            for class_name, score in zip(classes, scores, strict=False)
+            for class_name, score in zip(classes, scores)
         ]
         classifications.sort(
             key=lambda classification: classification["confidence"], reverse=True
@@ -437,18 +350,19 @@ class YoloDetector:
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "YoloDetector":
-        """Load a YOLO26 detector from a YAML configuration.
+        """Load a YOLO26 detector from an inference YAML file.
 
         Args:
-            config_path: Pipeline or component YAML configuration path.
+            config_path: Inference YAML configuration path.
 
         Returns:
             A configured YOLO26 detector.
         """
-        model, kwargs = _load_component_config(
-            config_path, component="detector", backend="yolo26"
-        )
-        return cls(model, kwargs=kwargs)
+        config = _load_inference_config(config_path)
+        if config["detector"] != "yolo26":
+            raise ValueError("Config does not select the YOLO26 detector")
+        kwargs = config["detector_kwargs"]
+        return cls(kwargs.pop("model"), kwargs=kwargs)
 
     def detect(self, image: Image.Image, max_top_k: int = 1) -> list[DetectionCrop]:
         """Detect and crop the most confident image regions.
@@ -490,19 +404,17 @@ class YoloDetector:
         _validate_max_top_k(max_top_k)
         result = self.model.predict(source=image, **self.kwargs)[0]
         detections = []
+        for box in result.boxes:
+            x1, y1, x2, y2 = [float(value) for value in box.xyxyn[0].tolist()]
 
-        if result.boxes is not None:
-            for box in result.boxes:
-                x1, y1, x2, y2 = [float(value) for value in box.xyxyn[0].tolist()]
-
-                # Ultralytics exposes normalized corner coordinates. Convert them
-                # to the shared top-left/width/height representation.
-                detections.append(
-                    {
-                        "bbox": [x1, y1, x2 - x1, y2 - y1],
-                        "confidence": float(box.conf.item()),
-                    }
-                )
+            # Ultralytics exposes normalized corners; the shared format uses
+            # top-left coordinates followed by width and height.
+            detections.append(
+                {
+                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                    "confidence": float(box.conf.item()),
+                }
+            )
 
         detections.sort(key=lambda detection: detection["confidence"], reverse=True)
         return {"detections": detections[:max_top_k]}
@@ -536,14 +448,11 @@ class YoloClassifier:
             model: Path to fine-tuned YOLO26 classifier weights.
             max_top_k: Largest per-call top-k request accepted by this wrapper.
             kwargs: Arguments forwarded to ``YOLO.predict``, such as ``device``.
-                A ``max_top_k`` entry is accepted for configuration through
-                :class:`Inference`.
 
         Raises:
             ValueError: If ``max_top_k`` is not a positive integer.
         """
         self.kwargs = dict(kwargs or {})
-        max_top_k = self.kwargs.pop("max_top_k", max_top_k)
         _validate_max_top_k(max_top_k)
         self.max_top_k = max_top_k
 
@@ -552,18 +461,21 @@ class YoloClassifier:
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "YoloClassifier":
-        """Load a YOLO26 classifier from a YAML configuration.
+        """Load a YOLO26 classifier from an inference YAML file.
 
         Args:
-            config_path: Pipeline or component YAML configuration path.
+            config_path: Inference YAML configuration path.
 
         Returns:
             A configured YOLO26 classifier.
         """
-        model, kwargs = _load_component_config(
-            config_path, component="classifier", backend="yolo26"
-        )
-        return cls(model, kwargs=kwargs)
+        config = _load_inference_config(config_path)
+        if config["classifier"] != "yolo26":
+            raise ValueError("Config does not select the YOLO26 classifier")
+        kwargs = config["classifier_kwargs"]
+        model = kwargs.pop("model")
+        max_top_k = kwargs.pop("max_top_k", 5)
+        return cls(model, max_top_k, kwargs=kwargs)
 
     def classify(self, image: Image.Image, max_top_k: int = 1) -> list[Classification]:
         """Classify an image and return label-confidence pairs.
@@ -593,8 +505,7 @@ class YoloClassifier:
 
         Returns:
             A JSON-compatible ``{"classifications": [...]}`` dictionary. Each
-            classification contains ``class`` and ``confidence`` values. If the
-            model produces no classification probabilities, the list is empty.
+            classification contains ``class`` and ``confidence`` values.
 
         Raises:
             ValueError: If ``max_top_k`` is not a positive integer.
@@ -607,8 +518,6 @@ class YoloClassifier:
             )
 
         result = self.model.predict(source=image, **self.kwargs)[0]
-        if result.probs is None:
-            return {"classifications": []}
 
         # Move scores to CPU before converting values to ordinary Python objects
         # suitable for the JSON-compatible response.
@@ -682,27 +591,25 @@ class Inference:
         detector_config = dict(detector_kwargs or {})
         classifier_config = dict(classifier_kwargs or {})
 
-        try:
-            detector_class = self.DETECTORS[detector.lower()]
-        except KeyError as exc:
-            raise ValueError(f"Unsupported detector backend: {detector!r}") from exc
-        try:
-            classifier_class = self.CLASSIFIERS[classifier.lower()]
-        except KeyError as exc:
-            raise ValueError(f"Unsupported classifier backend: {classifier!r}") from exc
+        detector_class = self.DETECTORS.get(detector.lower())
+        classifier_class = self.CLASSIFIERS.get(classifier.lower())
+        if detector_class is None:
+            raise ValueError(f"Unsupported detector backend: {detector!r}")
+        if classifier_class is None:
+            raise ValueError(f"Unsupported classifier backend: {classifier!r}")
 
-        # Keep model identifiers separate from options forwarded by each wrapper.
-        try:
-            detector_model = detector_config.pop("model")
-        except KeyError as exc:
-            raise ValueError("detector_kwargs must contain 'model'") from exc
-        try:
-            classifier_model = classifier_config.pop("model")
-        except KeyError as exc:
-            raise ValueError("classifier_kwargs must contain 'model'") from exc
+        if "model" not in detector_config:
+            raise ValueError("detector_kwargs must contain 'model'")
+        if "model" not in classifier_config:
+            raise ValueError("classifier_kwargs must contain 'model'")
+        detector_model = detector_config.pop("model")
+        classifier_model = classifier_config.pop("model")
 
+        classifier_max_top_k = classifier_config.pop("max_top_k", 5)
         self.detector = detector_class(detector_model, kwargs=detector_config)
-        self.classifier = classifier_class(classifier_model, kwargs=classifier_config)
+        self.classifier = classifier_class(
+            classifier_model, classifier_max_top_k, kwargs=classifier_config
+        )
         self.classes = list(classes) if classes is not None else None
         self.class_mappings = dict(class_mappings or {})
 
@@ -710,9 +617,8 @@ class Inference:
     def from_config(cls, config_path: str | Path) -> "Inference":
         """Build an inference pipeline from a YAML configuration.
 
-        The YAML document may either contain an ``inference`` section or be the
-        inference mapping itself. Existing relative model paths are resolved
-        from the directory containing the configuration file.
+        Relative paths to local model weights are resolved from the directory
+        containing the configuration file.
 
         Args:
             config_path: Path to the YAML configuration file.
@@ -721,44 +627,9 @@ class Inference:
             A configured detector-to-classifier pipeline.
 
         Raises:
-            TypeError: If the inference or backend option sections are not
-                mappings.
             ValueError: If constructor validation fails.
         """
-        loaded, path = _load_yaml_mapping(config_path)
-        config = loaded.get("inference", loaded)
-        if not isinstance(config, dict):
-            raise TypeError("The 'inference' configuration must be a mapping")
-
-        options = dict(config)
-        for component in ("detector", "classifier"):
-            kwargs_name = f"{component}_kwargs"
-            component_kwargs = options.get(kwargs_name)
-            if not isinstance(component_kwargs, dict):
-                raise TypeError(f"'{kwargs_name}' must be a mapping")
-
-            # Resolve only local paths that exist. Remote identifiers such as
-            # ``kaggle:...`` remain unchanged for the backend loader.
-            resolved_kwargs = dict(component_kwargs)
-            if "model" in resolved_kwargs:
-                resolved_kwargs["model"] = _resolve_config_model(
-                    str(resolved_kwargs["model"]), path
-                )
-            options[kwargs_name] = resolved_kwargs
-
-        return cls(**options)
-
-    def _detect(self, image: Image.Image, max_top_k: int) -> list[DetectionCrop]:
-        """Run the configured detector and extract crops.
-
-        Args:
-            image: Loaded RGB source image.
-            max_top_k: Maximum number of detections to retain.
-
-        Returns:
-            Confidence-ordered crop and detection-confidence pairs.
-        """
-        return self.detector.detect(image, max_top_k)
+        return cls(**_load_inference_config(config_path))
 
     def _classify(self, crop: Image.Image, max_top_k: int) -> list[dict[str, Any]]:
         """Classify one crop and apply output-label configuration.
@@ -805,7 +676,9 @@ class Inference:
                 backend maximum.
         """
         results = []
-        for crop, detection_confidence in self._detect(image, detector_max_top_k):
+        for crop, detection_confidence in self.detector.detect(
+            image, detector_max_top_k
+        ):
             # Keep detection and classification confidence separate; they describe
             # different model decisions and should not be multiplied implicitly.
             results.append(
