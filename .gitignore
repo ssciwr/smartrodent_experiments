@@ -15,6 +15,10 @@ runs*
 
 # torch files
 *.pt
+!/models/*.pt
+
+# training files
+/training
 
 # macos
 .DS_Store
@@ -25,7 +29,6 @@ runs*
 
 # dvc
 /.dvc/cache/
-
 
 # remove uv.lock b/c annoying and blows up prs
 uv.lock
