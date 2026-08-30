@@ -1,0 +1,36 @@
+# SpeciesNet animal detection followed by the YOLO26 common-name classifier.
+inference:
+  detector: speciesnet
+  classifier: yolo26
+
+  detector_kwargs:
+    model: kaggle:google/speciesnet/pyTorch/v4.0.3b/1
+    conf: 0.01
+
+  classifier_kwargs:
+    model: ../models/yolo26_commonnames_classifier_xl.pt
+    max_top_k: 5
+    imgsz: 224
+    verbose: false
+
+  # Common-name targets derived from create_speciesnet_classifier_dataset.py.
+  # Dog, Cat, and Car are training distractors and are excluded.
+  classes:
+    - badger
+    - buzzard
+    - coucal
+    - eagle
+    - fox
+    - heron
+    - lizard
+    - mouse
+    - peafowl
+    - rat
+    - shrew
+    - snake
+    - stork
+    - vole
+
+  # Match the classifier's label to the shorter dataset mapping.
+  class_mappings:
+    monitor lizard: lizard

@@ -1,0 +1,56 @@
+# SpeciesNet animal detection followed by the YOLO26 species classifier.
+inference:
+  detector: speciesnet
+  classifier: yolo26
+
+  detector_kwargs:
+    model: kaggle:google/speciesnet/pyTorch/v4.0.3b/1
+    conf: 0.01
+
+  classifier_kwargs:
+    model: ../models/yolo26_speciesnames_xl.pt
+    max_top_k: 5
+    imgsz: 224
+    verbose: false
+
+  # Exclude training distractor classes: dog, cat, car, and empty.
+  classes:
+    - Apodemus agrarius
+    - Apodemus flavicollis
+    - Apodemus sylvaticus
+    - Ardea cinerea
+    - Arvicola amphibius
+    - Bandicota bengalensis
+    - Bandicota indica
+    - Bungarus caeruleus
+    - Buteo buteo
+    - Centropus sinensis
+    - Ciconia ciconia
+    - Clethrionomys glareolus
+    - Coelognathus helena
+    - Coronella austriaca
+    - Crocidura leucodon
+    - Daboia russelii
+    - Meles meles
+    - Microtus agrestis
+    - Microtus arvalis
+    - Mus booduga
+    - Mus musculus
+    - Naja naja
+    - Natrix helvetica
+    - Natrix natrix
+    - Pavo cristatus
+    - Ptyas mucosa
+    - Rattus norvegicus
+    - Rattus rattus
+    - Sorex araneus
+    - Sorex coronatus
+    - Sorex minutus
+    - Spilornis cheela
+    - Suncus murinus
+    - Vandeleuria oleraceus
+    - Varanus bengalensis
+    - Vipera berus
+    - Vulpes vulpes
+
+  class_mappings: {}
