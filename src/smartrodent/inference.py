@@ -3,10 +3,11 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import yaml
+from huggingface_hub import hf_hub_download
 from PIL import Image
 from speciesnet import SpeciesNet
-import numpy as np
 from ultralytics import YOLO
 
 
@@ -14,26 +15,35 @@ class SpeciesNetYoloInference:
     """Detect animals with SpeciesNet and classify their cropped image regions."""
 
     def __init__(
-        self, speciesnet_model: str | Path, classifier_weights: str | Path
+        self,
+        speciesnet_detector: str | Path,
+        yolo_classifier: str | Path,
+        repo_id: str = "MaHaWo/Yolo26Rodent",
     ) -> None:
         """Initializes the detector and classifier models.
 
         Args:
-            speciesnet_model: SpeciesNet model identifier or local model path.
-            classifier_weights: YOLO classification-model weights or path.
+            speciesnet_detector: SpeciesNet model identifier or local model path.
+            yolo_classifier: Classifier filename within ``repo_id``.
+            repo_id: Hugging Face repository containing the classifier weights.
         """
+
+        weights_path = hf_hub_download(
+            repo_id=str(repo_id), filename=str(yolo_classifier)
+        )
+
         # SpeciesNet's detector gives us MegaDetector-style normalized boxes.
         self.detector: SpeciesNet = SpeciesNet(
-            str(speciesnet_model), components="detector", multiprocessing=False
+            str(speciesnet_detector), components="detector", multiprocessing=False
         )
-        self.classify: YOLO = YOLO(str(classifier_weights), task="classify")
+        self.classify: YOLO = YOLO(str(weights_path), task="classify")
 
     @classmethod
     def from_config(cls, config: str) -> "SpeciesNetYoloInference":
         """Builds an inference instance from a YAML config file.
 
-        The YAML config supplies the ``speciesnet_model`` and
-        ``classifier_weights`` keyword arguments passed to :meth:`__init__`.
+        The YAML config maps ``speciesnet_model`` to ``speciesnet_detector`` and
+        ``classifier_weights`` to ``yolo_classifier``.
 
         Args:
             config: Path to a YAML config file containing the model
@@ -64,8 +74,8 @@ class SpeciesNetYoloInference:
                 f"Config has unexpected key(s): {', '.join(sorted(extra))}"
             )
         return cls(
-            speciesnet_model=cfg["speciesnet_model"],
-            classifier_weights=cfg["classifier_weights"],
+            speciesnet_detector=cfg["speciesnet_model"],
+            yolo_classifier=cfg["classifier_weights"],
         )
 
     def _detect(
@@ -188,7 +198,7 @@ class SpeciesNetYoloInference:
 
 
 def main():
-
+    """Driver for running inference from commandline."""
     # build tiny little primitive arg parser
     parser = argparse.ArgumentParser(
         prog="SmartRodentInference",

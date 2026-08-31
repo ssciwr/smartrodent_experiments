@@ -18,6 +18,7 @@ dependencies = [
     "ultralytics>=8.4.68",
     "torch",
     "torchvision",
+    "huggingface-hub>=0.36.2",
 ]
 
 [build-system]

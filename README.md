@@ -43,6 +43,46 @@ uv pip install -r requirements_processing.txt
 uv pip install -r requirements_ammico.txt
 ```
 
+## Inference script
+
+The `inference` command runs SpeciesNet detection and then classifies up to the
+five highest-confidence animal crops with the YOLO classifier. Configure the
+models in [`configs/inference_pipeline.yaml`](configs/inference_pipeline.yaml):
+
+```yaml
+speciesnet_model: kaggle:google/speciesnet/pyTorch/v4.0.3a/1
+classifier_weights: path/to/classifier/weights.pt
+```
+
+`classifier_weights` is a filename relative to the default Hugging Face
+repository, `MaHaWo/Yolo26Rodent`. The classifier is downloaded and cached by
+`huggingface_hub` on first use.
+
+Run inference on one image:
+
+```bash
+uv run inference \
+  --config configs/inference_pipeline.yaml \
+  --image_path /path/to/image.jpg \
+  --outpath /path/to/output
+```
+
+Or process the supported images directly inside a directory (the scan is not
+recursive):
+
+```bash
+uv run inference \
+  --config configs/inference_pipeline.yaml \
+  --path /path/to/images \
+  --outpath /path/to/output
+```
+
+Provide either `--image_path` or `--path`. The command creates
+`<outpath>/results.json`, keyed first by image filename and then by detection
+index. Each detection contains the normalized `bbox`, all class
+`probabilities`, the top result and confidence, and the top-five labels and
+confidences. Images without detections produce an empty mapping.
+
 ## iNaturalist download configuration
 
 The downloader reads a YAML configuration. [`config/dataset_full.yaml`](config/dataset_full.yaml)

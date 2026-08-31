@@ -68,8 +68,13 @@ def fakes(monkeypatch):
 
     species_calls: list[dict[str, object]] = []
     yolo_calls: list[dict[str, object]] = []
+    hub_calls: list[dict[str, str]] = []
     detector = FakeSpeciesNet()
     yolo = FakeYolo()
+
+    def fake_hf_hub_download(repo_id, filename):
+        hub_calls.append({"repo_id": repo_id, "filename": filename})
+        return str(Path("/fake-huggingface-cache") / filename)
 
     def fake_species(model, components=None, multiprocessing=None):
         species_calls.append(
@@ -85,9 +90,11 @@ def fakes(monkeypatch):
         yolo_calls.append({"weights": weights, "task": task})
         return yolo
 
+    monkeypatch.setattr(inference, "hf_hub_download", fake_hf_hub_download)
     monkeypatch.setattr(inference, "SpeciesNet", fake_species)
     monkeypatch.setattr(inference, "YOLO", fake_yolo_ctor)
     return SimpleNamespace(
+        hub_calls=hub_calls,
         species_calls=species_calls,
         yolo_calls=yolo_calls,
         detector=detector,
@@ -115,11 +122,12 @@ def _write_config(tmp_path, content, name="config.yaml"):
 # --------------------------------------------------------------------------- #
 
 
-def test_init_constructs_detector_and_classifier(fakes):
+def test_init_constructs_detector_and_downloaded_classifier(fakes):
     inst = SpeciesNetYoloInference(
-        speciesnet_model="det.pt", classifier_weights="cls.pt"
+        speciesnet_detector="det.pt", yolo_classifier="cls.pt"
     )
 
+    assert fakes.hub_calls == [{"repo_id": "MaHaWo/Yolo26Rodent", "filename": "cls.pt"}]
     assert fakes.species_calls == [
         {
             "model": "det.pt",
@@ -127,16 +135,19 @@ def test_init_constructs_detector_and_classifier(fakes):
             "multiprocessing": False,
         }
     ]
-    assert fakes.yolo_calls == [{"weights": "cls.pt", "task": "classify"}]
+    assert fakes.yolo_calls == [
+        {"weights": "/fake-huggingface-cache/cls.pt", "task": "classify"}
+    ]
     assert inst.detector is fakes.detector
     assert inst.classify is fakes.yolo
 
 
 def test_init_coerces_path_objects_to_strings(fakes):
     SpeciesNetYoloInference(
-        speciesnet_model=Path("det.pt"), classifier_weights=Path("cls.pt")
+        speciesnet_detector=Path("det.pt"), yolo_classifier=Path("cls.pt")
     )
 
+    assert fakes.hub_calls == [{"repo_id": "MaHaWo/Yolo26Rodent", "filename": "cls.pt"}]
     assert fakes.species_calls == [
         {
             "model": "det.pt",
@@ -144,7 +155,15 @@ def test_init_coerces_path_objects_to_strings(fakes):
             "multiprocessing": False,
         }
     ]
-    assert fakes.yolo_calls == [{"weights": "cls.pt", "task": "classify"}]
+    assert fakes.yolo_calls == [
+        {"weights": "/fake-huggingface-cache/cls.pt", "task": "classify"}
+    ]
+
+
+def test_init_uses_custom_classifier_repository(fakes):
+    SpeciesNetYoloInference("det.pt", "models/cls.pt", repo_id="owner/models")
+
+    assert fakes.hub_calls == [{"repo_id": "owner/models", "filename": "models/cls.pt"}]
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +185,9 @@ def test_from_config_builds_instance(fakes, tmp_path):
 
     assert inst.detector is fakes.detector
     assert inst.classify is fakes.yolo
+    assert fakes.hub_calls == [
+        {"repo_id": "MaHaWo/Yolo26Rodent", "filename": "yolo.pt"}
+    ]
     assert fakes.species_calls == [
         {
             "model": "md_v5a.pt",
@@ -173,7 +195,9 @@ def test_from_config_builds_instance(fakes, tmp_path):
             "multiprocessing": False,
         }
     ]
-    assert fakes.yolo_calls == [{"weights": "yolo.pt", "task": "classify"}]
+    assert fakes.yolo_calls == [
+        {"weights": "/fake-huggingface-cache/yolo.pt", "task": "classify"}
+    ]
 
 
 def test_from_config_empty_yaml_raises_missing_keys(fakes, tmp_path):
