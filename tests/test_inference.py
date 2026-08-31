@@ -9,16 +9,14 @@ from smartrodent.inference import SpeciesNetYoloInference
 
 
 class FakeSpeciesNet:
-    """Module-boundary fake for SpeciesNet's predictor."""
+    """Module-boundary fake for SpeciesNet's detector."""
 
     def __init__(self):
         self.result: dict | None = None
         self.filepaths: list[str] | None = None
-        self.batch_size: int | None = None
 
-    def predict(self, filepaths=None, batch_size=None):
+    def detect(self, filepaths=None):
         self.filepaths = filepaths
-        self.batch_size = batch_size
         return self.result
 
 
@@ -36,18 +34,20 @@ class _FakeProbData:
 class FakeClassProbs:
     """Shape-matches ``YOLO.probs`` for the classifier result."""
 
-    def __init__(self, probs, top1, top1conf):
+    def __init__(self, probs, top1, top1conf, top5, top5conf):
         self.data = _FakeProbData(probs)
         self.top1 = top1
         self.top1conf = top1conf
+        self.top5 = top5
+        self.top5conf = _FakeProbData(top5conf)
 
 
 class FakeClassResult:
-    """Canned YOLO-classification result exposing names/probs/top1/top1conf."""
+    """Canned YOLO classification result exposing top-1 and top-5 data."""
 
-    def __init__(self, names, probs, top1, top1conf):
+    def __init__(self, names, probs, top1, top1conf, top5, top5conf):
         self.names = names
-        self.probs = FakeClassProbs(probs, top1, top1conf)
+        self.probs = FakeClassProbs(probs, top1, top1conf, top5, top5conf)
 
 
 class FakeYolo:
@@ -59,7 +59,7 @@ class FakeYolo:
 
     def __call__(self, *args, **kwargs):
         self.last_call = (args, kwargs)
-        return self.result
+        return [self.result]
 
 
 @pytest.fixture
@@ -71,8 +71,14 @@ def fakes(monkeypatch):
     detector = FakeSpeciesNet()
     yolo = FakeYolo()
 
-    def fake_species(model, components=None):
-        species_calls.append({"model": model, "components": components})
+    def fake_species(model, components=None, multiprocessing=None):
+        species_calls.append(
+            {
+                "model": model,
+                "components": components,
+                "multiprocessing": multiprocessing,
+            }
+        )
         return detector
 
     def fake_yolo_ctor(weights, task=None):
@@ -104,28 +110,40 @@ def _write_config(tmp_path, content, name="config.yaml"):
     return path
 
 
-def _conf_detection(result):
-    fakes.result = None if result is None else {"predictions": result}
-
-
 # --------------------------------------------------------------------------- #
 # __init__
 # --------------------------------------------------------------------------- #
 
 
 def test_init_constructs_detector_and_classifier(fakes):
-    inst = SpeciesNetYoloInference("det.pt", "cls.pt")
+    inst = SpeciesNetYoloInference(
+        speciesnet_model="det.pt", classifier_weights="cls.pt"
+    )
 
-    assert fakes.species_calls == [{"model": "det.pt", "components": "detector"}]
+    assert fakes.species_calls == [
+        {
+            "model": "det.pt",
+            "components": "detector",
+            "multiprocessing": False,
+        }
+    ]
     assert fakes.yolo_calls == [{"weights": "cls.pt", "task": "classify"}]
     assert inst.detector is fakes.detector
     assert inst.classify is fakes.yolo
 
 
 def test_init_coerces_path_objects_to_strings(fakes):
-    SpeciesNetYoloInference(Path("det.pt"), Path("cls.pt"))
+    SpeciesNetYoloInference(
+        speciesnet_model=Path("det.pt"), classifier_weights=Path("cls.pt")
+    )
 
-    assert fakes.species_calls == [{"model": "det.pt", "components": "detector"}]
+    assert fakes.species_calls == [
+        {
+            "model": "det.pt",
+            "components": "detector",
+            "multiprocessing": False,
+        }
+    ]
     assert fakes.yolo_calls == [{"weights": "cls.pt", "task": "classify"}]
 
 
@@ -148,7 +166,13 @@ def test_from_config_builds_instance(fakes, tmp_path):
 
     assert inst.detector is fakes.detector
     assert inst.classify is fakes.yolo
-    assert fakes.species_calls == [{"model": "md_v5a.pt", "components": "detector"}]
+    assert fakes.species_calls == [
+        {
+            "model": "md_v5a.pt",
+            "components": "detector",
+            "multiprocessing": False,
+        }
+    ]
     assert fakes.yolo_calls == [{"weights": "yolo.pt", "task": "classify"}]
 
 
@@ -196,28 +220,28 @@ def test_from_config_non_mapping_raises(fakes, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_detect_no_predictions_returns_none(fakes, tiny_image):
+def test_detect_no_predictions_returns_none_pair(fakes, tiny_image):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.detector.result = {"predictions": []}
 
-    assert inst._detect(tiny_image) is None
+    assert inst._detect(tiny_image) == (None, None)
 
 
-def test_detect_prediction_without_detections_returns_none(fakes, tiny_image):
+def test_detect_prediction_without_detections_returns_none_pair(fakes, tiny_image):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.detector.result = {"predictions": [{}]}
 
-    assert inst._detect(tiny_image) is None
+    assert inst._detect(tiny_image) == (None, None)
 
 
-def test_detect_empty_detections_returns_none(fakes, tiny_image):
+def test_detect_empty_detections_returns_none_pair(fakes, tiny_image):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.detector.result = {"predictions": [{"detections": []}]}
 
-    assert inst._detect(tiny_image) is None
+    assert inst._detect(tiny_image) == (None, None)
 
 
-def test_detect_single_detection_returns_rgb_crop(fakes, tiny_image):
+def test_detect_single_detection_returns_rgb_crop_and_bbox(fakes, tiny_image):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.detector.result = {
         "predictions": [
@@ -225,15 +249,16 @@ def test_detect_single_detection_returns_rgb_crop(fakes, tiny_image):
         ]
     }
 
-    crop = inst._detect(tiny_image)
+    crops, bboxs = inst._detect(tiny_image)
 
-    assert crop is not None
-    assert crop.mode == "RGB"
+    assert crops is not None
+    assert crops[0].mode == "RGB"
     # tiny_image is 100x80; bbox normalized (0.25, 0.5, 0.25, 0.25) => (25, 40, 50, 60).
-    assert crop.size == (25, 20)
+    assert crops[0].size == (25, 20)
+    assert bboxs == [(0.25, 0.5, 0.25, 0.25)]
 
 
-def test_detect_selects_highest_confidence(fakes, tiny_image):
+def test_detect_returns_detections_in_descending_confidence_order(fakes, tiny_image):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.detector.result = {
         "predictions": [
@@ -246,10 +271,32 @@ def test_detect_selects_highest_confidence(fakes, tiny_image):
         ]
     }
 
-    crop = inst._detect(tiny_image)
+    crops, bboxs = inst._detect(tiny_image)
 
-    assert crop is not None
-    assert crop.size == (50, 40)
+    assert crops is not None
+    assert [crop.size for crop in crops] == [(50, 40), (20, 16)]
+    assert bboxs == [(0.5, 0.5, 0.5, 0.5), (0.0, 0.0, 0.2, 0.2)]
+
+
+def test_detect_limits_results_to_five(fakes, tiny_image):
+    inst = SpeciesNetYoloInference("det.pt", "cls.pt")
+    fakes.detector.result = {
+        "predictions": [
+            {
+                "detections": [
+                    {"conf": confidence, "bbox": [0.0, 0.0, 0.1, 0.1]}
+                    for confidence in range(6)
+                ]
+            }
+        ]
+    }
+
+    crops, bboxs = inst._detect(tiny_image)
+
+    assert crops is not None
+    assert len(crops) == 5
+    assert bboxs is not None
+    assert len(bboxs) == 5
 
 
 def test_detect_skips_malformed_detections(fakes, tiny_image):
@@ -268,19 +315,20 @@ def test_detect_skips_malformed_detections(fakes, tiny_image):
         ]
     }
 
-    crop = inst._detect(tiny_image)
+    crops, bboxs = inst._detect(tiny_image)
 
-    assert crop is not None
-    assert crop.size == (50, 40)
+    assert crops is not None
+    assert [crop.size for crop in crops] == [(50, 40)]
+    assert bboxs == [(0.5, 0.5, 0.5, 0.5)]
 
 
-def test_detect_all_malformed_returns_none(fakes, tiny_image):
+def test_detect_all_malformed_returns_none_pair(fakes, tiny_image):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.detector.result = {
         "predictions": [{"detections": [{"conf": 0.9}, {"bbox": [0, 0, 1, 1]}]}]
     }
 
-    assert inst._detect(tiny_image) is None
+    assert inst._detect(tiny_image) == (None, None)
 
 
 def test_detect_resolves_relative_image_path(fakes):
@@ -290,7 +338,6 @@ def test_detect_resolves_relative_image_path(fakes):
     inst._detect(Path("some/relative.png"))
 
     assert fakes.detector.filepaths == [str(Path("some/relative.png").resolve())]
-    assert fakes.detector.batch_size == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -308,10 +355,15 @@ def test_classify_none_crop_returns_sentinel(fakes):
     }
 
 
-def test_classify_builds_probabilities_result_and_confidence(fakes):
+def test_classify_builds_top1_and_top5_results(fakes):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.yolo.result = FakeClassResult(
-        ["rodent", "bird", "plant"], [0.1, 0.2, 0.7], top1=2, top1conf=0.7
+        ["rodent", "bird", "plant"],
+        [0.1, 0.2, 0.7],
+        top1=2,
+        top1conf=0.7,
+        top5=[2, 1, 0],
+        top5conf=[0.7, 0.2, 0.1],
     )
     crop = Image.new("RGB", (10, 10), "green")
 
@@ -321,6 +373,8 @@ def test_classify_builds_probabilities_result_and_confidence(fakes):
         "probabilities": {"rodent": 0.1, "bird": 0.2, "plant": 0.7},
         "result": "plant",
         "confidence": 0.7,
+        "top5": ["plant", "bird", "rodent"],
+        "top5_confidence": [0.7, 0.2, 0.1],
     }
     assert fakes.yolo.last_call == ((crop,), {"verbose": False})
 
@@ -335,23 +389,31 @@ def test_predict_happy_path(fakes, tiny_image):
     fakes.detector.result = {
         "predictions": [{"detections": [{"conf": 0.9, "bbox": [0, 0, 1, 1]}]}]
     }
-    fakes.yolo.result = FakeClassResult(["animal"], [1.0], top1=0, top1conf=1.0)
+    fakes.yolo.result = FakeClassResult(
+        ["animal"],
+        [1.0],
+        top1=0,
+        top1conf=1.0,
+        top5=[0],
+        top5conf=[1.0],
+    )
 
     result = inst.predict(tiny_image)
 
     assert result == {
-        "probabilities": {"animal": 1.0},
-        "result": "animal",
-        "confidence": 1.0,
+        0: {
+            "probabilities": {"animal": 1.0},
+            "result": "animal",
+            "confidence": 1.0,
+            "top5": ["animal"],
+            "top5_confidence": [1.0],
+            "bbox": (0, 0, 1, 1),
+        }
     }
 
 
-def test_predict_no_detection_returns_sentinel(fakes, tiny_image):
+def test_predict_no_detection_returns_empty_mapping(fakes, tiny_image):
     inst = SpeciesNetYoloInference("det.pt", "cls.pt")
     fakes.detector.result = {"predictions": []}
 
-    assert inst.predict(tiny_image) == {
-        "probabilities": {},
-        "result": None,
-        "confidence": None,
-    }
+    assert inst.predict(tiny_image) == {}
