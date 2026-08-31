@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,7 +179,12 @@ def test_from_config_missing_file_raises(fakes):
 
 def test_from_config_builds_instance(fakes, tmp_path):
     cfg = _write_config(
-        tmp_path, "speciesnet_model: md_v5a.pt\nclassifier_weights: yolo.pt\n"
+        tmp_path,
+        "speciesnet_model: md_v5a.pt\n"
+        "classifier_weights: yolo.pt\n"
+        "input_path: images\n"
+        "output_path: results\n"
+        "image_extensions: [.png]\n",
     )
 
     inst = SpeciesNetYoloInference.from_config(str(cfg))
@@ -215,20 +221,10 @@ def test_from_config_missing_one_key_raises(fakes, tmp_path):
 
 
 def test_from_config_null_values_raise_missing_keys(fakes, tmp_path):
-    # Mirrors the committed configs/inference_pipeline.yaml (null values).
+    # Model values are required even when runtime settings are present.
     cfg = _write_config(tmp_path, "speciesnet_model:\nclassifier_weights:\n")
 
     with pytest.raises(ValueError, match="missing required key"):
-        SpeciesNetYoloInference.from_config(str(cfg))
-
-
-def test_from_config_extra_key_raises(fakes, tmp_path):
-    cfg = _write_config(
-        tmp_path,
-        "speciesnet_model: model.pt\nclassifier_weights: yolo.pt\nunknown: x\n",
-    )
-
-    with pytest.raises(ValueError, match="unexpected key"):
         SpeciesNetYoloInference.from_config(str(cfg))
 
 
@@ -441,3 +437,32 @@ def test_predict_no_detection_returns_empty_mapping(fakes, tiny_image):
     fakes.detector.result = {"predictions": []}
 
     assert inst.predict(tiny_image) == {}
+
+
+# --------------------------------------------------------------------------- #
+# main
+# --------------------------------------------------------------------------- #
+
+
+def test_main_reads_input_output_and_extensions_from_config(monkeypatch, tmp_path):
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    (input_dir / "keep.PNG").write_bytes(b"image")
+    (input_dir / "ignore.txt").write_text("not an image", encoding="utf-8")
+    cfg = _write_config(
+        tmp_path,
+        "speciesnet_model: model.pt\n"
+        "classifier_weights: classifier.pt\n"
+        "path: images\n"
+        "output: results\n"
+        "imgs: [.png]\n",
+    )
+    pipeline = SimpleNamespace(predict=lambda image: {"source": image.name})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(SpeciesNetYoloInference, "from_config", lambda config: pipeline)
+    monkeypatch.setattr("sys.argv", ["inference", "--config", str(cfg)])
+
+    inference.main()
+
+    results = json.loads((tmp_path / "results" / "results.json").read_text())
+    assert results == {"keep.PNG": {"source": "keep.PNG"}}

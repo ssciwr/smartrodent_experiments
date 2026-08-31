@@ -52,34 +52,24 @@ models in [`configs/inference_pipeline.yaml`](configs/inference_pipeline.yaml):
 ```yaml
 speciesnet_model: kaggle:google/speciesnet/pyTorch/v4.0.3a/1
 classifier_weights: path/to/classifier/weights.pt
+path: /path/to/images # one image or a non-recursive image directory
+output: /path/to/output
+imgs: [.jpg, .jpeg, .png, .webdav]
 ```
 
 `classifier_weights` is a filename relative to the default Hugging Face
 repository, `MaHaWo/Yolo26Rodent`. The classifier is downloaded and cached by
 `huggingface_hub` on first use.
 
-Run inference on one image:
+Run inference with a configuration file only:
 
 ```bash
-uv run inference \
-  --config configs/inference_pipeline.yaml \
-  --image_path /path/to/image.jpg \
-  --outpath /path/to/output
+uv run inference --config configs/inference_pipeline.yaml
 ```
 
-Or process the supported images directly inside a directory (the scan is not
-recursive):
-
-```bash
-uv run inference \
-  --config configs/inference_pipeline.yaml \
-  --path /path/to/images \
-  --outpath /path/to/output
-```
-
-Provide either `--image_path` or `--path`. The command creates
-`<outpath>/results.json`, keyed first by image filename and then by detection
-index. Each detection contains the normalized `bbox`, all class
+`path` may name one image or a directory; directory scanning is not recursive.
+The command creates `<output>/results.json`, keyed first by image filename and
+then by detection index. Each detection contains the normalized `bbox`, all class
 `probabilities`, the top result and confidence, and the top-five labels and
 confidences. Images without detections produce an empty mapping.
 

@@ -3,3 +3,12 @@ speciesnet_model: kaggle:google/speciesnet/pyTorch/v4.0.3a/1
 
 # path in MaHaWo/Yolo26Rodent huggingface directory
 classifier_weights: yolo_classify_speciesnames/full_data_classifier_xl_with_recommended_defaults/weights/best.pt
+
+# Path may be one image or a directory.
+path: datasets/rgb
+output: outputs/inference
+imgs:
+  - .jpg
+  - .jpeg
+  - .png
+  - .webdav
