@@ -12,6 +12,7 @@ wheels/
 # data
 datasets
 runs*
+training
 
 # torch files
 *.pt
