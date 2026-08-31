@@ -10,10 +10,7 @@ wheels/
 .venv
 
 # data
-datasets/
-data/
-
-# model eval for filtering
+datasets
 runs*
 
 # torch files
@@ -32,7 +29,3 @@ runs*
 
 # remove uv.lock b/c annoying and blows up prs
 uv.lock
-
-
-# training artifacts
-training
