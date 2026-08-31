@@ -10,7 +10,6 @@ dependencies = [
     "pandas>=3.0.3",
     "PyYAML>=6.0",
     "tqdm>=4.69.0",
-    "vllm>=0.8",
     "requests>=2.0",
     "pyinaturalist>=0.21.1",
     # Inference pipeline dependencies.
@@ -26,6 +25,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
+llm = ["vllm>=0.8"]
 dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
 
 [project.scripts]

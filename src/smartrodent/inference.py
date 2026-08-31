@@ -9,6 +9,7 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 from speciesnet import SpeciesNet
 from ultralytics import YOLO
+from tqdm import tqdm
 
 
 class SpeciesNetYoloInference:
@@ -59,20 +60,17 @@ class SpeciesNetYoloInference:
         path = Path(config).resolve()
         if not path.exists():
             raise ValueError(f"Config file does not exist: {path}")
-        with open(path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
+        with path.open("r", encoding="utf-8") as file:
+            cfg = yaml.safe_load(file) or {}
         if not isinstance(cfg, dict):
             raise ValueError(f"Config must be a YAML mapping, got {type(cfg).__name__}")
         missing = [
-            k for k in ("speciesnet_model", "classifier_weights") if not cfg.get(k)
+            key
+            for key in ("speciesnet_model", "classifier_weights")
+            if not cfg.get(key)
         ]
         if missing:
             raise ValueError(f"Config missing required key(s): {', '.join(missing)}")
-        extra = set(cfg) - {"speciesnet_model", "classifier_weights"}
-        if extra:
-            raise ValueError(
-                f"Config has unexpected key(s): {', '.join(sorted(extra))}"
-            )
         return cls(
             speciesnet_detector=cfg["speciesnet_model"],
             yolo_classifier=cfg["classifier_weights"],
@@ -198,40 +196,31 @@ class SpeciesNetYoloInference:
 
 
 def main():
-    """Driver for running inference from commandline."""
-    # build tiny little primitive arg parser
+    """Run inference using the supplied YAML configuration file."""
     parser = argparse.ArgumentParser(
         prog="SmartRodentInference",
         description="Run detection->classification inference on camera trap images",
-        epilog="",
     )
-    parser.add_argument("-o", "--outpath", help="path to store the results in")
-    parser.add_argument("-i", "--image_path", help="path to image to run inference on")
-    parser.add_argument(
-        "-c",
-        "--config",
-        help="config file to define the Inference pipeline (SpeciesNetYoloInference)",
-    )
-    parser.add_argument("-p", "--path", help="path to a directory of images")
+    parser.add_argument("-c", "--config", required=True)
     args = parser.parse_args()
 
-    imgs = [".jpg", ".jpeg", ".png", ".webdav"]
+    with open(args.config, "r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
 
     inferencepipeline = SpeciesNetYoloInference.from_config(args.config)
+    input_path = Path(config["path"]).resolve()
+    images = tqdm(list(input_path.iterdir()) if input_path.is_dir() else [input_path])
 
-    results = {}
-    if args.path:
-        for img in Path(args.path).resolve().iterdir():
-            if img.suffix in imgs:
-                results[img.name] = inferencepipeline.predict(img.resolve())
-    else:
-        img = Path(args.image_path).resolve()
-        results[img.name] = inferencepipeline.predict(img)
+    results = {
+        image.name: inferencepipeline.predict(image)
+        for image in images
+        if image.suffix.lower() in config["imgs"]
+    }
 
-    output_path = Path(args.outpath)
+    output_path = Path(config["output"])
     output_path.mkdir(parents=True, exist_ok=True)
-    with open(output_path / "results.json", "w") as f:
-        json.dump(results, f, indent=4)
+    with open(output_path / "results.json", "w", encoding="utf-8") as file:
+        json.dump(results, file, indent=4)
 
 
 if __name__ == "__main__":
