@@ -1,9 +1,12 @@
+import argparse
+import json
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
 from PIL import Image
 from speciesnet import SpeciesNet
+import numpy as np
 from ultralytics import YOLO
 
 
@@ -21,7 +24,7 @@ class SpeciesNetYoloInference:
         """
         # SpeciesNet's detector gives us MegaDetector-style normalized boxes.
         self.detector: SpeciesNet = SpeciesNet(
-            str(speciesnet_model), components="detector"
+            str(speciesnet_model), components="detector", multiprocessing=False
         )
         self.classify: YOLO = YOLO(str(classifier_weights), task="classify")
 
@@ -65,7 +68,9 @@ class SpeciesNetYoloInference:
             classifier_weights=cfg["classifier_weights"],
         )
 
-    def _detect(self, image_path: str | Path) -> Image.Image | None:
+    def _detect(
+        self, image_path: str | Path
+    ) -> tuple[list[Image.Image] | None, list[tuple[int, int, int, int]] | None]:
         """Detects the most confident animal and returns its RGB crop.
 
         Args:
@@ -79,37 +84,51 @@ class SpeciesNetYoloInference:
         image_path = Path(image_path).resolve()
         detection = cast(
             dict[str, Any],
-            self.detector.predict(filepaths=[str(image_path)], batch_size=1),
+            self.detector.detect(
+                filepaths=[str(image_path)],
+            ),
         )
         if not detection.get("predictions"):
-            return None
+            return None, None
+
         detections: list[dict[str, Any]] = detection["predictions"][0].get(
             "detections", []
         )
         # Skip entries missing confidence or carrying malformed bounding boxes.
-        valid = [
+        valid_detections = [
             d
             for d in detections
             if "conf" in d
             and isinstance(d.get("bbox"), (list, tuple))
             and len(d["bbox"]) == 4
         ]
-        if not valid:
-            return None
+        if not valid_detections:
+            return None, None
 
-        # Keep the single highest-confidence detection.
-        x, y, width, height = max(valid, key=lambda item: item["conf"])["bbox"]
-        with Image.open(image_path) as image:
-            # YOLO's classifier receives a consistent, three-channel image.
-            image = image.convert("RGB")
-            return image.crop(
-                (
-                    x * image.width,
-                    y * image.height,
-                    (x + width) * image.width,
-                    (y + height) * image.height,
+        # Keep the 5 highest-confidence detections
+        valid_detections.sort(key=lambda item: item["conf"], reverse=True)
+
+        valid_detections = valid_detections[0 : min(5, len(valid_detections))]
+        crops = []
+        bboxs = []
+        for detect in valid_detections:
+            x, y, width, height = detect["bbox"]
+            with Image.open(image_path) as image:
+                # YOLO's classifier receives a consistent, three-channel image.
+                image = image.convert("RGB")
+                crops.append(
+                    image.crop(
+                        (
+                            x * image.width,
+                            y * image.height,
+                            (x + width) * image.width,
+                            (y + height) * image.height,
+                        )
+                    )
                 )
-            )
+            bboxs.append((x, y, width, height))
+
+        return crops, bboxs
 
     def _classify(self, crop: Image.Image | None) -> dict[str, object]:
         """Classifies a detected animal crop.
@@ -125,7 +144,8 @@ class SpeciesNetYoloInference:
         if crop is None:
             return {"probabilities": {}, "result": None, "confidence": None}
 
-        classification: Any = self.classify(crop, verbose=False)
+        # only one element b/c only one input
+        classification: Any = next(iter(self.classify(crop, verbose=False)))
 
         # Expose every class score, not only YOLO's top prediction.
         probabilities: dict[str, float] = {
@@ -135,13 +155,17 @@ class SpeciesNetYoloInference:
             )
         }
         top1 = int(classification.probs.top1)
+        top5 = np.array(classification.probs.top5)
+
         return {
             "probabilities": probabilities,
             "result": classification.names[top1],
             "confidence": float(classification.probs.top1conf),
+            "top5": [classification.names[i] for i in top5],
+            "top5_confidence": classification.probs.top5conf.cpu().tolist(),
         }
 
-    def predict(self, image_path: str | Path) -> dict[str, object]:
+    def predict(self, image_path: str | Path) -> dict[int, dict[str, object]]:
         """Runs detection followed by classification for one image.
 
         Args:
@@ -151,4 +175,54 @@ class SpeciesNetYoloInference:
             dict: Classification probabilities, predicted class, and confidence.
         """
         # Keep the public pipeline explicit: detection produces the classifier input.
-        return self._classify(self._detect(image_path))
+
+        detections, bboxs = self._detect(image_path)
+
+        if detections is None or bboxs is None:
+            return {}
+
+        results = {i: self._classify(d) for i, d in enumerate(detections)}
+        for i in range(len(detections)):
+            results[i]["bbox"] = bboxs[i]
+        return results
+
+
+def main():
+
+    # build tiny little primitive arg parser
+    parser = argparse.ArgumentParser(
+        prog="SmartRodentInference",
+        description="Run detection->classification inference on camera trap images",
+        epilog="",
+    )
+    parser.add_argument("-o", "--outpath", help="path to store the results in")
+    parser.add_argument("-i", "--image_path", help="path to image to run inference on")
+    parser.add_argument(
+        "-c",
+        "--config",
+        help="config file to define the Inference pipeline (SpeciesNetYoloInference)",
+    )
+    parser.add_argument("-p", "--path", help="path to a directory of images")
+    args = parser.parse_args()
+
+    imgs = [".jpg", ".jpeg", ".png", ".webdav"]
+
+    inferencepipeline = SpeciesNetYoloInference.from_config(args.config)
+
+    results = {}
+    if args.path:
+        for img in Path(args.path).resolve().iterdir():
+            if img.suffix in imgs:
+                results[img.name] = inferencepipeline.predict(img.resolve())
+    else:
+        img = Path(args.image_path).resolve()
+        results[img.name] = inferencepipeline.predict(img)
+
+    output_path = Path(args.outpath)
+    output_path.mkdir(parents=True, exist_ok=True)
+    with open(output_path / "results.json", "w") as f:
+        json.dump(results, f, indent=4)
+
+
+if __name__ == "__main__":
+    main()
