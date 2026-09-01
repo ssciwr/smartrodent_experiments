@@ -9,9 +9,14 @@ wheels/
 # Virtual environments
 .venv
 
-# data
-datasets
-runs*
+# data (keep DVC metadata files)
+datasets/**
+runs*/**
+!datasets/
+!datasets/**/
+!runs*/
+!runs*/**/
+!**/*.dvc
 
 # torch files
 *.pt
@@ -26,6 +31,11 @@ runs*
 # dvc
 /.dvc/cache/
 
-
 # remove uv.lock b/c annoying and blows up prs
 uv.lock
+
+# training outputs (keep DVC metadata files)
+training/**
+!training/
+!training/**/
+!**/*.dvc
