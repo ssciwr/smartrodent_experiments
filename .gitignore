@@ -39,3 +39,10 @@ training/**
 !training/
 !training/**/
 !**/*.dvc
+
+
+# outputs for analysis
+outputs/**!
+outputs/
+!outputs/**/
+!**/*.dvc
