@@ -9,7 +9,7 @@ model_name: !sweep
 include_macro_f1: true
 return_format: dataframe
 train_kwargs:
-  epochs: 60
+  epochs: 50
   imgsz: 640
   batch: -1
   device: 0
