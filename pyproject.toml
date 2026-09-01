@@ -31,6 +31,9 @@ dependencies = [
     "vllm>=0.8",
     "pillow>=12.3.0",
     "openai>=2.48.0",
+    "onnxruntime>=1.28.0",
+    "onnxslim>=0.1.94",
+    "huggingface-hub>=1.24.0",
 ]
 
 [project.optional-dependencies]

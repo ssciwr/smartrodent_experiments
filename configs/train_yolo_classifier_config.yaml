@@ -1,23 +1,36 @@
-train_dataset: /home/hmack/projects/smartrodent_experiments/datasets/full_dataset/yolo_detector_training_dataset
-model_name: yolo26x.pt
+train_dataset: /home/hmack/projects/smartrodent_experiments/datasets/full_dataset/yolo_classifier_training_dataset_reduced
+model_name: !sweep
+  values:
+    - yolo26s-cls.pt
+    - yolo26m-cls.pt
+    - yolo26l-cls.pt
+    - yolo26x-cls.pt
+
 include_macro_f1: true
 return_format: dataframe
 train_kwargs:
-  epochs: 100
+  epochs: 60
   imgsz: 640
-  batch: 24
+  batch: -1
   device: 0
-  workers: 20
-  patience: 25
-  project: /home/hmack/projects/smartrodent_experiments/training/yolo_detect
-  name: full_data_detector_xl_with_recommended_defaults
+  workers: 10
+  patience: 20
+  warmup_epochs: 3.0
+  optimizer: 'auto'
+  project: /home/hmack/projects/smartrodent_experiments/training/yolo_classify_reduced
+  name: !coupled-sweep
+    target: model_name
+    values:
+      - full_data_classifier_s_640
+      - full_data_classifier_m_640
+      - full_data_classifier_l_640
+      - full_data_classifier_xl_640
   exist_ok: true
   plots: true
   save: true
   val: true
 export_kwargs:
   format: "onnx"
-
 tune_kwargs:
   epochs: 30
   iterations: 40

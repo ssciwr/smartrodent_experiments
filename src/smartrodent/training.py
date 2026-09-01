@@ -79,7 +79,13 @@ class YoloDetectionTrainer:
         config = yaml.safe_load(config_path.read_text())
         train_kwargs = config.pop("train_kwargs", {})
         tune_kwargs = config.pop("tune_kwargs", {})
-        return cls(**config, tune_kwargs=tune_kwargs, **train_kwargs)
+        export_kwargs = config.pop("export_kwargs", {})
+        return cls(
+            **config,
+            tune_kwargs=tune_kwargs,
+            export_kwargs=export_kwargs,
+            **train_kwargs,
+        )
 
     def data_yaml(self) -> Path:
         """Resolve the configured dataset to a YOLO data YAML path.
