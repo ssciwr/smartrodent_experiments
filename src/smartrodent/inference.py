@@ -6,10 +6,10 @@ from typing import Any, cast
 import numpy as np
 import yaml
 from huggingface_hub import hf_hub_download
-from PIL import Image
+from PIL import Image, ImageDraw
 from speciesnet import SpeciesNet
-from ultralytics import YOLO
 from tqdm import tqdm
+from ultralytics import YOLO
 
 
 class SpeciesNetYoloInference:
@@ -20,6 +20,7 @@ class SpeciesNetYoloInference:
         speciesnet_detector: str | Path,
         yolo_classifier: str | Path,
         repo_id: str = "MaHaWo/Yolo26Rodent",
+        with_bbox: bool = True,
     ) -> None:
         """Initializes the detector and classifier models.
 
@@ -27,6 +28,7 @@ class SpeciesNetYoloInference:
             speciesnet_detector: SpeciesNet model identifier or local model path.
             yolo_classifier: Classifier filename within ``repo_id``.
             repo_id: Hugging Face repository containing the classifier weights.
+            with_bbox: Whether to include bounding box coordinates in the output.
         """
 
         weights_path = hf_hub_download(
@@ -76,9 +78,11 @@ class SpeciesNetYoloInference:
             yolo_classifier=cfg["classifier_weights"],
         )
 
-    def _detect(
-        self, image_path: str | Path
-    ) -> tuple[list[Image.Image] | None, list[tuple[int, int, int, int]] | None]:
+    def _detect(self, image_path: str | Path) -> tuple[
+        Image.Image | None,
+        list[Image.Image] | None,
+        list[tuple[int, int, int, int]] | None,
+    ]:
         """Detects the most confident animal and returns its RGB crop.
 
         Args:
@@ -90,6 +94,8 @@ class SpeciesNetYoloInference:
         """
         # Resolve paths before passing them to SpeciesNet, which receives strings.
         image_path = Path(image_path).resolve()
+
+        # run detection
         detection = cast(
             dict[str, Any],
             self.detector.detect(
@@ -97,7 +103,7 @@ class SpeciesNetYoloInference:
             ),
         )
         if not detection.get("predictions"):
-            return None, None
+            return None, None, None
 
         detections: list[dict[str, Any]] = detection["predictions"][0].get(
             "detections", []
@@ -111,7 +117,7 @@ class SpeciesNetYoloInference:
             and len(d["bbox"]) == 4
         ]
         if not valid_detections:
-            return None, None
+            return None, None, None
 
         # Keep the 5 highest-confidence detections
         valid_detections.sort(key=lambda item: item["conf"], reverse=True)
@@ -119,11 +125,12 @@ class SpeciesNetYoloInference:
         valid_detections = valid_detections[0 : min(5, len(valid_detections))]
         crops = []
         bboxs = []
-        for detect in valid_detections:
-            x, y, width, height = detect["bbox"]
-            with Image.open(image_path) as image:
-                # YOLO's classifier receives a consistent, three-channel image.
-                image = image.convert("RGB")
+        with Image.open(image_path) as image:
+            # YOLO's classifier receives a consistent, three-channel image.
+            image = image.convert("RGB")
+            for detect in valid_detections:
+                x, y, width, height = detect["bbox"]
+
                 crops.append(
                     image.crop(
                         (
@@ -134,9 +141,24 @@ class SpeciesNetYoloInference:
                         )
                     )
                 )
-            bboxs.append((x, y, width, height))
 
-        return crops, bboxs
+                # draw the bounding box coordinates
+                drawn = ImageDraw.Draw(image)
+                drawn.rectangle(
+                    [
+                        x * image.width,
+                        y * image.height,
+                        (x + width) * image.width,
+                        (y + height) * image.height,
+                    ],
+                    outline="cyan",
+                    width=2,
+                )
+
+                # drawn to image conversion
+                bboxs.append((x, y, width, height))
+
+        return image, crops, bboxs
 
     def _classify(self, crop: Image.Image | None) -> dict[str, object]:
         """Classifies a detected animal crop.
@@ -173,26 +195,28 @@ class SpeciesNetYoloInference:
             "top5_confidence": classification.probs.top5conf.cpu().tolist(),
         }
 
-    def predict(self, image_path: str | Path) -> dict[int, dict[str, object]]:
+    def predict(
+        self, image_path: str | Path
+    ) -> tuple[Image.Image | None, dict[int, dict[str, object]]]:
         """Runs detection followed by classification for one image.
 
         Args:
             image_path: Path to the image to analyze.
 
         Returns:
-            dict: Classification probabilities, predicted class, and confidence.
+            tuple[Image.Image | None, dict[int, dict[str, object]]]: The annotated image, along with classification results.
         """
         # Keep the public pipeline explicit: detection produces the classifier input.
 
-        detections, bboxs = self._detect(image_path)
+        image, detections, bboxs = self._detect(image_path)
 
         if detections is None or bboxs is None:
-            return {}
+            return image, {}
 
         results = {i: self._classify(d) for i, d in enumerate(detections)}
         for i in range(len(detections)):
             results[i]["bbox"] = bboxs[i]
-        return results
+        return image, results
 
 
 def main():
@@ -210,17 +234,28 @@ def main():
     inferencepipeline = SpeciesNetYoloInference.from_config(args.config)
     input_path = Path(config["path"]).resolve()
     images = tqdm(list(input_path.iterdir()) if input_path.is_dir() else [input_path])
-
+    predictions = [inferencepipeline.predict(image) for image in images]
     results = {
-        image.name: inferencepipeline.predict(image)
-        for image in images
+        image.name: predictions[i][1]
+        for i, image in enumerate(images)
         if image.suffix.lower() in config["imgs"]
+    }
+    drawn_images = {
+        image.name: predictions[i][0]
+        for i, image in enumerate(images)
+        if image.suffix.lower() in config["imgs"] and predictions[i][0] is not None
     }
 
     output_path = Path(config["output"])
     output_path.mkdir(parents=True, exist_ok=True)
     with open(output_path / "results.json", "w", encoding="utf-8") as file:
         json.dump(results, file, indent=4)
+
+    for name, drawn_image in drawn_images.items():
+        if drawn_image is not None:
+            drawn_image.save(output_path / name)
+        else:
+            print(f"Warning: No drawn image for {name}")
 
 
 if __name__ == "__main__":
