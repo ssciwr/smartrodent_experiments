@@ -1,0 +1,22 @@
+# most current speciesnet model
+speciesnet_model: kaggle:google/speciesnet/pyTorch/v4.0.3a/1
+
+# SpeciesNet geofencing (ISO 3166-1 alpha-3 and ISO 3166-2 subdivision).
+geofence: False
+country: GER
+admin1_region:
+
+inference_pipeline: SpeciesNetInference
+# Path may be one image or a directory.
+path: /mnt/dataLinux/Development/rodent_experiments/datasets/california_small_animals
+output: /home/hmack/Development/rodent_experiments/outputs/inference_custom/speciesnet/california_small_animals
+imgs:
+  - .jpg
+  - .jpeg
+  - .png
+  - .webdav
+
+specieslist:
+  - Rattus rattus
+  - Rattus norvegicus
+  - Mus musculus

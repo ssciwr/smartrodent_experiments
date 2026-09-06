@@ -65,7 +65,7 @@ class SpeciesNetYoloInference:
         with path.open("r", encoding="utf-8") as file:
             cfg = yaml.safe_load(file) or {}
         if not isinstance(cfg, dict):
-            raise ValueError(f"Config must be a YAML mapping, got {type(cfg).__name__}")
+            raise TypeError(f"Config must be a YAML mapping, got {type(cfg).__name__}")
         missing = [
             key
             for key in ("speciesnet_model", "classifier_weights")
