@@ -96,7 +96,9 @@ class InaturalistDataset(DatasetLoader):
             "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
         )
 
-        file_handler = logging.FileHandler(Path(output_path) / "app.log")
+        file_handler = logging.FileHandler(
+            Path(output_path) / "inaturalist_dataset.log"
+        )
         file_handler.setFormatter(formatter)
 
         console_handler = logging.StreamHandler()
