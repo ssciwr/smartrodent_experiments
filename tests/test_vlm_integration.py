@@ -31,10 +31,16 @@ Return exactly this JSON schema without ommiting anything:
 Make sure that you return valid JSON.
 """.strip()
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("SMARTRODENT_SKIP_VLM_INTEGRATION") == "1",
-    reason="Set SMARTRODENT_SKIP_VLM_INTEGRATION=1 to skip real VLM integration tests.",
-)
+pytestmark = [
+    pytest.mark.vlm_integration,
+    pytest.mark.skipif(
+        os.getenv("SMARTRODENT_RUN_VLM_INTEGRATION") != "1",
+        reason=(
+            "Real VLM integration tests require an Ollama server or a vLLM-capable "
+            "GPU; set SMARTRODENT_RUN_VLM_INTEGRATION=1 to run them."
+        ),
+    ),
+]
 
 
 def integration_image_path(env_var: str, default_name: str) -> Path:

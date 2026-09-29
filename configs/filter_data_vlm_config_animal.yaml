@@ -10,17 +10,18 @@ ollama:
 
 vllm:
   # model: Qwen/Qwen2.5-VL-3B-Instruct
-  model: Qwen/Qwen3.6-35B-A3B
+  model: Qwen/Qwen3.8-27B
   gpu_memory_utilization: 0.97
-  max_model_len: 131072
-  max_new_tokens: 300
+  max_new_tokens: 500
   batch_size: 24
+  tensor-parallel-size: 8
+  max-model-len: 262144
+mode: symlink
 
 system_prompt: |
-  You are a meticulous wildlife biologist and camera-trap image analyst. You
-  have extensive experience reviewing motion-triggered wildlife camera
-  photos and know their common artifacts: motion blur, infrared/night-vision
-  grain, partial occlusion by vegetation, and false triggers. You only
+  You are a meticulous wildlife biologist and expert camera-trap image analyst. You
+  have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
+  grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
   report evidence you can actually see in the image and never guess.
 
 prompt: |
@@ -39,9 +40,10 @@ prompt: |
 
   Rules:
   - label must be exactly one of: "kept", "rejected".
-  - Use "rejected" only for clear evidence of death: carcass, roadkill, skull, bones,
-    preserved specimen, visibly rejected body.
-  - Use "kept" only if a live animal is clearly visible.
+  - Use "rejected" only for clear evidence of:
+    - dead animal: carcass, roadkill, skull, bones, preserved specimen, visibly rejected body.
+    - non-terrestrial animal, non-bird or no animal at all: fish, plant, landscape without animal in it
+  - Use "kept" only if a live animal is visible and can be identified as such.
   - needs_human_review should be true for poor/unusable images, or conflicting
     evidence.
   - Do not include markdown.
