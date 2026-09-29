@@ -73,7 +73,7 @@ data:
       img_folder: ./datasets/biotrove-central-europe-large/img_txt
       generate_tar: true
   inaturalist:
-    output_path: /home/hmack/Development/rodent_experiments/datasets/full_dataset/raw
+    output_path: ./datasets/full_dataset/raw
     years: []
     first_year: 2000
     last_year: 2026
