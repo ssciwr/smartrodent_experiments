@@ -12,7 +12,7 @@ data:
         - Apodemus sylvaticus
         - Arvicola amphibius
         - Microtus arvalis
-        - Clethrionomys glareolus,
+        - Clethrionomys glareolus
         - Microtus agrestis
         - Crocidura leucodon
         - Sorex araneus
@@ -81,3 +81,9 @@ data:
     species: *categories
     seed: 42
     maxlen: 2000
+    allowed_licenses:
+      - cc0
+      - cc-by
+      - cc-by-sa
+      - cc-by-nc
+      - cc-by-nc-sa
