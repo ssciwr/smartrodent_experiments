@@ -85,7 +85,25 @@ class InaturalistDataset(DatasetLoader):
             if config_path is not None
             else None
         )
+
+        self.output_path.mkdir(parents=True, exist_ok=True)
+
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False
+
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+        )
+
+        file_handler = logging.FileHandler(Path(output_path) / "app.log")
+        file_handler.setFormatter(formatter)
+
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
 
         if self.max_img_num < 0:
             raise ValueError("max_img_num must be zero or greater")
@@ -93,7 +111,6 @@ class InaturalistDataset(DatasetLoader):
             raise ValueError("species must contain at least one scientific name")
 
         # Keep setup local and deterministic; downloading remains explicit.
-        self.output_path.mkdir(parents=True, exist_ok=True)
         self._copy_config()
 
     @classmethod
@@ -127,10 +144,11 @@ class InaturalistDataset(DatasetLoader):
         if not isinstance(loaded_config, dict):
             raise TypeError(f"Expected a mapping in configuration file {path}")
 
-        config = loaded_config.get("inaturalist", loaded_config)
+        config = loaded_config.get("data", loaded_config).get(
+            "inaturalist", loaded_config
+        )
         if not isinstance(config, dict):
             raise TypeError("The 'inaturalist' configuration must be a mapping")
-
         try:
             output_path = config["output_path"]
             species = config["species"]
@@ -239,7 +257,15 @@ class InaturalistDataset(DatasetLoader):
             return records_df
 
         # Random sampling prevents the API's ordering from biasing a capped dataset.
-        return records_df.sample(frac=1, random_state=self.seed).reset_index(drop=True)
+        records = records_df.sample(frac=1, random_state=self.seed).reset_index(
+            drop=True
+        )
+
+        # cap data if bigger than limit
+        if len(records) > self.max_img_num:
+            records = records.head(self.max_img_num)
+
+        return records
 
     def _download_photo(
         self, photo: dict[str, Any], images_path: Path, observation_id: int, index: int
@@ -334,12 +360,16 @@ class InaturalistDataset(DatasetLoader):
                 Species processed before the failure keep their downloaded data.
         """
         for species in self.species:
+            self.logger.info(f"species: {species}")
             species_path = self.output_path / species
             images_path = species_path / "imgs"
             species_path.mkdir(parents=True, exist_ok=True)
             images_path.mkdir(exist_ok=True)
 
+            self.logger.info("Retrieving species records")
             records_df = self._get_species_records(species)
             records_df.to_csv(species_path / "records.csv", index=False)
+
+            self.logger.info("Downloading images")
             downloaded = self._download_species_images(records_df, images_path)
             self.logger.info("Downloaded %s images for %s", downloaded, species)
