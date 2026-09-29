@@ -101,5 +101,27 @@ uv sync --extra dev
 uv run pytest
 ```
 
-The test command does not run the iNaturalist download pipeline. Use `dvc repro`
-explicitly when you want to make network requests and write a dataset.
+Tests that require external services or special hardware are identified with
+pytest markers:
+
+- `network` makes live network requests. Run only these tests with
+  `uv run pytest -m network`, or exclude them with
+  `uv run pytest -m "not network"`.
+- `vlm_integration` runs real Ollama and vLLM inference. These tests are
+  opt-in and require both the marker selection and an environment variable:
+
+  ```bash
+  SMARTRODENT_RUN_VLM_INTEGRATION=1 uv run pytest -m vlm_integration
+  ```
+
+  Add `-k ollama` or `-k vllm` to run only one backend. The model and runtime
+  defaults can be overridden with `SMARTRODENT_OLLAMA_MODEL`,
+  `SMARTRODENT_VLLM_MODEL`, `SMARTRODENT_VLLM_GPU_MEMORY_UTILIZATION`,
+  `SMARTRODENT_VLLM_MAX_MODEL_LEN`, and `SMARTRODENT_VLLM_MAX_NEW_TOKENS`.
+  Custom test images can be selected with
+  `SMARTRODENT_INTEGRATION_RODENT_IMAGE` and
+  `SMARTRODENT_INTEGRATION_EMPTY_IMAGE`.
+
+The test suite does not run the complete iNaturalist download pipeline. Use
+`dvc repro` explicitly when you want to execute that pipeline and write a
+dataset.

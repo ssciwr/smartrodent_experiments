@@ -51,7 +51,9 @@ def test_inaturalist_constructor(tmp_path):
     assert dataset.allowed_licenses == {"cc-by-nc"}
     assert dataset.config_path is None
     assert output_path.is_dir()
-    assert list(output_path.iterdir()) == []
+    assert list(output_path.iterdir()) == [
+        (dataset.output_path / "inaturalist_dataset.log").resolve()
+    ]
 
 
 def test_inaturalist_constructor_year_range(tmp_path):

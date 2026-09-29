@@ -12,9 +12,6 @@ on:
     # as well as upon manual triggers through the 'Actions' tab of the Github UI
     workflow_dispatch:
 
-env:
-    SMARTRODENT_SKIP_VLM_INTEGRATION: "1"
-
 jobs:
     build-and-test:
         name: Testing on ${{matrix.os}}

@@ -25,6 +25,7 @@ dev = ["pytest", "pytest-cov", "coverage", "pre-commit", "pytest-mock"]
 [tool.pytest]
 markers = [
     "network: test hits the live iNaturalist API (deselect with -m 'not network')",
+    "vlm_integration: test requires a real Ollama server or vLLM-capable GPU",
 ]
 
 [tool.coverage.run]
