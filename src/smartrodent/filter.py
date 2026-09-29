@@ -2,13 +2,14 @@ import base64
 import gc
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 
+import ollama
 import pandas as pd
 import yaml
 from tqdm.auto import tqdm
-import ollama
 
 from .base import Filterable
 from .utils import resolve_data_path
@@ -47,11 +48,12 @@ class VLMFilter(Filterable):
             image_suffixes: File suffixes (e.g. ``.jpg``) treated as images.
             species: Species names to include. If None, all species subfolders
                 under ``imgs_root`` are processed.
-            mode: How to place classified images into destination folders,
-                either ``"copy"`` or ``"move"``.
+            mode: How to place classified images into destination folders:
+                ``"copy"``, ``"move"``, or ``"symlink"``.
 
         Raises:
-            ValueError: If ``mode`` is not ``"copy"`` or ``"move"``.
+            ValueError: If ``mode`` is not ``"copy"``, ``"move"``, or
+                ``"symlink"``.
         """
         self.prompt = prompt
         self.system_prompt = system_prompt
@@ -69,8 +71,10 @@ class VLMFilter(Filterable):
             self.data_func = shutil.copy2
         elif mode == "move":
             self.data_func = shutil.move
+        elif mode == "symlink":
+            self.data_func = os.symlink
         else:
-            raise ValueError("Error, mode must be 'move' or 'copy'")
+            raise ValueError("Error, mode must be 'move', 'symlink' or 'copy'")
 
     def __enter__(self):
         """Return this filter for use in a context manager."""
@@ -186,9 +190,11 @@ class VLMFilter(Filterable):
         res_df.to_csv(out_path)
         return out_path
 
-    def copy_with_structure(self, src: Path, dst_root: Path) -> Path:
-        """Copy one image to dst_root while preserving its path below imgs_root.
-
+    def process_image(self, src: Path, dst_root: Path) -> Path:
+        """Process one image to dst_root while preserving its path below imgs_root, using the configured 'mode':
+        - mode="copy": copy the image, src and new image preserved
+        - mode="move": move the image, thereby removing the original at src, only keeping the new one
+        - mode="symlink": create a link that points to source which behaves like an actual file, but without moving actual data.
         Args:
             src: Path to the source image, located under ``self.imgs_root``.
             dst_root: Destination root directory to copy/move the image into.
@@ -196,6 +202,9 @@ class VLMFilter(Filterable):
         Returns:
             Path: The destination path the image was written to.
         """
+        if not src.exists():
+            raise FileNotFoundError(f"Source image does not exist: {src}")
+
         relative_path = src.relative_to(self.imgs_root)
         dst = dst_root / relative_path
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -391,7 +400,7 @@ class FilterOllama(VLMFilter):
                 res = self.classify(image_path)
                 res["species"] = image_path.relative_to(self.imgs_root).parts[0]
                 results.append(res)
-                self.copy_with_structure(image_path, dest_by_label[res["label"]])
+                self.process_image(image_path, dest_by_label[res["label"]])
         finally:
             self.close()
 
@@ -595,9 +604,7 @@ class FilterVLLM(VLMFilter):
                         res["species"] = image_path.relative_to(self.imgs_root).parts[0]
 
                         results.append(res)
-                        self.copy_with_structure(
-                            image_path, dest_by_label[res["label"]]
-                        )
+                        self.process_image(image_path, dest_by_label[res["label"]])
                     pbar.update(len(chunk))
         finally:
             self.close()
