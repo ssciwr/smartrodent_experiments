@@ -123,7 +123,9 @@ def test_parse_response_maps_unknown_labels_to_failure_and_honors_review_flag():
 
 
 def test_init_rejects_unknown_mode(tmp_path):
-    with pytest.raises(ValueError, match="mode must be 'move' or 'copy'"):
+    with pytest.raises(
+        ValueError, match="mode must be 'move', 'symlink' or 'copy'"
+    ):
         make_filter(tmp_path, mode="link")
 
 
@@ -147,33 +149,58 @@ def test_collect_image_paths_uses_all_species_when_none_requested(tmp_path):
     ]
 
 
-def test_copy_with_structure_preserves_relative_path_and_ignores_same_file(tmp_path):
+def test_process_image_preserves_relative_path_and_ignores_same_file(tmp_path):
     source = tmp_path / "imgs" / "Mouse" / "a.JPG"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"image-bytes")
     vlm_filter = make_filter(tmp_path)
 
-    copied = vlm_filter.copy_with_structure(source, tmp_path / "kept")
-    same_file = vlm_filter.copy_with_structure(source, tmp_path / "imgs")
+    copied = vlm_filter.process_image(source, tmp_path / "kept")
+    same_file = vlm_filter.process_image(source, tmp_path / "imgs")
 
     assert copied == tmp_path / "kept" / "Mouse" / "a.JPG"
     assert copied.read_bytes() == b"image-bytes"
     assert same_file == source
 
 
-def test_copy_with_structure_moves_when_configured(tmp_path):
+def test_process_image_moves_when_configured(tmp_path):
     source = tmp_path / "imgs" / "Mouse" / "a.JPG"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"image-bytes")
     vlm_filter = make_filter(tmp_path, mode="move")
 
-    moved = vlm_filter.copy_with_structure(source, tmp_path / "kept")
+    moved = vlm_filter.process_image(source, tmp_path / "kept")
 
     assert moved.read_bytes() == b"image-bytes"
     assert not source.exists()
 
 
-def test_copy_with_structure_reraises_unexpected_copy_errors(tmp_path):
+def test_process_image_creates_symlink_to_source(tmp_path):
+    source = tmp_path / "imgs" / "Mouse" / "a.JPG"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"image-bytes")
+    vlm_filter = make_filter(tmp_path, mode="symlink")
+
+    linked = vlm_filter.process_image(source, tmp_path / "kept")
+
+    assert source.exists()
+    assert linked.is_symlink()
+    assert linked.resolve() == source.resolve()
+
+
+def test_process_image_symlink_raises_when_source_does_not_exist(tmp_path):
+    source = tmp_path / "imgs" / "Mouse" / "missing.JPG"
+    vlm_filter = make_filter(tmp_path, mode="symlink")
+
+    with pytest.raises(FileNotFoundError, match="Source image does not exist"):
+        vlm_filter.process_image(source, tmp_path / "kept")
+
+    linked = tmp_path / "kept" / "Mouse" / "missing.JPG"
+    assert not linked.exists()
+    assert not linked.is_symlink()
+
+
+def test_process_image_reraises_unexpected_copy_errors(tmp_path):
     source = tmp_path / "imgs" / "Mouse" / "a.JPG"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"image-bytes")
@@ -185,7 +212,7 @@ def test_copy_with_structure_reraises_unexpected_copy_errors(tmp_path):
     vlm_filter.data_func = broken_copy
 
     with pytest.raises(OSError, match="disk full"):
-        vlm_filter.copy_with_structure(source, tmp_path / "kept")
+        vlm_filter.process_image(source, tmp_path / "kept")
 
 
 def test_dest_by_label_maps_every_result_bucket(tmp_path):
