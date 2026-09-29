@@ -123,10 +123,8 @@ def test_parse_response_maps_unknown_labels_to_failure_and_honors_review_flag():
 
 
 def test_init_rejects_unknown_mode(tmp_path):
-    with pytest.raises(
-        ValueError, match="mode must be 'move', 'symlink' or 'copy'"
-    ):
-        make_filter(tmp_path, mode="link")
+    with pytest.raises(ValueError, match="mode must be 'move', 'symlink' or 'copy'"):
+        make_filter(tmp_path, mode="bad")
 
 
 def test_collect_image_paths_filters_species_case_insensitively_and_suffixes(tmp_path):

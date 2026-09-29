@@ -2,13 +2,14 @@ import base64
 import gc
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 
+import ollama
 import pandas as pd
 import yaml
 from tqdm.auto import tqdm
-import ollama
 
 from .base import Filterable
 from .utils import resolve_data_path
@@ -70,6 +71,8 @@ class VLMFilter(Filterable):
             self.data_func = shutil.copy2
         elif mode == "move":
             self.data_func = shutil.move
+        elif mode == "symlink":
+            self.data_func = os.symlink
         else:
             raise ValueError("Error, mode must be 'move', 'symlink' or 'copy'")
 
