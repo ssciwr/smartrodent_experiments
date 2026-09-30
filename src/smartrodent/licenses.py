@@ -274,3 +274,71 @@ class CreativeCommonsLicenseManager(LicenseManagerBase):
             canonical_license += "-sa"
 
         return canonical_license
+
+
+# This mutable module-level registry is an intentional exception to the
+# project's usual rule: runtime registration is the extension mechanism for
+# adding license families without modifying manager creation logic.
+LICENSE_MANAGER_TYPES: dict[str, type[LicenseManagerBase]] = {
+    "creative-commons": CreativeCommonsLicenseManager,
+}
+
+
+def _validate_license_family(family: object) -> None:
+    """Validate a registry family identifier."""
+    if not isinstance(family, str):
+        raise TypeError("license family must be a string")
+    elif not family.strip():
+        raise ValueError("license family must not be empty")
+    else:
+        return
+
+
+def register_license_manager(
+    family: str, manager_type: type[LicenseManagerBase]
+) -> None:
+    """Register a manager class for a new license family.
+
+    Args:
+        family: Exact family identifier used by configuration.
+        manager_type: Concrete manager class associated with ``family``.
+
+    Raises:
+        TypeError: If the family is not a string or the manager is not a proper
+            subclass of :class:`LicenseManagerBase`.
+        ValueError: If the family is empty or already registered.
+    """
+    _validate_license_family(family)
+    if not isinstance(manager_type, type):
+        raise TypeError("manager_type must be a LicenseManagerBase subclass")
+    elif manager_type is LicenseManagerBase:
+        raise TypeError("manager_type must be a LicenseManagerBase subclass")
+    elif not issubclass(manager_type, LicenseManagerBase):
+        raise TypeError("manager_type must be a LicenseManagerBase subclass")
+    elif family in LICENSE_MANAGER_TYPES:
+        raise ValueError(f"license family is already registered: {family}")
+    else:
+        LICENSE_MANAGER_TYPES[family] = manager_type
+
+
+def create_license_manager(
+    family: str, allowed_licenses: Sequence[str]
+) -> LicenseManagerBase:
+    """Instantiate the manager registered for a license family.
+
+    Args:
+        family: Exact family identifier used by configuration.
+        allowed_licenses: Canonical identifiers accepted by the manager.
+
+    Returns:
+        The configured manager for ``family``.
+
+    Raises:
+        TypeError: If ``family`` is not a string.
+        ValueError: If ``family`` is empty or is not registered.
+    """
+    _validate_license_family(family)
+    manager_type = LICENSE_MANAGER_TYPES.get(family)
+    if manager_type is None:
+        raise ValueError(f"Unknown license family: {family}")
+    return manager_type(allowed_licenses)
