@@ -1,6 +1,14 @@
 """SmartRodent model experiment package."""
 
-from .utils import resolve_data_path
 from .filter import FilterOllama, FilterVLLM, VLMFilter
+from .training import YoloClassificationTrainer, YoloDetectionTrainer
+from .utils import resolve_data_path
 
-__all__ = ["resolve_data_path", "VLMFilter", "FilterOllama", "FilterVLLM"]
+__all__ = [
+    "FilterOllama",
+    "FilterVLLM",
+    "VLMFilter",
+    "YoloClassificationTrainer",
+    "YoloDetectionTrainer",
+    "resolve_data_path",
+]
