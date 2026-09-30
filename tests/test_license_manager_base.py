@@ -30,6 +30,16 @@ def test_allowed_licenses_reject_empty_sequence():
         ExampleLicenseManager([])
 
 
+def test_allowed_licenses_reject_non_string_entry():
+    with pytest.raises(TypeError, match="non-empty strings"):
+        ExampleLicenseManager(["example-one", 2])
+
+
+def test_allowed_licenses_reject_empty_string_entry():
+    with pytest.raises(ValueError, match="non-empty strings"):
+        ExampleLicenseManager(["example-one", ""])
+
+
 def test_normalize_url_accepts_http_url():
     normalized = ExampleLicenseManager.normalize_url(
         "http://example.com/licenses/example/1.0/"
@@ -70,12 +80,32 @@ def test_normalize_url_removes_fragment():
     assert normalized == "https://example.com/licenses/example/1.0"
 
 
+def test_normalize_url_strips_surrounding_whitespace():
+    normalized = ExampleLicenseManager.normalize_url(
+        "  https://example.com/licenses/example/1.0/  "
+    )
+
+    assert normalized == "https://example.com/licenses/example/1.0"
+
+
 def test_normalize_url_rejects_non_http_scheme():
     assert ExampleLicenseManager.normalize_url("ftp://example.com/license") is None
 
 
+def test_normalize_url_rejects_non_string_value():
+    assert ExampleLicenseManager.normalize_url(42) is None
+
+
+def test_normalize_url_rejects_url_without_hostname():
+    assert ExampleLicenseManager.normalize_url("https:///licenses/example") is None
+
+
 def test_normalize_url_rejects_malformed_url():
     assert ExampleLicenseManager.normalize_url("not a URL") is None
+
+
+def test_normalize_url_handles_parser_error():
+    assert ExampleLicenseManager.normalize_url("https://[invalid") is None
 
 
 def test_normalize_allowed_license_returns_allowed_value():
