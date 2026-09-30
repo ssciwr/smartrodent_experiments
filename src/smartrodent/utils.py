@@ -1,4 +1,20 @@
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
+
+
+def assign_at_path(cfg: dict, path: Sequence[Any], value: Any) -> None:
+    """Assign a value within a nested mapping or sequence.
+
+    Args:
+        cfg: Nested configuration to modify.
+        path: Keys and indices leading to the target value.
+        value: Value to assign at the target.
+    """
+    target = cfg
+    for component in path[:-1]:
+        target = target[component]
+    target[path[-1]] = value
 
 
 def resolve_data_path(path: str | Path) -> Path:
