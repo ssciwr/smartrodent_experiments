@@ -25,6 +25,11 @@ def test_allowed_licenses_reject_string_input():
         ExampleLicenseManager("example-one")
 
 
+def test_allowed_licenses_reject_non_sequence_collection():
+    with pytest.raises(TypeError, match="sequence"):
+        ExampleLicenseManager({"example-one"})
+
+
 def test_allowed_licenses_reject_empty_sequence():
     with pytest.raises(ValueError, match="at least one"):
         ExampleLicenseManager([])
@@ -88,12 +93,32 @@ def test_normalize_url_strips_surrounding_whitespace():
     assert normalized == "https://example.com/licenses/example/1.0"
 
 
+def test_normalize_url_preserves_port():
+    normalized = ExampleLicenseManager.normalize_url(
+        "https://example.com:8443/licenses/example/1.0/"
+    )
+
+    assert normalized == "https://example.com:8443/licenses/example/1.0"
+
+
+def test_normalize_url_formats_ipv6_hostname():
+    normalized = ExampleLicenseManager.normalize_url(
+        "https://[2001:db8::1]/licenses/example/1.0/"
+    )
+
+    assert normalized == "https://[2001:db8::1]/licenses/example/1.0"
+
+
 def test_normalize_url_rejects_non_http_scheme():
     assert ExampleLicenseManager.normalize_url("ftp://example.com/license") is None
 
 
 def test_normalize_url_rejects_non_string_value():
     assert ExampleLicenseManager.normalize_url(42) is None
+
+
+def test_normalize_url_rejects_empty_string():
+    assert ExampleLicenseManager.normalize_url("  ") is None
 
 
 def test_normalize_url_rejects_url_without_hostname():
