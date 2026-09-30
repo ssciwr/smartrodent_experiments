@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from hypothesis import given, strategies as st
 import pytest
 
-from smartrodent.base import YoloDatasetCreatorBase
+from smartrodent.dataset_creation_base import YoloDatasetCreatorBase
 
 
 class ConcreteDatasetCreator(YoloDatasetCreatorBase):

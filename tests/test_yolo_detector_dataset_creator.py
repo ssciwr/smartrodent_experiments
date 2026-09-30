@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from smartrodent.dataprocessing import YoloDetectorDatasetCreatorFromSpeciesnet
+from smartrodent.dataset_creation import YoloDetectorDatasetCreatorFromSpeciesnet
 
 
 def write_predictions(root: Path, species: str, predictions: list[dict]) -> None:

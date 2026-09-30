@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from smartrodent.dataprocessing import YoloClassifierDatasetCreatorFromSpeciesnet
+from smartrodent.dataset_creation import YoloClassifierDatasetCreatorFromSpeciesnet
 
 
 def write_predictions(root: Path, species: str, predictions: list[dict]) -> None:
