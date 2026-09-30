@@ -1,0 +1,219 @@
+output_path: "../datasets/full_dataset/yolo_classifier_training_dataset_reduced"
+input_data_path: "../datasets/full_dataset/yolo_classifier_training_dataset"
+images_path: "crops"
+image_formats: [".jpg", ".jpeg"]
+ignore_unmapped_species: true
+specieslist:
+    - "Rattus norvegicus"
+    - "Rattus rattus"
+    - "Mus musculus"
+    - "Apodemus agrarius"
+    - "Apodemus flavicollis"
+    - "Apodemus sylvaticus"
+    - "Arvicola amphibius"
+    - "Microtus arvalis"
+    - "Clethrionomys glareolus"
+    # - "Myodes glareolus"
+    - "Microtus agrestis"
+    - "Crocidura leucodon"
+    - "Sorex araneus"
+    - "Sorex minutus"
+    - "Sorex coronatus"
+    - "Suncus murinus"
+    - "Bandicota indica"
+    - "Bandicota bengalensis"
+    - "Mus booduga"
+    - "Vandeleuria oleraceus"
+    - "Vulpes vulpes"  # red fox
+    - "Buteo buteo"  # common buzzard
+    - "Meles meles"  # european badger
+    - "Ciconia ciconia" # white stork
+    - "Ardea cinerea" # grey heron
+    - "Vipera berus" # common european adder
+    - "Coronella austriaca"  # smooth snake
+    - "Natrix natrix" # grass snake
+    - "Natrix helvetica"  # barred grass snake
+    - "Ptyas mucosa"
+    - "Bungarus caeruleus"
+    - "Naja naja"
+    - "Daboia russelii"
+    - "Coelognathus helena"
+    - "Spilornis cheela"
+    - "Varanus bengalensis"
+    - "Centropus sinensis"
+    - "Pavo cristatus"
+    - "Canis familiaris"
+    - "Felis catus"
+    - "car"
+
+detection_categories:
+    "Rattus norvegicus": ["animal",]
+    "Rattus rattus": ["animal",]
+    "Mus musculus": ["animal",]
+    "Apodemus agrarius": ["animal",]
+    "Apodemus flavicollis": ["animal",]
+    "Apodemus sylvaticus": ["animal",]
+    "Arvicola amphibius": ["animal",]
+    "Microtus arvalis": ["animal",]
+    "Clethrionomys glareolus": ["animal",]
+    # "Myodes glareolus": ["animal",]
+    "Microtus agrestis": ["animal",]
+    "Crocidura leucodon": ["animal",]
+    "Sorex araneus": ["animal",]
+    "Sorex minutus": ["animal",]
+    "Sorex coronatus": ["animal",]
+    # rodents in sri lanka
+    "Suncus murinus": ["animal",]
+    "Bandicota indica": ["animal",]
+    "Bandicota bengalensis": ["animal",]
+    "Mus booduga": ["animal",]
+    "Vandeleuria oleraceus": ["animal",]
+    # predators of snakes and rodents (birds, mammals )
+    "Vulpes vulpes": ["animal",]
+    "Buteo buteo": ["animal",]
+    "Meles meles": ["animal",]
+    "Ciconia ciconia": ["animal",]
+    "Ardea cinerea": ["animal",]
+    # snakes
+    "Vipera berus": ["animal",]
+    "Coronella austriaca": ["animal",]
+    "Natrix natrix": ["animal",]
+    "Natrix helvetica": ["animal",]
+    # snakes in sri lanka
+    "Ptyas mucosa": ["animal",]
+    "Bungarus caeruleus": ["animal",]
+    "Naja naja": ["animal",]
+    "Daboia russelii": ["animal",]
+    "Coelognathus helena": ["animal",]
+    # predators from sri lanka
+    "Spilornis cheela": ["animal",]
+    "Varanus bengalensis": ["animal",]
+    "Centropus sinensis": ["animal",]
+    "Pavo cristatus": ["animal",]
+    "Canis familiaris": ["animal",]
+    "Felis catus": ["animal",]
+    "car": ["vehicle"]
+
+
+mappings:
+  biological_mapping:
+    "Rattus norvegicus": "Rattus"
+    "Rattus rattus": "Rattus"
+    "Mus musculus": "Mus"
+    "Apodemus agrarius": "Apodemus"
+    "Apodemus flavicollis": "Apodemus"
+    "Apodemus sylvaticus": "Apodemus"
+    "Arvicola amphibius": "Arvicola"
+    "Microtus arvalis": "Microtus"
+    "Clethrionomys glareolus": "Clethrionomys"
+    # "Myodes glareolus": "Myodes"
+    "Microtus agrestis": "Microtus"
+    "Crocidura leucodon": "Crocidura"
+    "Sorex araneus": "Sorex"
+    "Sorex minutus": "Sorex"
+    "Sorex coronatus": "Sorex"
+    # rodents in sri lanka
+    "Suncus murinus": "Suncus"
+    "Bandicota indica": "Bandicota"
+    "Bandicota bengalensis": "Bandicota"
+    "Mus booduga": "Mus"
+    "Vandeleuria oleraceus": "Vandeleuria"
+    # predators of snakes and rodents (birds, mammals )
+    "Vulpes vulpes": "Vulpes"  # red fox
+    "Buteo buteo": "Buteo buteo"  # common buzzard
+    "Meles meles": "Meles"  # european badger
+    "Ciconia ciconia": "Ciconia"  # white stork
+    "Ardea cinerea": "Ardea"  # grey heron
+    # snakes
+    "Vipera berus": "Vipera"  # common european adder
+    "Coronella austriaca": "Coronella"  # smooth snake
+    "Natrix natrix": "Natrix"  # grass snake
+    "Natrix helvetica": "Natrix"  # barred grass snake
+    # snakes in sri lanka
+    "Ptyas mucosa": "Ptyas"
+    "Bungarus caeruleus": "Bungarus"
+    "Naja naja": "Naja"
+    "Daboia russelii": "Daboia"
+    "Coelognathus helena": "Coelognathus"
+    # predators from sri lanka
+    "Spilornis cheela": "Spilornis"
+    "Varanus bengalensis": "Varanus"
+    "Centropus sinensis": "Centropus"
+    "Pavo cristatus": "Pavo"
+    "Canis familiaris": "Canis"
+    "Felis catus": "Felis"
+    "car": "Car"
+
+  commonname_mapping:
+    "Rattus norvegicus": "rat"
+    "Rattus rattus": "rat"
+    "Mus musculus": "mouse"
+    "Apodemus agrarius": "mouse"
+    "Apodemus flavicollis": "mouse"
+    "Apodemus sylvaticus": "mouse"
+    "Arvicola amphibius": "vole"
+    "Microtus arvalis": "vole"
+    "Clethrionomys glareolus": "vole"
+    # "Myodes glareolus": "vole"
+    "Microtus agrestis": "vole"
+    "Crocidura leucodon": "shrew"
+    "Sorex araneus": "shrew"
+    "Sorex minutus": "shrew"
+    "Sorex coronatus": "shrew"
+    # rodents in sri lanka
+    "Suncus murinus": "shrew"
+    "Bandicota indica": "rat"
+    "Bandicota bengalensis": "rat"
+    "Mus booduga": "mouse"
+    "Vandeleuria oleraceus": "mouse"
+    # predators of snakes and rodents (birds, mammals )
+    "Vulpes vulpes": "fox"  # red fox
+    "Buteo buteo": "buzzard"  # common buzzard
+    "Meles meles": "badger"  # european badger
+    "Ciconia ciconia": "stork"  # white stork
+    "Ardea cinerea": "heron"  # grey heron
+    # snakes
+    "Vipera berus": "snake"  # common european adder
+    "Coronella austriaca": "snake"  # smooth snake
+    "Natrix natrix": "snake"  # grass snake
+    "Natrix helvetica": "snake"  # barred grass snake
+    # snakes in sri lanka
+    "Ptyas mucosa": "snake"
+    "Bungarus caeruleus": "snake"
+    "Naja naja": "snake"
+    "Daboia russelii": "snake"
+    "Coelognathus helena": "snake"
+    # predators from sri lanka
+    "Spilornis cheela": "eagle"
+    "Varanus bengalensis": "monitor lizard"
+    "Centropus sinensis": "coucal"
+    "Pavo cristatus": "peafowl"
+    "Canis familiaris": "Dog"
+    "Felis catus": "Cat"
+    "car": "Car"
+
+  reduced_rodenspecies_mapping:
+    "Rattus norvegicus": "Rattus norvegicus"
+    "Rattus rattus": "Rattus rattus"
+    "Mus musculus": "Mus musculus"
+    # predators of snakes and rodents (birds, mammals )
+    "Vulpes vulpes": "Vulpes vulpes"  # red fox
+    "Ciconia ciconia": "Ciconia ciconia"  # white stork
+    "Ardea cinerea": "Ardea cinerea"  # grey heron
+    # snakes
+    "Vipera berus": "Vipera berus"  # common european adder
+    "Natrix natrix": "Natrix natrix"  # grass snake
+    "Natrix helvetica": "Natrix helvetica"  # barred grass snake
+    # snakes in sri lanka
+    "Ptyas mucosa": "Ptyas mucosa"
+    "Bungarus caeruleus": "Bungarus caeruleus"
+    "Naja naja": "Naja naja"
+    "Daboia russelii": "Daboia russelii"
+    "Coelognathus helena": "Coelognathus helena"
+    # predators from sri lanka
+    "Varanus bengalensis": "Varanus bengalensis"
+    "Centropus sinensis": "Centropus sinensis"
+    "Pavo cristatus": "Pavo cristatus"
+    "Canis familiaris": "Canis familiaris"
+    "Felis catus": "Felis catus"
+    "car": "Car"
