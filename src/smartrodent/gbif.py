@@ -3,6 +3,7 @@
 from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
+import hashlib
 import logging
 import shutil
 from pathlib import Path
@@ -15,7 +16,7 @@ from pygbif import occurrences as occ
 from pygbif import registry
 
 from tqdm.auto import tqdm
-import os
+
 from .base import DatasetLoader
 from .licenses import LicenseManagerBase, create_license_manager
 
@@ -394,10 +395,254 @@ class GbifDataset(DatasetLoader):
 
     def _download_species_images(
         self, records_df: pd.DataFrame, images_path: Path
-    ) -> None:
-        pass
+    ) -> pd.DataFrame:
+        """Download every image row and append its outcome to a report.
+
+        The returned frame retains the records frame's columns, order, and
+        index. Because GBIF records are already image-level, repeated
+        occurrence identifiers remain separate rows in the report.
+
+        Args:
+            records_df: Image-level GBIF records to download.
+            images_path: Directory in which downloaded images are stored.
+
+        Returns:
+            A copy of ``records_df`` with a boolean ``success`` column.
+        """
+        images_path.mkdir(parents=True, exist_ok=True)
+        successes: list[bool] = []
+        session = requests.Session()
+        try:
+            for _, record in tqdm(records_df.iterrows(), total=len(records_df)):
+                successes.append(self._download_image(record, images_path, session))
+        finally:
+            session.close()
+
+        report = records_df.copy()
+        report["success"] = pd.Series(
+            successes,
+            index=report.index,
+            dtype=bool,
+        )
+        return report
+
+    @staticmethod
+    def _image_suffix(content_start: bytes) -> str | None:
+        """Return a supported file suffix based on an image signature."""
+        if content_start.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        elif content_start.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        else:
+            return None
+
+    def _existing_image_is_valid(
+        self,
+        image_path: Path,
+        expected_suffix: str,
+    ) -> bool:
+        """Check whether an existing path contains its expected image type."""
+        if not image_path.is_file():
+            return False
+        else:
+            try:
+                with image_path.open("rb") as image_file:
+                    content_start = image_file.read(8)
+            except OSError:
+                return False
+            else:
+                detected_suffix = self._image_suffix(content_start)
+                if detected_suffix == expected_suffix:
+                    return True
+                else:
+                    return False
+
+    @staticmethod
+    def _normalize_occurrence_id(raw_occurrence_id: Any) -> int | None:
+        """Normalize a scalar GBIF occurrence identifier to an integer."""
+        if pd.isna(raw_occurrence_id) or isinstance(raw_occurrence_id, bool):
+            return None
+        else:
+            try:
+                occurrence_id = int(raw_occurrence_id)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            else:
+                is_fractional_float = (
+                    isinstance(raw_occurrence_id, float)
+                    and not raw_occurrence_id.is_integer()
+                )
+                if is_fractional_float:
+                    return None
+                else:
+                    return occurrence_id
+
+    @staticmethod
+    def _response_size_is_allowed(
+        response: requests.Response,
+        maximum_size: int,
+    ) -> bool:
+        """Validate an optional HTTP content length against the byte limit."""
+        content_length = response.headers.get("Content-Length")
+        if content_length is None:
+            return True
+        else:
+            try:
+                declared_size = int(content_length)
+            except (TypeError, ValueError):
+                return False
+            else:
+                if declared_size < 0:
+                    return False
+                elif declared_size > maximum_size:
+                    return False
+                else:
+                    return True
+
+    def _stream_image_response(
+        self,
+        response: requests.Response,
+        partial_path: Path,
+        maximum_size: int,
+    ) -> str | None:
+        """Stream a bounded response and return its signature-derived suffix."""
+        downloaded_size = 0
+        with partial_path.open("wb") as partial_file:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                chunk_size = len(chunk)
+                next_size = downloaded_size + chunk_size
+                if chunk_size == 0:
+                    self.logger.debug(
+                        "Ignoring an empty GBIF image response chunk for %s",
+                        partial_path,
+                    )
+                elif next_size > maximum_size:
+                    return None
+                else:
+                    partial_file.write(chunk)
+                    downloaded_size = next_size
+
+        with partial_path.open("rb") as partial_file:
+            content_start = partial_file.read(8)
+        suffix = self._image_suffix(content_start)
+        if suffix is None:
+            return None
+        else:
+            return suffix
+
+    def _download_cached_image(
+        self,
+        cache_url: str,
+        image_url: str,
+        filename_stem: str,
+        images_path: Path,
+        session: requests.Session,
+    ) -> bool:
+        """Request, validate, and atomically store one GBIF cache image."""
+        partial_path = images_path / f"{filename_stem}.part"
+        response: requests.Response | None = None
+        maximum_size = 20 * 1024 * 1024
+
+        try:
+            response = session.get(
+                cache_url,
+                stream=True,
+                timeout=30,
+                allow_redirects=False,
+            )
+            if response.status_code != requests.codes.ok:
+                return False
+            elif not self._response_size_is_allowed(response, maximum_size):
+                return False
+            else:
+                suffix = self._stream_image_response(
+                    response,
+                    partial_path,
+                    maximum_size,
+                )
+                if suffix is None:
+                    return False
+                else:
+                    destination = images_path / f"{filename_stem}{suffix}"
+                    partial_path.replace(destination)
+                    return True
+        except requests.RequestException as exc:
+            self.logger.warning("GBIF image request failed for %s: %s", image_url, exc)
+            return False
+        except OSError as exc:
+            self.logger.warning("Could not save GBIF image %s: %s", image_url, exc)
+            return False
+        finally:
+            if response is not None:
+                response.close()
+            if partial_path.exists():
+                try:
+                    partial_path.unlink()
+                except OSError as exc:
+                    self.logger.warning(
+                        "Could not remove partial GBIF image %s: %s",
+                        partial_path,
+                        exc,
+                    )
+
+    def _download_image(
+        self,
+        record: pd.Series,
+        images_path: Path,
+        session: requests.Session,
+    ) -> bool:
+        """Download one image record through the GBIF occurrence cache.
+
+        The cache URL uses the occurrence key and the MD5 digest of the exact
+        publisher URL, as required by the GBIF image-cache API. Redirects are
+        disabled because a cache redirect could otherwise send the downloader
+        to an untrusted publisher-controlled destination.
+
+        Args:
+            record: One image-level row from the GBIF records frame.
+            images_path: Directory in which the image is stored.
+            session: Session shared by downloads for one species.
+
+        Returns:
+            True when a valid image already exists or is downloaded; otherwise
+            False.
+        """
+        occurrence_id = self._normalize_occurrence_id(record.get("source_group_id"))
+        image_url = record.get("image_url")
+        if occurrence_id is None:
+            return False
+        elif not isinstance(image_url, str) or not image_url.strip():
+            return False
+        else:
+            image_digest = hashlib.md5(
+                image_url.encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
+            filename_stem = f"{occurrence_id}_{image_digest}"
+            images_path.mkdir(parents=True, exist_ok=True)
+            jpeg_path = images_path / f"{filename_stem}.jpg"
+            png_path = images_path / f"{filename_stem}.png"
+            jpeg_is_valid = self._existing_image_is_valid(jpeg_path, ".jpg")
+            png_is_valid = self._existing_image_is_valid(png_path, ".png")
+
+            if jpeg_is_valid:
+                return True
+            elif png_is_valid:
+                return True
+            else:
+                cache_url = (
+                    "https://api.gbif.org/v1/image/cache/occurrence/"
+                    f"{occurrence_id}/media/{image_digest}"
+                )
+                return self._download_cached_image(
+                    cache_url,
+                    image_url,
+                    filename_stem,
+                    images_path,
+                    session,
+                )
 
     def download(self) -> None:
+        """Download image-level records and a per-image report for each species."""
 
         for sp in self.species:
             self.logger.info(f"species: {sp}")
@@ -411,5 +656,11 @@ class GbifDataset(DatasetLoader):
             records_df.to_csv(species_path / "records.csv", index=False)
 
             self.logger.info("Downloading images")
-            downloaded = self._download_species_images(records_df, images_path)
+            report = self._download_species_images(records_df, images_path)
+            report.to_csv(
+                species_path / "download_report.csv",
+                index=True,
+                index_label="index",
+            )
+            downloaded = int(report["success"].sum())
             self.logger.info("Downloaded %s images for %s", downloaded, sp)

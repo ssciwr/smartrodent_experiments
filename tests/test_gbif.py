@@ -725,6 +725,26 @@ def test_download_image_treats_an_existing_valid_image_as_success(tmp_path):
     session.get.assert_not_called()
 
 
+def test_download_image_replaces_an_existing_invalid_image(tmp_path):
+    dataset = make_dataset(tmp_path)
+    images_path = tmp_path / "images"
+    images_path.mkdir()
+    source_url = "https://example.test/image.jpg"
+    source_hash = hashlib.md5(source_url.encode()).hexdigest()
+    existing_image = images_path / f"123_{source_hash}.jpg"
+    existing_image.write_bytes(b"not an image")
+    session = Mock()
+    session.get.return_value = make_image_response()
+
+    success = dataset._download_image(
+        make_download_record(image_url=source_url), images_path, session
+    )
+
+    assert success is True
+    assert existing_image.read_bytes() == valid_jpeg_bytes()
+    session.get.assert_called_once()
+
+
 def test_download_image_rejects_redirect_without_following_it(tmp_path):
     dataset = make_dataset(tmp_path)
     response = make_image_response(status_code=302)
@@ -888,19 +908,8 @@ def test_download_species_images_reports_every_record_in_order(
 
     report = dataset._download_species_images(records, tmp_path / "images")
 
-    expected = pd.DataFrame(
-        {
-            "source_group_id": [11, 11, 12],
-            "index": [7, 3, 9],
-            "scientific_name": ["Species one", "Species one", "Species two"],
-            "image_url": [
-                "https://example.test/11-first.jpg",
-                "https://example.test/11-second.jpg",
-                "https://example.test/12.jpg",
-            ],
-            "success": [True, False, True],
-        }
-    )
+    expected = records.copy()
+    expected["success"] = [True, False, True]
     pd.testing.assert_frame_equal(report, expected)
     session_factory.assert_called_once_with()
     assert [call.args[2] for call in download_image.call_args_list] == [
@@ -917,13 +926,7 @@ def test_download_species_images_returns_stable_empty_report(tmp_path):
     report = dataset._download_species_images(records, tmp_path / "images")
 
     assert report.empty
-    assert list(report.columns) == [
-        "source_group_id",
-        "index",
-        "scientific_name",
-        "image_url",
-        "success",
-    ]
+    assert list(report.columns) == [*dataset._record_columns(), "success"]
 
 
 @settings(
@@ -968,12 +971,7 @@ def test_download_species_images_has_one_result_for_every_input_record(
     report = dataset._download_species_images(records, tmp_path / "images")
 
     assert len(report) == len(records)
-    assert report["index"].tolist() == records.index.tolist()
-    assert report["source_group_id"].tolist() == group_ids
-    assert report["scientific_name"].tolist() == records[
-        "scientific_name"
-    ].tolist()
-    assert report["image_url"].tolist() == records["image_url"].tolist()
+    pd.testing.assert_frame_equal(report.drop(columns="success"), records)
     assert report["success"].tolist() == outcomes
 
 
@@ -987,18 +985,8 @@ def test_download_writes_records_and_download_report_for_each_species(
             make_download_record(123, "https://example.test/second.jpg"),
         ]
     )
-    report = pd.DataFrame(
-        {
-            "source_group_id": [123, 123],
-            "index": [0, 1],
-            "scientific_name": ["Mus musculus", "Mus musculus"],
-            "image_url": [
-                "https://example.test/first.jpg",
-                "https://example.test/second.jpg",
-            ],
-            "success": [True, False],
-        }
-    )
+    report = records.copy()
+    report["success"] = [True, False]
     monkeypatch.setattr(dataset, "_get_species_records", Mock(return_value=records))
     monkeypatch.setattr(
         dataset, "_download_species_images", Mock(return_value=report)
@@ -1012,7 +1000,8 @@ def test_download_writes_records_and_download_report_for_each_species(
         pd.read_csv(species_path / "records.csv"), records
     )
     pd.testing.assert_frame_equal(
-        pd.read_csv(species_path / "download_report.csv"), report
+        pd.read_csv(species_path / "download_report.csv"),
+        report.reset_index(names="index"),
     )
     assert (species_path / "imgs").is_dir()
     dataset.logger.info.assert_any_call(
