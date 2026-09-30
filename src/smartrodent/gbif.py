@@ -233,7 +233,7 @@ class GbifDataset(DatasetLoader):
             "dataset_doi",
         )
 
-    def _get_all_records(self, **params) -> list[dict[str, Any]]:
+    def _get_all_records_for_params(self, **params) -> list[dict[str, Any]]:
         """Fetch occurrences and project their media into a fixed image schema.
 
         Each returned dictionary represents one image. Occurrence metadata is
@@ -335,7 +335,7 @@ class GbifDataset(DatasetLoader):
         records: list[dict[str, Any]] = []
         for year in self.years:
             self.logger.info("Fetching %s observations from %s", species, year)
-            records_for_year = self._get_all_records(
+            records_for_year = self._get_all_records_for_params(
                 scientificName=species,
                 mediatype=self.media_type,
                 year=year,
