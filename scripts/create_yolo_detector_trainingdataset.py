@@ -6,7 +6,7 @@ from typing import Any, Sequence
 
 import yaml
 
-from smartrodent.dataprocessing import YoloDetectorDatasetCreatorFromSpeciesnet
+from smartrodent.dataset_creation import YoloDetectorDatasetCreatorFromSpeciesnet
 
 
 DEFAULT_CONFIG = (
