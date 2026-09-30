@@ -1,12 +1,11 @@
 stages:
-  download_inaturalist:
-    cmd: uv run python scripts/download_inaturalist_data.py configs/data_config_full.yaml
+  download_gbif:
+    cmd: uv run python scripts/download_gbif_data.py configs/data_config_full.yaml
     deps:
-      - scripts/download_inaturalist_data.py
-      - src/smartrodent/inaturalist.py
+      - scripts/download_gbif_data.py
     params:
       - configs/data_config_full.yaml:
-          - data.inaturalist
+          - data.gbif
     outs:
       - datasets/full_dataset/raw
 

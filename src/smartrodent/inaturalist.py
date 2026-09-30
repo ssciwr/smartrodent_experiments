@@ -1,10 +1,10 @@
 """Download licensed iNaturalist observations into a species-organized dataset."""
 
 from __future__ import annotations
-from collections.abc import Sequence
 
 import logging
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -259,15 +259,15 @@ class InaturalistDataset(DatasetLoader):
             return records_df
 
         # Random sampling prevents the API's ordering from biasing a capped dataset.
-        records = records_df.sample(frac=1, random_state=self.seed).reset_index(
-            drop=True
-        )
+        records_df: pd.DataFrame = records_df.sample(
+            frac=1, random_state=self.seed
+        ).reset_index(drop=True)
 
         # cap data if bigger than limit
-        if len(records) > self.max_img_num:
-            records = records.head(self.max_img_num)
+        if len(records_df) > self.max_img_num:
+            records_df: pd.DataFrame = records_df.head(self.max_img_num)
 
-        return records
+        return records_df
 
     def _download_photo(
         self, photo: dict[str, Any], images_path: Path, observation_id: int, index: int
@@ -298,11 +298,14 @@ class InaturalistDataset(DatasetLoader):
         if not photo_url:
             return False
 
-        response = requests.get(photo_url.replace("square", "large"), timeout=30)
-        response.raise_for_status()
         image_path = images_path / f"{observation_id}_{index}.jpg"
-        image_path.write_bytes(response.content)
-        return True
+        if image_path.exists():
+            return False
+        else:
+            response = requests.get(photo_url.replace("square", "large"), timeout=30)
+            response.raise_for_status()
+            image_path.write_bytes(response.content)
+            return True
 
     def _download_species_images(
         self, records_df: pd.DataFrame, images_path: Path

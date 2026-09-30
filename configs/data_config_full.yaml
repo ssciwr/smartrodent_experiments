@@ -4,26 +4,26 @@ data:
       source_folder: ./datasets/BioTrove/BioTrove
       destination_folder: ./datasets/biotrove-central-europe-large/biotrove-central-europe-large-filtered
       categories: &categories # rodents in europe
-        - Rattus norvegicus
-        - Rattus rattus
-        - Mus musculus
-        - Apodemus agrarius
-        - Apodemus flavicollis
-        - Apodemus sylvaticus
-        - Arvicola amphibius
-        - Microtus arvalis
-        - Clethrionomys glareolus,
-        - Microtus agrestis
-        - Crocidura leucodon
-        - Sorex araneus
-        - Sorex minutus
-        - Sorex coronatus
+        - Rattus norvegicus # brown rat
+        - Rattus rattus # black rat
+        - Mus musculus # house mouse
+        - Apodemus agrarius # striped field mouse
+        - Apodemus flavicollis # yellow-necked field mouse
+        - Apodemus sylvaticus # wood mouse
+        - Arvicola amphibius #
+        - Microtus arvalis #
+        - Clethrionomys glareolus #
+        - Microtus agrestis #
+        - Crocidura leucodon #
+        - Sorex araneus #
+        - Sorex minutus #
+        - Sorex coronatus #
         # rodents in sri lanka
-        - Suncus murinus
-        - Bandicota indica
-        - Bandicota bengalensis
-        - Mus booduga
-        - Vandeleuria oleraceus
+        - Suncus murinus #
+        - Bandicota indica # greater bandicot rat
+        - Bandicota bengalensis # lessert bandicot rat
+        - Mus booduga # little indian field mouse
+        - Vandeleuria oleraceus #
         # predators of snakes and rodents (birds, mammals )
         - Vulpes vulpes # red fox
         - Buteo buteo # common buzzard
@@ -36,16 +36,16 @@ data:
         - Natrix natrix # grass snake
         - Natrix helvetica # barred grass snake
         # snakes in sri lanka
-        - Ptyas mucosa
-        - Bungarus caeruleus
-        - Naja naja
-        - Daboia russelii
-        - Coelognathus helena
+        - Ptyas mucosa #
+        - Bungarus caeruleus #
+        - Naja naja #
+        - Daboia russelii #
+        - Coelognathus helena #
         # predators from sri lanka
         - Spilornis cheela
-        - Varanus bengalensis
-        - Centropus sinensis
-        - Pavo cristatus
+        - Varanus bengalensis #
+        - Centropus sinensis #
+        - Pavo cristatus # peacock
 
       category_type: scientificName
     filter_dir: ./datasets/biotrove-central-europe-large/central-europe_parquet
@@ -81,3 +81,25 @@ data:
     species: *categories
     seed: 42
     maxlen: 2000
+    allowed_licenses:
+      - cc0
+      - cc-by
+      - cc-by-sa
+      - cc-by-nc
+      - cc-by-nc-sa
+  gbif:
+    output_path: ./datasets/full_dataset/raw
+    years: []
+    first_year: 2000
+    last_year: 2026
+    species: *categories
+    seed: 42
+    maxlen: 2000
+    allowed_licenses:
+      creative-commons:
+        - cc0
+        - cc-by
+        - cc-by-sa
+        - cc-by-nc
+        - cc-by-nc-sa
+    media_type: StillImage
