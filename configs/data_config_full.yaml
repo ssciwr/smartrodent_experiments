@@ -87,3 +87,19 @@ data:
       - cc-by-sa
       - cc-by-nc
       - cc-by-nc-sa
+  gbif:
+    output_path: ./datasets/full_dataset/raw
+    years: []
+    first_year: 2000
+    last_year: 2026
+    quality_grade: research
+    species: *categories
+    seed: 42
+    maxlen: 2000
+    allowed_licenses:
+      - cc0
+      - cc-by
+      - cc-by-sa
+      - cc-by-nc
+      - cc-by-nc-sa
+    media_type: StillImage
