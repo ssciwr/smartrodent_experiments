@@ -1,7 +1,7 @@
 """Download licensed gbif observations into a species-organized dataset."""
 
 from __future__ import annotations
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import logging
 import shutil
@@ -17,9 +17,12 @@ from pygbif import registry
 from tqdm.auto import tqdm
 import os
 from .base import DatasetLoader
+from .licenses import LicenseManagerBase, create_license_manager
 
 
 class GbifDataset(DatasetLoader):
+    """Fetch and filter image-level GBIF records for configured species."""
+
     def __init__(
         self,
         output_path: str | Path,
@@ -29,34 +32,52 @@ class GbifDataset(DatasetLoader):
         last_year: int | None = None,
         seed: int = 42,
         max_img_num: int = 2000,
-        allowed_licenses: Sequence[str] = ("cc-by-nc",),
+        allowed_licenses: Mapping[str, Sequence[str]] | None = None,
         media_type: str = "StillImage",
         config_path: str | Path | None = None,
     ):
-        """_summary_
+        """Configure GBIF retrieval and image-license filtering.
 
         Args:
-            output_path (str | Path): _description_
-            species (Sequence[str]): _description_
-            years (Sequence[int] | None, optional): _description_. Defaults to None.
-            first_year (int | None, optional): _description_. Defaults to None.
-            last_year (int | None, optional): _description_. Defaults to None.
-            seed (int, optional): _description_. Defaults to 42.
-            max_img_num (int, optional): _description_. Defaults to 2000.
-            allowed_licenses (Sequence[str], optional): _description_. Defaults to ("cc-by-nc",).
-            media_type (str, optional): _description_. Defaults to "StillImage".
-            config_path (str | Path | None, optional): _description_. Defaults to None.
+            output_path: Root directory for downloaded data and metadata.
+            species: Scientific names to retrieve.
+            years: Explicit observation years.
+            first_year: First year of an inclusive range.
+            last_year: Last year of an inclusive range.
+            seed: Seed used when shuffling records.
+            max_img_num: Maximum number of image records retained per species.
+            allowed_licenses: Mapping from registered license families to their
+                allowed canonical license identifiers. Defaults to Creative
+                Commons Attribution-NonCommercial.
+            media_type: GBIF media type to retrieve.
+            config_path: Optional source configuration copied for provenance.
 
         Raises:
-            ValueError: _description_
-            ValueError: _description_
+            TypeError: If ``allowed_licenses`` is not a mapping or contains
+                invalid family or license values.
+            ValueError: If the license mapping is empty, a family or license is
+                unsupported, the year selection is invalid, ``max_img_num`` is
+                negative, or no species are configured.
         """
+        license_policy = (
+            {"creative-commons": ("cc-by-nc",)}
+            if allowed_licenses is None
+            else allowed_licenses
+        )
+        if not isinstance(license_policy, Mapping):
+            raise TypeError("allowed_licenses must be a mapping")
+        if not license_policy:
+            raise ValueError("allowed_licenses must contain at least one family")
+
+        self._license_managers: tuple[LicenseManagerBase, ...] = tuple(
+            create_license_manager(family, licenses)
+            for family, licenses in license_policy.items()
+        )
         self.output_path = Path(output_path).expanduser().resolve()
         self.species = list(species)
         self.years = self._resolve_years(years, first_year, last_year)
         self.seed = seed
         self.max_img_num = max_img_num
-        self.allowed_licenses = set(allowed_licenses)
         self.config_path = (
             Path(config_path).expanduser().resolve()
             if config_path is not None
@@ -142,7 +163,7 @@ class GbifDataset(DatasetLoader):
             last_year=config.get("last_year"),
             seed=config.get("seed", 42),
             max_img_num=config.get("maxlen", 2000),
-            allowed_licenses=config.get("allowed_licenses", ("cc-by-nc",)),
+            allowed_licenses=config.get("allowed_licenses"),
             media_type=config.get("media_type", "StillImage"),
             config_path=path,
         )
@@ -324,13 +345,17 @@ class GbifDataset(DatasetLoader):
         return image_records
 
     def _get_species_records(self, species: str) -> pd.DataFrame:
-        """_summary_
+        """Fetch allowed image records for one species.
+
+        Records from all configured years are retained only when at least one
+        configured license manager accepts their image license. The eligible
+        records are then deterministically shuffled and capped.
 
         Args:
-            species (str): _description_
+            species: Scientific name to retrieve.
 
         Returns:
-            pd.DataFrame: _description_
+            Image-level records with the stable GBIF schema.
         """
         records: list[dict[str, Any]] = []
         for year in self.years:
@@ -342,6 +367,17 @@ class GbifDataset(DatasetLoader):
             )
             records.extend(records_for_year)
 
+        # README: this relies on the license not being contradictory internally, and one and only one being relevant at all times
+        # This assumption is reasonable b/c we have only a single license per image (i.e., per record) or none at all
+        records = [
+            record
+            for record in records
+            if any(
+                manager.normalize_allowed_license(record.get("image_license"))
+                is not None
+                for manager in self._license_managers
+            )
+        ]
         records_df = pd.DataFrame.from_records(records, columns=self._record_columns())
         if records_df.empty:
             return records_df
