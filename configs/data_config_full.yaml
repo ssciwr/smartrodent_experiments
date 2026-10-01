@@ -94,7 +94,7 @@ data:
     last_year: 2026
     species: *categories
     seed: 42
-    maxlen: 5000
+    maxlen: 2500
     allowed_licenses:
       creative-commons:
         - cc0

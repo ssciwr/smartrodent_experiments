@@ -1,12 +1,16 @@
 """Download licensed gbif observations into a species-organized dataset."""
 
 from __future__ import annotations
-from collections.abc import Mapping, Sequence
 
 import hashlib
 import logging
+import math
+import os
 import shutil
+import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import pandas as pd
@@ -14,10 +18,11 @@ import requests
 import yaml
 from pygbif import occurrences as occ
 from pygbif import registry
-
+from pygbif import species as species_api
 from tqdm.auto import tqdm
 
 from .base import DatasetLoader
+from .gbif_archive import GbifArchiveReader
 from .licenses import LicenseManagerBase, create_license_manager
 
 
@@ -36,6 +41,8 @@ class GbifDataset(DatasetLoader):
         allowed_licenses: Mapping[str, Sequence[str]] | None = None,
         media_type: str = "StillImage",
         config_path: str | Path | None = None,
+        poll_interval: float = 5,
+        max_wait_seconds: float = 3600,
     ):
         """Configure GBIF retrieval and image-license filtering.
 
@@ -52,14 +59,25 @@ class GbifDataset(DatasetLoader):
                 Commons Attribution-NonCommercial.
             media_type: GBIF media type to retrieve.
             config_path: Optional source configuration copied for provenance.
+            poll_interval: Seconds between checks of an unfinished download job.
+            max_wait_seconds: Maximum elapsed polling time per species.
 
         Raises:
             TypeError: If ``allowed_licenses`` is not a mapping or contains
                 invalid family or license values.
             ValueError: If the license mapping is empty, a family or license is
                 unsupported, the year selection is invalid, ``max_img_num`` is
-                negative, or no species are configured.
+                negative, no species are configured, or a polling setting is
+                not finite and positive.
         """
+        for name, value in (
+            ("poll_interval", poll_interval),
+            ("max_wait_seconds", max_wait_seconds),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        self.poll_interval = poll_interval
+        self.max_wait_seconds = max_wait_seconds
         license_policy = (
             {"creative-commons": ("cc-by-nc",)}
             if allowed_licenses is None
@@ -167,6 +185,8 @@ class GbifDataset(DatasetLoader):
             allowed_licenses=config.get("allowed_licenses"),
             media_type=config.get("media_type", "StillImage"),
             config_path=path,
+            poll_interval=config.get("poll_interval", 5),
+            max_wait_seconds=config.get("max_wait_seconds", 3600),
         )
 
     @staticmethod
@@ -255,95 +275,141 @@ class GbifDataset(DatasetLoader):
             "dataset_doi",
         )
 
-    def _get_all_records_for_params(self, **params) -> list[dict[str, Any]]:
-        """Fetch occurrences and project their media into a fixed image schema.
+    def _resolve_taxon_key(self, scientific_name: str) -> str:
+        """Require an unambiguous species match and resolve synonyms to accepted keys."""
+        match = species_api.name_backbone(scientificName=scientific_name, strict=True)
+        usage = match.get("usage", {})
+        diagnostics = match.get("diagnostics", {})
+        if match.get("synonym"):
+            accepted = match.get("acceptedUsage", {})
+        else:
+            accepted = match.get("acceptedUsage", usage)
+        reliable = (
+            diagnostics.get("matchType") == "EXACT"
+            and "multiple equal matches" not in diagnostics.get("note", "").lower()
+            and usage.get("rank") == "SPECIES"
+            and accepted.get("rank") == "SPECIES"
+            and accepted.get("key") is not None
+            and str(accepted["key"]).strip()
+        )
+        if not reliable:
+            raise ValueError(f"No reliable GBIF species match for {scientific_name}")
+        return str(accepted["key"])
 
-        Each returned dictionary represents one image. Occurrence metadata is
-        repeated for all images belonging to the same occurrence, whose GBIF
-        key is exposed as ``source_group_id`` for group-aware dataset splits.
-        Missing GBIF fields are represented by ``None``.
+    def _wait_for_download(self, key: str) -> None:
+        """Poll one SDK job until success, explicit failure, or the elapsed-time limit."""
+        deadline = time.monotonic() + self.max_wait_seconds
+        while time.monotonic() < deadline:
+            metadata = occ.download_meta(key)
+            if not isinstance(metadata, Mapping):
+                raise TypeError(f"Invalid metadata for GBIF download {key}")
+            status = metadata.get("status")
+            if status == "SUCCEEDED":
+                return
+            elif status in {"FAILED", "CANCELLED", "KILLED"}:
+                raise RuntimeError(f"GBIF download {key} ended with status {status}")
+            elif status in {"PREPARING", "RUNNING"}:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(self.poll_interval, remaining))
+            else:
+                raise ValueError(f"Invalid status for GBIF download {key}: {status}")
+        raise TimeoutError(
+            f"GBIF download {key} exceeded {self.max_wait_seconds} seconds"
+        )
 
-        Returns:
-            Image-level records with stable occurrence, image, taxonomy, and
-            source-dataset fields.
-        """
-        image_records: list[dict[str, Any]] = []
-        dataset_metadata: dict[str, tuple[Any, Any]] = {}
-        offset = 0
-        page_size = 300
+    def _get_all_records_for_params(self, scientificName: str) -> list[dict[str, Any]]:
+        """Download one species across its years and project media into the fixed schema."""
+        # Validate only when retrieving: readable CSV caches remain usable offline.
+        for variable in ("GBIF_USER", "GBIF_PWD", "GBIF_EMAIL"):
+            value = os.environ.get(variable)
+            if value is None or not value.strip():
+                raise ValueError(
+                    f"{variable} must be set and nonblank for GBIF downloads"
+                )
+        taxon_key = self._resolve_taxon_key(scientificName)
+        predicate = {
+            "type": "and",
+            "predicates": [
+                {"type": "equals", "key": "TAXON_KEY", "value": taxon_key},
+                {
+                    "type": "in",
+                    "key": "YEAR",
+                    "values": [str(year) for year in self.years],
+                },
+                {"type": "equals", "key": "MEDIA_TYPE", "value": self.media_type},
+            ],
+        }
+        # The SDK also returns an account-bearing payload; deliberately discard it.
+        key, _ = occ.download(predicate, format="DWCA")
+        self.logger.info("Submitted GBIF download %s", key)
+        self._wait_for_download(key)
+        # Archives are temporary inputs, not a second cache or resumable job store.
+        with TemporaryDirectory(prefix="gbif-", dir=self.output_path) as directory:
+            downloaded = occ.download_get(key, path=directory)
+            joined = GbifArchiveReader(downloaded["path"]).read()
 
-        while True:
-            response = occ.search(
-                **params,
-                limit=page_size,
-                offset=offset,
-            )
-            page = response["results"]
-
-            for occurrence in page:
-                dataset_key = occurrence.get("datasetKey")
-                if dataset_key and dataset_key not in dataset_metadata:
-                    dataset = registry.datasets(uuid=dataset_key)
-                    citation_value = dataset.get("citation")
-                    citation = (
-                        citation_value.get("text")
-                        if isinstance(citation_value, dict)
-                        else citation_value
-                    )
-                    dataset_metadata[dataset_key] = (citation, dataset.get("doi"))
-
-                citation, doi = dataset_metadata.get(dataset_key, (None, None))
-                for media in occurrence.get("media", []):
-                    if media.get("type") != self.media_type:
-                        continue
-
-                    image_url = media.get("identifier")
-                    if not image_url:
-                        continue
-
-                    image_records.append(
-                        {
-                            "source_group_id": occurrence.get("key"),
-                            "scientific_name": occurrence.get("scientificName"),
-                            "accepted_scientific_name": occurrence.get(
-                                "acceptedScientificName"
-                            ),
-                            "taxon_key": occurrence.get("taxonKey"),
-                            "species": occurrence.get("species"),
-                            "species_key": occurrence.get("speciesKey"),
-                            "genus": occurrence.get("genus"),
-                            "family": occurrence.get("family"),
-                            "order": occurrence.get("order"),
-                            "class": occurrence.get("class"),
-                            "phylum": occurrence.get("phylum"),
-                            "kingdom": occurrence.get("kingdom"),
-                            "year": occurrence.get("year"),
-                            "event_date": occurrence.get("eventDate"),
-                            "basis_of_record": occurrence.get("basisOfRecord"),
-                            "country_code": occurrence.get("countryCode"),
-                            "decimal_latitude": occurrence.get("decimalLatitude"),
-                            "decimal_longitude": occurrence.get("decimalLongitude"),
-                            "occurrence_source_url": occurrence.get("references"),
-                            "image_url": image_url,
-                            "image_license": media.get("license"),
-                            "image_creator": media.get("creator"),
-                            "image_references": media.get("references"),
-                            "image_type": media.get("type"),
-                            "image_format": media.get("format"),
-                            "image_created": media.get("created"),
-                            "dataset_key": dataset_key,
-                            "publishing_org_key": occurrence.get("publishingOrgKey"),
-                            "dataset_citation": citation,
-                            "dataset_doi": doi,
-                        }
-                    )
-
-            if response["endOfRecords"] or not page:
-                break
-
-            offset += len(page)
-
-        return image_records
+        fields = {
+            "source_group_id": "_core_id",
+            "scientific_name": "scientificName",
+            "accepted_scientific_name": "acceptedScientificName",
+            "taxon_key": "taxonKey",
+            "species": "species",
+            "species_key": "speciesKey",
+            "genus": "genus",
+            "family": "family",
+            "order": "order",
+            "class": "class",
+            "phylum": "phylum",
+            "kingdom": "kingdom",
+            "year": "year",
+            "event_date": "eventDate",
+            "basis_of_record": "basisOfRecord",
+            "country_code": "countryCode",
+            "decimal_latitude": "decimalLatitude",
+            "decimal_longitude": "decimalLongitude",
+            "occurrence_source_url": "references",
+            "image_url": "media_identifier",
+            "image_license": "media_license",
+            "image_creator": "media_creator",
+            "image_references": "media_references",
+            "image_type": "media_type",
+            "image_format": "media_format",
+            "image_created": "media_created",
+            "dataset_key": "datasetKey",
+            "publishing_org_key": "publishingOrgKey",
+        }
+        records = joined.reindex(columns=list(fields.values())).rename(
+            columns={source: target for target, source in fields.items()}
+        )
+        records = (
+            records.loc[
+                (records["image_type"] == self.media_type)
+                & records["image_url"].notna()
+            ]
+            .reindex(columns=self._record_columns())
+            .astype(object)
+        )
+        for dataset_key in records["dataset_key"].dropna().unique():
+            dataset = registry.datasets(uuid=dataset_key)
+            citation = dataset.get("citation")
+            if isinstance(citation, dict):
+                citation = citation.get("text")
+            selected = records["dataset_key"] == dataset_key
+            records.loc[selected, "dataset_citation"] = citation
+            records.loc[selected, "dataset_doi"] = dataset.get("doi")
+        for column in (
+            "source_group_id",
+            "taxon_key",
+            "species_key",
+            "year",
+            "decimal_latitude",
+            "decimal_longitude",
+        ):
+            records[column] = pd.to_numeric(records[column], errors="raise")
+        # Preserve the previous helper's None values for absent optional metadata.
+        records = records.astype(object).where(records.notna(), None)
+        return records.to_dict(orient="records")
 
     def _get_species_records(self, species: str) -> pd.DataFrame:
         """Fetch allowed image records for one species.
@@ -358,18 +424,10 @@ class GbifDataset(DatasetLoader):
         Returns:
             Image-level records with the stable GBIF schema.
         """
-        records: list[dict[str, Any]] = []
-        for year in self.years:
-            self.logger.info("Fetching %s observations from %s", species, year)
-            records_for_year = self._get_all_records_for_params(
-                scientificName=species,
-                mediatype=self.media_type,
-                year=year,
-            )
-            records.extend(records_for_year)
+        self.logger.info("Fetching %s observations for years %s", species, self.years)
+        records = self._get_all_records_for_params(scientificName=species)
 
-        # README: this relies on the license not being contradictory internally, and one and only one being relevant at all times
-        # This assumption is reasonable b/c we have only a single license per image (i.e., per record) or none at all
+        # Each photo has its own license: an occurrence license cannot authorize it.
         records = [
             record
             for record in records
@@ -642,20 +700,65 @@ class GbifDataset(DatasetLoader):
                 )
 
     def download(self) -> None:
-        """Download image-level records and a per-image report for each species."""
+        """Retrieve records for all species before downloading any images."""
+        self.retrieve_records()
+        self.download_images()
 
+    @staticmethod
+    def _write_records_atomic(records: pd.DataFrame, destination: Path) -> None:
+        """Promote a complete CSV on the same filesystem; never cache partial bytes."""
+        partial_path = destination.with_suffix(".csv.part")
+        try:
+            records.to_csv(partial_path, index=False)
+            partial_path.replace(destination)
+        finally:
+            partial_path.unlink(missing_ok=True)
+
+    def retrieve_records(self) -> None:
+        """Retrieve and save records for all species without downloading images.
+
+        Existing readable ``records.csv`` files are reused, including empty
+        tables with column headers. Delete a cache to retrieve fresh records.
+        """
         for sp in self.species:
             self.logger.info(f"species: {sp}")
             species_path = self.output_path / sp
-            images_path = species_path / "imgs"
             species_path.mkdir(parents=True, exist_ok=True)
+
+            try:
+                records_df = pd.read_csv(species_path / "records.csv")
+            except FileNotFoundError:
+                self.logger.info("Retrieving species records")
+                records_df = self._get_species_records(sp)
+                self._write_records_atomic(records_df, species_path / "records.csv")
+            else:
+                self.logger.info(
+                    "Found existing records.csv for %s, skipping retrieval", sp
+                )
+
+    def download_images(self) -> None:
+        """Download images from saved records and refresh per-image reports.
+
+        Valid existing images are reused. No species records are retrieved.
+
+        Raises:
+            FileNotFoundError: If a species has no saved records. Run
+                ``retrieve_records()`` first or provide its ``records.csv``.
+        """
+        for sp in self.species:
+            species_path = self.output_path / sp
+            records_path = species_path / "records.csv"
+            try:
+                records_df = pd.read_csv(records_path)
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    f"Missing records for {sp}: {records_path}. "
+                    "Run retrieve_records() before download_images()."
+                ) from exc
+
+            images_path = species_path / "imgs"
             images_path.mkdir(exist_ok=True)
-
-            self.logger.info("Retrieving species records")
-            records_df = self._get_species_records(sp)
-            records_df.to_csv(species_path / "records.csv", index=False)
-
-            self.logger.info("Downloading images")
+            self.logger.info("Downloading images for %s", sp)
             report = self._download_species_images(records_df, images_path)
             report.to_csv(
                 species_path / "download_report.csv",
