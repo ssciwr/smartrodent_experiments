@@ -29,3 +29,11 @@ runs*
 
 # remove uv.lock b/c annoying and blows up prs
 uv.lock
+
+# dataset stuff
+datasets
+
+# training
+training
+tuning
+outputs
