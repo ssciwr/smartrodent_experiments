@@ -1,11 +1,11 @@
 import csv
 import hashlib
-import json
+import os
 import time
 from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
@@ -15,6 +15,8 @@ import requests
 import yaml
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from pygbif import occurrences as gbif_occurrences
+from pygbif import species as gbif_species
 
 import smartrodent.gbif as gbif_module
 from smartrodent.gbif import GbifDataset
@@ -115,9 +117,7 @@ def test_constructor_builds_one_license_manager_per_configured_family(
     dataset = make_dataset(tmp_path, allowed_licenses=allowed_licenses)
 
     assert len(dataset._license_managers) == 2
-    managers_by_type = {
-        type(manager): manager for manager in dataset._license_managers
-    }
+    managers_by_type = {type(manager): manager for manager in dataset._license_managers}
     assert managers_by_type[
         CreativeCommonsLicenseManager
     ].allowed_licenses == frozenset({"cc0", "cc-by"})
@@ -250,69 +250,67 @@ def test_from_config_requires_data_gbif_mapping(tmp_path, content):
         GbifDataset.from_config(config_path)
 
 
-def test_get_all_records_returns_fixed_image_level_records(tmp_path, monkeypatch):
+def test_get_all_records_returns_fixed_image_level_records(
+    tmp_path, monkeypatch, bulk_api
+):
+    """The SDK archive preserves projection, media selection, and shared attribution."""
     dataset = make_dataset(tmp_path)
-    first_occurrence = {
-        "key": 123,
-        "scientificName": "Mus musculus Linnaeus, 1758",
-        "acceptedScientificName": "Mus musculus Linnaeus, 1758",
-        "taxonKey": 7429082,
-        "species": "Mus musculus",
-        "speciesKey": 7429082,
-        "genus": "Mus",
-        "family": "Muridae",
-        "order": "Rodentia",
-        "class": "Mammalia",
-        "phylum": "Chordata",
-        "kingdom": "Animalia",
-        "year": 2022,
-        "eventDate": "2022-03-04",
-        "basisOfRecord": "HUMAN_OBSERVATION",
-        "countryCode": "DE",
-        "decimalLatitude": 52.5,
-        "decimalLongitude": 13.4,
-        "references": "https://example.test/occurrences/123",
-        "datasetKey": "dataset-1",
-        "publishingOrgKey": "publisher-1",
-        "media": [
-            {
-                "type": "StillImage",
-                "format": "image/jpeg",
-                "identifier": "https://example.test/first.jpg",
-                "license": "https://creativecommons.org/licenses/by/4.0/",
-                "creator": "A. Photographer",
-                "references": "https://example.test/media/first",
-                "created": "2022-03-04",
-            },
-            {
-                "type": "Sound",
-                "identifier": "https://example.test/audio.mp3",
-            },
-            {"type": "StillImage", "identifier": None},
-        ],
-    }
-    second_occurrence = {
-        "key": 124,
-        "datasetKey": "dataset-1",
-        "media": [
-            {
-                "type": "StillImage",
-                "identifier": "https://example.test/second.jpg",
-            }
-        ],
-    }
-    responses = [
-        {"results": [first_occurrence], "endOfRecords": False},
-        {"results": [second_occurrence], "endOfRecords": True},
+    occurrences = [
+        {
+            "gbifID": "123",
+            "scientificName": "Mus musculus Linnaeus, 1758",
+            "acceptedScientificName": "Mus musculus Linnaeus, 1758",
+            "taxonKey": "7429082",
+            "species": "Mus musculus",
+            "speciesKey": "7429082",
+            "genus": "Mus",
+            "family": "Muridae",
+            "order": "Rodentia",
+            "class": "Mammalia",
+            "phylum": "Chordata",
+            "kingdom": "Animalia",
+            "year": "2022",
+            "eventDate": "2022-03-04",
+            "basisOfRecord": "HUMAN_OBSERVATION",
+            "countryCode": "DE",
+            "decimalLatitude": "52.5",
+            "decimalLongitude": "13.4",
+            "references": "https://example.test/occurrences/123",
+            "datasetKey": "dataset-1",
+            "publishingOrgKey": "publisher-1",
+        },
+        {"gbifID": "124", "datasetKey": "dataset-1"},
     ]
-    search = Mock(side_effect=responses)
+    media = [
+        {
+            "gbifID": "123",
+            "type": "StillImage",
+            "format": "image/jpeg",
+            "identifier": "https://example.test/first.jpg",
+            "license": "https://creativecommons.org/licenses/by/4.0/",
+            "creator": "A. Photographer",
+            "references": "https://example.test/media/first",
+            "created": "2022-03-04",
+        },
+        {
+            "gbifID": "123",
+            "type": "Sound",
+            "identifier": "https://example.test/audio.mp3",
+        },
+        {"gbifID": "123", "type": "StillImage", "identifier": None},
+        {
+            "gbifID": "124",
+            "type": "StillImage",
+            "identifier": "https://example.test/second.jpg",
+        },
+    ]
+    bulk_api.archive = make_bulk_archive(occurrences=occurrences, media=media)
     datasets = Mock(
         return_value={
             "citation": {"text": "Example dataset citation"},
             "doi": "10.1234/example",
         }
     )
-    monkeypatch.setattr(gbif_module.occ, "search", search)
     monkeypatch.setattr(gbif_module.registry, "datasets", datasets)
 
     records = dataset._get_all_records_for_params(scientificName="Mus musculus")
@@ -328,34 +326,31 @@ def test_get_all_records_returns_fixed_image_level_records(tmp_path, monkeypatch
     assert records[1]["source_group_id"] == 124
     assert records[1]["scientific_name"] is None
     assert records[1]["image_format"] is None
-    assert search.call_args_list[0].kwargs["offset"] == 0
-    assert search.call_args_list[1].kwargs["offset"] == 1
+    assert len(bulk_api.submissions()) == 1
     datasets.assert_called_once_with(uuid="dataset-1")
 
 
 def test_get_all_records_accepts_plain_text_citation_and_missing_dataset(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    bulk_api,
 ):
+    """Missing optional source metadata stays absent; plain citations remain valid."""
     dataset = make_dataset(tmp_path)
-    occurrences = [
-        {
-            "key": 1,
-            "datasetKey": "dataset-1",
-            "media": [
-                {"type": "StillImage", "identifier": "https://example.test/1.jpg"}
-            ],
-        },
-        {
-            "key": 2,
-            "media": [
-                {"type": "StillImage", "identifier": "https://example.test/2.jpg"}
-            ],
-        },
-    ]
-    monkeypatch.setattr(
-        gbif_module.occ,
-        "search",
-        Mock(return_value={"results": occurrences, "endOfRecords": True}),
+    bulk_api.archive = make_bulk_archive(
+        occurrences=[{"gbifID": "1", "datasetKey": "dataset-1"}, {"gbifID": "2"}],
+        media=[
+            {
+                "gbifID": "1",
+                "type": "StillImage",
+                "identifier": "https://example.test/1.jpg",
+            },
+            {
+                "gbifID": "2",
+                "type": "StillImage",
+                "identifier": "https://example.test/2.jpg",
+            },
+        ],
     )
     monkeypatch.setattr(
         gbif_module.registry,
@@ -363,7 +358,7 @@ def test_get_all_records_accepts_plain_text_citation_and_missing_dataset(
         Mock(return_value={"citation": "Plain citation", "doi": None}),
     )
 
-    records = dataset._get_all_records_for_params()
+    records = dataset._get_all_records_for_params(scientificName="Mus musculus")
 
     assert records[0]["dataset_citation"] == "Plain citation"
     assert records[1]["dataset_key"] is None
@@ -386,9 +381,9 @@ def test_get_species_records_shuffles_and_caps_image_rows(tmp_path, monkeypatch)
     dataset = make_dataset(tmp_path, max_img_num=1)
     dataset.years = [2021, 2022]
     get_all_records = Mock(
-        side_effect=[
-            [make_image_record(1, "cc-by-nc")],
-            [make_image_record(2, "cc-by-nc")],
+        return_value=[
+            make_image_record(1, "cc-by-nc"),
+            make_image_record(2, "cc-by-nc"),
         ]
     )
     monkeypatch.setattr(dataset, "_get_all_records_for_params", get_all_records)
@@ -397,10 +392,7 @@ def test_get_species_records_shuffles_and_caps_image_rows(tmp_path, monkeypatch)
 
     assert len(records) == 1
     assert tuple(records.columns) == dataset._record_columns()
-    assert [call.kwargs["year"] for call in get_all_records.call_args_list] == [
-        2021,
-        2022,
-    ]
+    get_all_records.assert_called_once_with(scientificName="Mus musculus")
 
 
 def test_get_species_records_keeps_only_licenses_allowed_by_a_manager(
@@ -467,8 +459,9 @@ def test_get_species_records_accepts_a_license_from_any_configured_family(
     assert set(records["source_group_id"]) == {1, 2}
 
 
-def test_get_species_records_filters_each_year_before_applying_cap(
-    tmp_path, monkeypatch
+def test_get_species_records_filters_all_years_before_applying_cap(
+    tmp_path,
+    monkeypatch,
 ):
     dataset = make_dataset(
         tmp_path,
@@ -477,15 +470,11 @@ def test_get_species_records_filters_each_year_before_applying_cap(
     )
     dataset.years = [2021, 2022]
     get_all_records = Mock(
-        side_effect=[
-            [
-                make_image_record(1, "cc-by"),
-                make_image_record(2, "cc-by-nc"),
-            ],
-            [
-                make_image_record(3, "cc-by"),
-                make_image_record(4, "cc-by-nc"),
-            ],
+        return_value=[
+            {**make_image_record(1, "cc-by"), "year": 2021},
+            {**make_image_record(2, "cc-by-nc"), "year": 2021},
+            {**make_image_record(3, "cc-by"), "year": 2022},
+            {**make_image_record(4, "cc-by-nc"), "year": 2022},
         ]
     )
     monkeypatch.setattr(dataset, "_get_all_records_for_params", get_all_records)
@@ -494,10 +483,8 @@ def test_get_species_records_filters_each_year_before_applying_cap(
 
     assert len(records) == 2
     assert set(records["source_group_id"]) == {1, 3}
-    assert [call.kwargs["year"] for call in get_all_records.call_args_list] == [
-        2021,
-        2022,
-    ]
+    assert set(records["year"]) == {2021, 2022}
+    get_all_records.assert_called_once_with(scientificName="Mus musculus")
 
 
 def test_get_species_records_returns_fixed_columns_when_all_licenses_rejected(
@@ -553,9 +540,7 @@ def test_get_species_records_returns_exactly_the_allowed_rows(
     records = dataset._get_species_records("Mus musculus")
 
     expected_ids = [
-        record_id
-        for record_id, is_allowed in enumerate(allowed_rows)
-        if is_allowed
+        record_id for record_id, is_allowed in enumerate(allowed_rows) if is_allowed
     ]
     assert sorted(records["source_group_id"].tolist()) == expected_ids
 
@@ -565,8 +550,7 @@ def test_download_image_uses_documented_gbif_cache_url(tmp_path):
     images_path = tmp_path / "images"
     images_path.mkdir()
     source_url = (
-        "https://inaturalist-open-data.s3.amazonaws.com/"
-        "photos/31610070/original.jpg"
+        "https://inaturalist-open-data.s3.amazonaws.com/photos/31610070/original.jpg"
     )
     record = make_download_record(
         record_id=2005380410,
@@ -634,9 +618,7 @@ def test_download_image_writes_valid_jpeg_and_png_payloads(
     images_path = tmp_path / "images"
     images_path.mkdir()
     session = Mock()
-    session.get.return_value = make_image_response(
-        content, content_type=content_type
-    )
+    session.get.return_value = make_image_response(content, content_type=content_type)
 
     success = dataset._download_image(
         make_download_record(image_url=source_url), images_path, session
@@ -702,9 +684,7 @@ def test_download_image_keeps_distinct_media_from_one_occurrence(tmp_path):
         make_download_record(image_url=""),
     ],
 )
-def test_download_image_rejects_records_without_cache_identifiers(
-    tmp_path, record
-):
+def test_download_image_rejects_records_without_cache_identifiers(tmp_path, record):
     dataset = make_dataset(tmp_path)
     session = Mock()
 
@@ -776,14 +756,10 @@ def test_download_image_rejects_redirect_without_following_it(tmp_path):
         (b"not really a jpeg", "image/jpeg"),
     ],
 )
-def test_download_image_rejects_non_image_responses(
-    tmp_path, content, content_type
-):
+def test_download_image_rejects_non_image_responses(tmp_path, content, content_type):
     dataset = make_dataset(tmp_path)
     session = Mock()
-    session.get.return_value = make_image_response(
-        content, content_type=content_type
-    )
+    session.get.return_value = make_image_response(content, content_type=content_type)
 
     success = dataset._download_image(
         make_download_record(), tmp_path / "images", session
@@ -802,9 +778,7 @@ def test_download_image_accepts_valid_image_with_generic_content_type(tmp_path):
         valid_jpeg_bytes(), content_type="application/octet-stream"
     )
 
-    success = dataset._download_image(
-        make_download_record(), images_path, session
-    )
+    success = dataset._download_image(make_download_record(), images_path, session)
 
     assert success is True
     assert len(list(images_path.glob("*.jpg"))) == 1
@@ -884,17 +858,13 @@ def test_download_image_removes_partial_file_after_stream_failure(tmp_path):
     session = Mock()
     session.get.return_value = response
 
-    success = dataset._download_image(
-        make_download_record(), images_path, session
-    )
+    success = dataset._download_image(make_download_record(), images_path, session)
 
     assert success is False
     assert not list(images_path.glob("*"))
 
 
-def test_download_species_images_reports_every_record_in_order(
-    tmp_path, monkeypatch
-):
+def test_download_species_images_reports_every_record_in_order(tmp_path, monkeypatch):
     dataset = make_dataset(tmp_path)
     records = pd.DataFrame(
         [
@@ -996,17 +966,13 @@ def test_download_writes_records_and_download_report_for_each_species(
     report = records.copy()
     report["success"] = [True, False]
     monkeypatch.setattr(dataset, "_get_species_records", Mock(return_value=records))
-    monkeypatch.setattr(
-        dataset, "_download_species_images", Mock(return_value=report)
-    )
+    monkeypatch.setattr(dataset, "_download_species_images", Mock(return_value=report))
     dataset.logger = Mock()
 
     dataset.download()
 
     species_path = dataset.output_path / "Mus musculus"
-    pd.testing.assert_frame_equal(
-        pd.read_csv(species_path / "records.csv"), records
-    )
+    pd.testing.assert_frame_equal(pd.read_csv(species_path / "records.csv"), records)
     pd.testing.assert_frame_equal(
         pd.read_csv(species_path / "download_report.csv"),
         report.reset_index(names="index"),
@@ -1088,9 +1054,7 @@ def test_file_not_found_outside_cache_read_propagates(dataset, monkeypatch, phas
     records = pd.DataFrame({"id": [123]})
     error = FileNotFoundError("phase failed")
     retrieve = (
-        Mock(side_effect=error)
-        if phase == "retrieval"
-        else Mock(return_value=records)
+        Mock(side_effect=error) if phase == "retrieval" else Mock(return_value=records)
     )
     download_images = Mock(side_effect=error)
     monkeypatch.setattr(dataset, "_get_species_records", retrieve)
@@ -1118,7 +1082,9 @@ def test_gbif_cached_records_resume_images_and_refresh_report(tmp_path, monkeypa
     digest = hashlib.md5(urls[0].encode(), usedforsecurity=False).hexdigest()
     existing_path = images_path / f"123_{digest}.jpg"
     existing_path.write_bytes(b"\xff\xd8\xffexisting image")
-    (species_path / "download_report.csv").write_text("outdated report", encoding="utf-8")
+    (species_path / "download_report.csv").write_text(
+        "outdated report", encoding="utf-8"
+    )
     retrieve = Mock()
     download_cached = Mock(return_value=True)
     monkeypatch.setattr(dataset, "_get_species_records", retrieve)
@@ -1159,7 +1125,9 @@ def test_retrieve_records_does_not_download_images(dataset, monkeypatch, cached)
         assert [call.args[0] for call in retrieve.call_args_list] == dataset.species
     for species in dataset.species:
         species_path = dataset.output_path / species
-        pd.testing.assert_frame_equal(pd.read_csv(species_path / "records.csv"), records)
+        pd.testing.assert_frame_equal(
+            pd.read_csv(species_path / "records.csv"), records
+        )
         assert not (species_path / "imgs").exists()
         assert not (species_path / "download_report.csv").exists()
 
@@ -1280,94 +1248,157 @@ class BulkDownloadClock:
 
 
 class BulkDownloadApi:
-    """HTTP boundary double for name matching, download jobs, and archives.
+    """Control the pygbif seam without network calls, real credentials, or waiting.
 
-    Unexpected URLs fail immediately, including occurrence search and images.
-    Keys and names below are synthetic, not live GBIF identifiers.
+    The downloader, ZIP/XML reader, pandas joins, and filesystem remain real.
+    This double replaces only the external SDK operations so tests can inspect
+    per-species queries and reproduce failures without depending on live GBIF.
+
+    Maintenance cost: this intentionally models only the pygbif contract used
+    here, currently verified against 0.6.6. When upgrading pygbif, recheck
+    download()'s (key, payload), download_meta()'s status, download_get()'s path
+    dictionary, and the species/registry response shapes. Autospec in bulk_api
+    checks call signatures, not these return values or their semantics. Passing
+    these offline tests does not establish compatibility with a live GBIF job.
     """
 
     def __init__(self):
-        """Provide a successful species match and a completed download by default."""
+        """Provide synthetic matches, completed jobs, and a small DWCA."""
+        # Override individual names to exercise synonym and unreliable-match cases.
         self.matches = {}
+        # SDK operation history, not HTTP traffic; distinguishes jobs from polls.
         self.calls = []
+        # Issued keys ensure polling/fetching uses the SDK result, not its payload.
+        self.keys = []
+        # Each poll advances this sequence, then repeats its last status. The guard
+        # in download_meta catches runaway loops; production uses its own deadline.
         self.statuses = ["SUCCEEDED"]
         self.polls = 0
-        self.key = "0000001-test-download"
-        self.archive_url = "https://api.gbif.org/occurrence/download/request/test.zip"
+        # Actual ZIP bytes let archive conversion run normally, including bad inputs.
         self.archive = make_bulk_archive()
+        # Inject SDK errors independently at submission, archive fetch, or polling.
         self.submission_error = None
         self.archive_error = None
         self.metadata_error = None
+        # Distinct from transport errors: supply a malformed but returned response.
         self.malformed_metadata = None
 
-    def request(self, method, url, **kwargs):
-        """Route supported HTTP requests and reject all unexpected traffic."""
-        method = method.upper()
-        self.calls.append((method, url, kwargs))
-        response = requests.Response()
-        response.status_code = 200
-        response.url = url
-        response.headers["content-type"] = "application/json"
-        if method == "GET" and url.endswith("/species/match"):
-            params = kwargs.get("params", {})
-            name = params.get("scientificName", params.get("name"))
-            payload = self.matches.get(name, make_bulk_match(name))
-        elif method == "POST" and url.endswith("/occurrence/download/request"):
-            if self.submission_error is not None:
-                raise self.submission_error
-            response._content = json.dumps(self.key).encode()
-            return response
-        elif method == "GET" and url.endswith(f"/occurrence/download/{self.key}"):
-            if self.metadata_error is not None:
-                raise self.metadata_error
-            if self.malformed_metadata is not None:
-                payload = self.malformed_metadata
-            else:
-                assert self.polls < 100, "Unbounded download polling"
-                status = self.statuses[min(self.polls, len(self.statuses) - 1)]
-                self.polls += 1
-                payload = {
-                    "key": self.key,
-                    "status": status,
-                    "downloadLink": self.archive_url,
-                    "doi": "10.15468/dl.synthetic",
-                    "size": len(self.archive),
-                }
-        elif method == "GET" and url == self.archive_url:
-            response.headers["content-type"] = "application/zip"
-            response.iter_content = lambda chunk_size=8192: self.archive_chunks()
-            response._content = self.archive
-            response._content_consumed = True
-            return response
-        elif method == "GET" and "/dataset/" in url:
-            payload = {
-                "citation": {"text": "Synthetic source dataset citation"},
-                "doi": "10.1234/synthetic-source",
-            }
-        else:
-            raise AssertionError(f"Unexpected GBIF traffic: {method} {url}")
-        response._content = json.dumps(payload).encode()
-        return response
+    def name_backbone(self, scientificName=None, **kwargs):
+        """Return a configured or default match for the requested name.
 
-    def archive_chunks(self):
-        """Yield archive bytes, optionally failing after a partial transfer."""
-        midpoint = max(1, len(self.archive) // 2)
-        yield self.archive[:midpoint]
+        Args:
+            scientificName: Scientific name supplied to pygbif.
+            **kwargs: Additional matching settings supported by pygbif.
+
+        Returns:
+            A synthetic v2 species-match response.
+        """
+        self.calls.append(("match", scientificName))
+        return self.matches.get(scientificName, make_bulk_match(scientificName))
+
+    def download(
+        self,
+        queries,
+        format="SIMPLE_CSV",
+        user=None,
+        pwd=None,
+        email=None,
+        pred_type="and",
+    ):
+        """Submit a synthetic job using pygbif's documented return shape.
+
+        Args:
+            queries: Structured GBIF predicate.
+            format: Requested download format.
+            user: Optional account name; otherwise read from the environment.
+            pwd: Optional password, never included in the returned payload.
+            email: Optional notification address; otherwise read from the environment.
+            pred_type: Predicate combiner for pygbif's string-query form.
+
+        Returns:
+            A pair containing the download key and the account-bearing payload.
+        """
+        assert isinstance(queries, dict), "Use a structured download predicate"
+        body = {"predicate": queries, "format": format}
+        self.calls.append(("download", body))
+        if self.submission_error is not None:
+            raise self.submission_error
+        key = f"{len(self.submissions()):07d}-test-download"
+        self.keys.append(key)
+        # pygbif returns account details too: callers must not persist this blindly.
+        payload = {
+            **body,
+            "creator": user if user is not None else os.environ.get("GBIF_USER"),
+            "notification_address": [
+                email if email is not None else os.environ.get("GBIF_EMAIL")
+            ],
+        }
+        return key, payload
+
+    def download_meta(self, key, **kwargs):
+        """Return the next job status or simulate a metadata failure.
+
+        Args:
+            key: Download key returned by download().
+            **kwargs: Additional pygbif request options.
+
+        Returns:
+            Synthetic job metadata.
+        """
+        assert key in self.keys, "Poll using the key returned by pygbif.download"
+        self.calls.append(("metadata", key))
+        if self.metadata_error is not None:
+            raise self.metadata_error
+        if self.malformed_metadata is not None:
+            return self.malformed_metadata
+        assert self.polls < 100, "Unbounded download polling"
+        status = self.statuses[min(self.polls, len(self.statuses) - 1)]
+        self.polls += 1
+        return {"key": key, "status": status, "size": len(self.archive)}
+
+    def download_get(self, key, path=".", **kwargs):
+        """Write an archive as pygbif does, including partial bytes on failure.
+
+        Args:
+            key: Download key returned by download().
+            path: Existing destination directory.
+            **kwargs: Additional pygbif request options.
+
+        Returns:
+            Archive path, size, and key, as returned by pygbif.download_get().
+        """
+        assert key in self.keys, "Fetch using the key returned by pygbif.download"
+        self.calls.append(("archive", key))
+        destination = Path(path) / f"{key}.zip"
         if self.archive_error is not None:
+            destination.write_bytes(self.archive[: max(1, len(self.archive) // 2)])
             raise self.archive_error
-        yield self.archive[midpoint:]
+        destination.write_bytes(self.archive)
+        return {"path": str(destination), "size": len(self.archive), "key": key}
+
+    def source_dataset(self, uuid=None, **kwargs):
+        """Return source attribution through pygbif's registry method.
+
+        Args:
+            uuid: Source dataset key.
+            **kwargs: Additional pygbif registry options.
+
+        Returns:
+            Synthetic source dataset citation and DOI.
+        """
+        self.calls.append(("dataset", uuid))
+        return {
+            "citation": {"text": "Synthetic source dataset citation"},
+            "doi": "10.1234/synthetic-source",
+        }
 
     def submissions(self):
-        """Return download-submission calls, excluding polls and other traffic."""
-        return [call for call in self.calls if call[0] == "POST"]
+        """Return observed SDK download calls, excluding polls and archive fetches."""
+        return [call for call in self.calls if call[0] == "download"]
 
     def submitted_body(self):
-        """Decode the latest submitted request independently of HTTP encoding."""
-        kwargs = self.submissions()[-1][2]
-        if "json" in kwargs:
-            return kwargs["json"]
-        else:
-            return json.loads(kwargs["data"])
+        """Return the latest SDK predicate and format, not a serialized HTTP body."""
+        return self.submissions()[-1][1]
 
 
 def make_bulk_match(name="Mus musculus", key="100", accepted_name=None):
@@ -1382,7 +1413,9 @@ def make_bulk_match(name="Mus musculus", key="100", accepted_name=None):
     return {
         "usage": usage,
         "acceptedUsage": accepted,
-        "classification": [{"key": accepted["key"], "name": accepted["name"], "rank": "SPECIES"}],
+        "classification": [
+            {"key": accepted["key"], "name": accepted["name"], "rank": "SPECIES"}
+        ],
         "diagnostics": {"matchType": "EXACT", "confidence": 100},
         "synonym": accepted_name is not None,
     }
@@ -1422,8 +1455,18 @@ def make_bulk_archive(occurrences=None, media=None, reverse_columns=False, omit=
     root = ET.Element("archive", xmlns=namespace)
     with ZipFile(buffer, "w") as archive:
         for tag, filename, rows, row_type in [
-            ("core", "occurrence.txt", occurrences, "http://rs.tdwg.org/dwc/terms/Occurrence"),
-            ("extension", "multimedia.txt", media, "http://rs.gbif.org/terms/1.0/Multimedia"),
+            (
+                "core",
+                "occurrence.txt",
+                occurrences,
+                "http://rs.tdwg.org/dwc/terms/Occurrence",
+            ),
+            (
+                "extension",
+                "multimedia.txt",
+                media,
+                "http://rs.gbif.org/terms/1.0/Multimedia",
+            ),
         ]:
             fields = list(dict.fromkeys(key for row in rows for key in row))
             if reverse_columns:
@@ -1431,22 +1474,46 @@ def make_bulk_archive(occurrences=None, media=None, reverse_columns=False, omit=
             if "gbifID" not in fields:
                 fields.insert(0, "gbifID")
             table = ET.SubElement(
-                root, tag, encoding="UTF-8", fieldsTerminatedBy="\\t",
-                linesTerminatedBy="\\n", fieldsEnclosedBy='"',
-                ignoreHeaderLines="1", rowType=row_type,
+                root,
+                tag,
+                encoding="UTF-8",
+                fieldsTerminatedBy="\\t",
+                linesTerminatedBy="\\n",
+                fieldsEnclosedBy='"',
+                ignoreHeaderLines="1",
+                rowType=row_type,
             )
             ET.SubElement(ET.SubElement(table, "files"), "location").text = filename
-            ET.SubElement(table, "id" if tag == "core" else "coreid", index=str(fields.index("gbifID")))
+            ET.SubElement(
+                table,
+                "id" if tag == "core" else "coreid",
+                index=str(fields.index("gbifID")),
+            )
             for index, field in enumerate(fields):
-                if field in {"gbifID", "taxonKey", "speciesKey", "species", "datasetKey"}:
+                if field in {
+                    "gbifID",
+                    "taxonKey",
+                    "speciesKey",
+                    "species",
+                    "datasetKey",
+                }:
                     base = "http://rs.gbif.org/terms/1.0/"
-                elif field in {"identifier", "type", "license", "creator", "references", "format"}:
+                elif field in {
+                    "identifier",
+                    "type",
+                    "license",
+                    "creator",
+                    "references",
+                    "format",
+                }:
                     base = "http://purl.org/dc/terms/"
                 else:
                     base = "http://rs.tdwg.org/dwc/terms/"
                 ET.SubElement(table, "field", index=str(index), term=base + field)
             stream = StringIO()
-            writer = csv.DictWriter(stream, fieldnames=fields, delimiter="\t", lineterminator="\n")
+            writer = csv.DictWriter(
+                stream, fieldnames=fields, delimiter="\t", lineterminator="\n"
+            )
             writer.writeheader()
             writer.writerows(rows)
             if filename not in omit:
@@ -1458,14 +1525,46 @@ def make_bulk_archive(occurrences=None, media=None, reverse_columns=False, omit=
 
 @pytest.fixture
 def bulk_api(monkeypatch):
-    """Isolate all HTTP traffic and provision dummy, non-secret credentials."""
+    """Mock the installed SDK signatures and prevent any real network traffic."""
     api = BulkDownloadApi()
     monkeypatch.setenv("GBIF_USER", "synthetic-user")
     monkeypatch.setenv("GBIF_PWD", "synthetic-password")
     monkeypatch.setenv("GBIF_EMAIL", "synthetic@example.invalid")
-    monkeypatch.setattr(requests, "get", lambda url, **kw: api.request("GET", url, **kw))
-    monkeypatch.setattr(requests, "post", lambda url, **kw: api.request("POST", url, **kw))
-    monkeypatch.setattr(requests.sessions.Session, "request", lambda self, method, url, **kw: api.request(method, url, **kw))
+    # Autospec enforces the installed SDK signatures, while side effects supply
+    # controlled results. It cannot detect drift in response shapes or behavior;
+    # recheck those against pygbif when changing the dependency version.
+    for method in ["download", "download_meta", "download_get"]:
+        monkeypatch.setattr(
+            gbif_occurrences,
+            method,
+            create_autospec(
+                getattr(gbif_occurrences, method), side_effect=getattr(api, method)
+            ),
+        )
+    monkeypatch.setattr(
+        gbif_species,
+        "name_backbone",
+        create_autospec(gbif_species.name_backbone, side_effect=api.name_backbone),
+    )
+    monkeypatch.setattr(
+        gbif_module.registry,
+        "datasets",
+        create_autospec(gbif_module.registry.datasets, side_effect=api.source_dataset),
+    )
+    monkeypatch.setattr(
+        gbif_occurrences,
+        "search",
+        Mock(side_effect=AssertionError("Use pygbif.download, not occurrence search")),
+    )
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "request",
+        Mock(
+            side_effect=AssertionError(
+                "Unexpected network traffic outside pygbif mocks"
+            )
+        ),
+    )
     return api
 
 
@@ -1484,7 +1583,6 @@ def make_bulk_dataset(tmp_path, **overrides):
         "output_path": tmp_path / "dataset",
         "species": ["Mus musculus"],
         "years": [2022],
-        "checklist_key": "7ddf754f-d193-4cc9-b351-99906754a03b",
         "poll_interval": 2,
         "max_wait_seconds": 6,
     }
@@ -1504,38 +1602,43 @@ def bulk_predicate_values(predicate, key):
     return values
 
 
-def bulk_persisted_json(output_path):
-    """Read persisted job artifacts without specifying internal file names."""
-    return [json.loads(path.read_text(encoding="utf-8")) for path in output_path.rglob("*.json")]
-
-
-def test_bulk_download_submits_combined_dwca_request(tmp_path, bulk_api):
-    """One job covers all species and exactly the requested years and media."""
-    dataset = make_bulk_dataset(
-        tmp_path, species=["Mus musculus", "Rattus rattus"], years=[2020, 2022]
-    )
-    bulk_api.matches["Rattus rattus"] = make_bulk_match("Rattus rattus", key="200")
+@pytest.mark.parametrize("species_count", [1, 2, 20])
+def test_bulk_download_submits_one_dwca_request_per_species(
+    tmp_path, bulk_api, species_count
+):
+    """Each species gets its own SDK download covering exactly its years and media."""
+    names = [f"Synthetic species{index}" for index in range(species_count)]
+    keys = [str(100 + index) for index in range(species_count)]
+    for name, key in zip(names, keys, strict=True):
+        bulk_api.matches[name] = make_bulk_match(name, key=key)
+    dataset = make_bulk_dataset(tmp_path, species=names, years=[2020, 2022])
 
     dataset.retrieve_records()
 
-    assert len(bulk_api.submissions()) == 1
-    body = bulk_api.submitted_body()
-    assert body["format"] == "DWCA"
-    assert body["checklistKey"] == dataset.checklist_key
-    assert bulk_predicate_values(body["predicate"], "TAXON_KEY") == {"100", "200"}
-    assert bulk_predicate_values(body["predicate"], "YEAR") == {"2020", "2022"}
-    assert bulk_predicate_values(body["predicate"], "MEDIA_TYPE") == {"StillImage"}
-    assert not bulk_predicate_values(body["predicate"], "SCIENTIFIC_NAME")
-    matches = [call for call in bulk_api.calls if call[1].endswith("/species/match")]
-    assert len(matches) == 2
-    assert all(call[2]["params"]["checklistKey"] == dataset.checklist_key for call in matches)
+    submissions = bulk_api.submissions()
+    assert len(submissions) == species_count
+    assert len(set(bulk_api.keys)) == species_count
+    requested_taxa = []
+    for _, body in submissions:
+        assert body["format"] == "DWCA"
+        taxa = bulk_predicate_values(body["predicate"], "TAXON_KEY")
+        assert len(taxa) == 1
+        requested_taxa.append(taxa)
+        assert bulk_predicate_values(body["predicate"], "YEAR") == {"2020", "2022"}
+        assert bulk_predicate_values(body["predicate"], "MEDIA_TYPE") == {"StillImage"}
+        assert not bulk_predicate_values(body["predicate"], "SCIENTIFIC_NAME")
+    assert requested_taxa == [{key} for key in keys]
+    assert [call[1] for call in bulk_api.calls if call[0] == "match"] == names
+    assert [call[1] for call in bulk_api.calls if call[0] == "archive"] == bulk_api.keys
     for species in dataset.species:
         path = dataset.output_path / species
         assert (path / "records.csv").is_file()
         assert not (path / "imgs").exists()
 
 
-def test_bulk_accepted_match_without_accepted_usage_uses_its_own_key(tmp_path, bulk_api):
+def test_bulk_accepted_match_without_accepted_usage_uses_its_own_key(
+    tmp_path, bulk_api
+):
     """An already accepted name need not include a separate acceptedUsage object."""
     match = make_bulk_match()
     del match["acceptedUsage"]
@@ -1544,35 +1647,46 @@ def test_bulk_accepted_match_without_accepted_usage_uses_its_own_key(tmp_path, b
 
     dataset.retrieve_records()
 
-    assert bulk_predicate_values(bulk_api.submitted_body()["predicate"], "TAXON_KEY") == {"100"}
+    assert bulk_predicate_values(
+        bulk_api.submitted_body()["predicate"], "TAXON_KEY"
+    ) == {"100"}
     assert len(pd.read_csv(dataset.output_path / "Mus musculus" / "records.csv")) == 1
 
 
-def test_bulk_synonyms_share_accepted_key_and_keep_directory_labels(tmp_path, bulk_api):
-    """Synonym resolution includes accepted-name records under both input labels."""
+def test_bulk_synonyms_use_accepted_key_in_separate_jobs_and_keep_directory_labels(
+    tmp_path, bulk_api
+):
+    """Each input label gets its own job, including synonyms of the same taxon."""
     names = ["Clethrionomys glareolus", "Myodes glareolus"]
-    bulk_api.matches[names[0]] = make_bulk_match(names[0], key="101", accepted_name=names[1])
+    bulk_api.matches[names[0]] = make_bulk_match(
+        names[0], key="101", accepted_name=names[1]
+    )
     bulk_api.matches[names[1]] = make_bulk_match(names[1])
     occurrence = {
-        "gbifID": "123", "speciesKey": "100", "taxonKey": "100",
-        "species": names[1], "scientificName": names[1], "year": "2022",
+        "gbifID": "123",
+        "speciesKey": "100",
+        "taxonKey": "100",
+        "species": names[1],
+        "scientificName": names[1],
+        "year": "2022",
     }
     bulk_api.archive = make_bulk_archive(occurrences=[occurrence])
     dataset = make_bulk_dataset(tmp_path, species=names)
 
     dataset.retrieve_records()
 
-    assert bulk_predicate_values(bulk_api.submitted_body()["predicate"], "TAXON_KEY") == {"100"}
+    assert len(bulk_api.submissions()) == len(names)
+    for _, body in bulk_api.submissions():
+        assert bulk_predicate_values(body["predicate"], "TAXON_KEY") == {"100"}
     for name in names:
         records = pd.read_csv(dataset.output_path / name / "records.csv")
         assert records["source_group_id"].tolist() == [123]
-    persisted = json.dumps(bulk_persisted_json(dataset.output_path))
-    assert all(name in persisted for name in names)
-    assert "101" in persisted and "100" in persisted
-    assert dataset.checklist_key in persisted
 
 
-@pytest.mark.parametrize("problem", ["ambiguous", "none", "fuzzy", "higher_rank", "wrong_rank", "missing_key"])
+@pytest.mark.parametrize(
+    "problem",
+    ["ambiguous", "none", "fuzzy", "higher_rank", "wrong_rank", "missing_key"],
+)
 def test_bulk_rejects_unreliable_taxon_matches(tmp_path, bulk_api, problem):
     """An unreliable identification cannot silently broaden the download."""
     match = make_bulk_match()
@@ -1600,9 +1714,11 @@ def test_bulk_rejects_unreliable_taxon_matches(tmp_path, bulk_api, problem):
     assert not list(dataset.output_path.rglob("records.csv"))
 
 
-@pytest.mark.parametrize("variable", ["GBIF_USER", "GBIF_PWD"])
+@pytest.mark.parametrize("variable", ["GBIF_USER", "GBIF_PWD", "GBIF_EMAIL"])
 @pytest.mark.parametrize("value", [None, "", "   "])
-def test_bulk_requires_nonblank_credentials_before_submission(tmp_path, bulk_api, monkeypatch, variable, value):
+def test_bulk_requires_nonblank_credentials_before_submission(
+    tmp_path, bulk_api, monkeypatch, variable, value
+):
     """Missing credentials produce actionable errors without creating a job."""
     if value is None:
         monkeypatch.delenv(variable, raising=False)
@@ -1617,12 +1733,12 @@ def test_bulk_requires_nonblank_credentials_before_submission(tmp_path, bulk_api
 
 
 def test_bulk_does_not_persist_or_log_credentials(tmp_path, bulk_api, caplog):
-    """Saved provenance contains useful request details, never account secrets."""
+    """Account details returned by pygbif do not leak into records or logs."""
     dataset = make_bulk_dataset(tmp_path)
 
     dataset.retrieve_records()
 
-    assert bulk_persisted_json(dataset.output_path), "Job provenance must be saved"
+    assert len(bulk_api.submissions()) == 1
     text = caplog.text + "\n".join(
         path.read_text(encoding="utf-8")
         for path in dataset.output_path.rglob("*")
@@ -1631,8 +1747,6 @@ def test_bulk_does_not_persist_or_log_credentials(tmp_path, bulk_api, caplog):
     assert "synthetic-password" not in text
     assert "synthetic-user" not in text
     assert "synthetic@example.invalid" not in text
-    assert bulk_api.key in text
-    assert "10.15468/dl.synthetic" in text
 
 
 @pytest.mark.parametrize("setting", ["poll_interval", "max_wait_seconds"])
@@ -1645,17 +1759,22 @@ def test_bulk_rejects_invalid_polling_configuration(tmp_path, setting, value):
 
 def test_bulk_config_loads_download_settings(tmp_path):
     """YAML forwards non-secret bulk-download settings to the loader."""
-    config = {"data": {"gbif": {
-        "output_path": str(tmp_path / "dataset"), "species": ["Mus musculus"],
-        "years": [2022], "checklist_key": "synthetic-checklist",
-        "poll_interval": 5, "max_wait_seconds": 60,
-    }}}
+    config = {
+        "data": {
+            "gbif": {
+                "output_path": str(tmp_path / "dataset"),
+                "species": ["Mus musculus"],
+                "years": [2022],
+                "poll_interval": 5,
+                "max_wait_seconds": 60,
+            }
+        }
+    }
     path = tmp_path / "bulk-config.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
     dataset = GbifDataset.from_config(path)
 
-    assert dataset.checklist_key == "synthetic-checklist"
     assert dataset.poll_interval == 5
     assert dataset.max_wait_seconds == 60
 
@@ -1672,42 +1791,22 @@ def test_bulk_polling_waits_and_completes(tmp_path, bulk_api, bulk_clock):
     assert len(bulk_api.submissions()) == 1
 
 
-def test_bulk_timeout_preserves_job_and_resumes_without_resubmission(tmp_path, bulk_api, bulk_clock):
-    """A fresh loader resumes a timed-out job using durable state."""
+def test_bulk_timeout_prevents_archive_and_image_downloads(
+    tmp_path, bulk_api, bulk_clock
+):
+    """An unfinished job times out without producing records or starting images."""
     bulk_api.statuses = ["RUNNING"]
     dataset = make_bulk_dataset(tmp_path)
 
     with pytest.raises(TimeoutError):
-        dataset.retrieve_records()
+        dataset.download()
 
     assert bulk_clock.now <= dataset.max_wait_seconds
     assert bulk_clock.waits
-    assert bulk_api.key in json.dumps(bulk_persisted_json(dataset.output_path))
+    assert len(bulk_api.submissions()) == 1
+    assert not [call for call in bulk_api.calls if call[0] == "archive"]
     assert not list(dataset.output_path.rglob("records.csv"))
-    bulk_api.statuses = ["SUCCEEDED"]
-
-    make_bulk_dataset(tmp_path).retrieve_records()
-
-    assert len(bulk_api.submissions()) == 1
-    assert (dataset.output_path / "Mus musculus" / "records.csv").is_file()
-
-
-@pytest.mark.parametrize("change", ["years", "species", "checklist_key", "media_type"])
-def test_bulk_rejects_saved_job_for_changed_query(tmp_path, bulk_api, bulk_clock, change):
-    """An incompatible saved request cannot silently supply the new query."""
-    bulk_api.statuses = ["RUNNING"]
-    dataset = make_bulk_dataset(tmp_path)
-    with pytest.raises(TimeoutError):
-        dataset.retrieve_records()
-    overrides = {
-        "years": [2021], "species": ["Rattus rattus"],
-        "checklist_key": "different-checklist", "media_type": "Sound",
-    }
-
-    with pytest.raises(ValueError, match="(?i)(query|request|configuration).*(match|differ|chang)"):
-        make_bulk_dataset(tmp_path, **{change: overrides[change]}).retrieve_records()
-
-    assert len(bulk_api.submissions()) == 1
+    assert not list(dataset.output_path.rglob("imgs"))
 
 
 @pytest.mark.parametrize("status", ["FAILED", "CANCELLED", "KILLED"])
@@ -1724,46 +1823,56 @@ def test_bulk_terminal_failure_prevents_image_downloads(tmp_path, bulk_api, stat
     assert not list(dataset.output_path.rglob("imgs"))
 
 
-@pytest.mark.parametrize("metadata", [{}, {"status": "UNRECOGNIZED"}, {"status": "SUCCEEDED"}])
-def test_bulk_rejects_malformed_job_metadata(tmp_path, bulk_api, metadata):
-    """Missing statuses or archive links fail explicitly rather than looping."""
+@pytest.mark.parametrize(
+    ("metadata", "expected_exception"),
+    [({}, ValueError), ({"status": "UNRECOGNIZED"}, ValueError), ([], TypeError)],
+)
+def test_bulk_rejects_malformed_job_metadata(
+    tmp_path,
+    bulk_api,
+    metadata,
+    expected_exception,
+):
+    """Invalid responses or statuses fail explicitly rather than looping."""
     bulk_api.malformed_metadata = metadata
     dataset = make_bulk_dataset(tmp_path)
 
-    with pytest.raises(ValueError, match="(?i)(status|download|metadata|link)"):
+    with pytest.raises(expected_exception, match="(?i)(status|download|metadata|link)"):
         dataset.retrieve_records()
 
     assert not list(dataset.output_path.rglob("records.csv"))
 
 
-def test_bulk_metadata_http_error_keeps_job_resumable(tmp_path, bulk_api):
-    """A failed poll does not discard the submitted request or create another."""
+def test_bulk_metadata_http_error_prevents_record_creation(tmp_path, bulk_api):
+    """An SDK polling error propagates without starting archive or image downloads."""
     bulk_api.metadata_error = requests.HTTPError("HTTP 503 while polling")
     dataset = make_bulk_dataset(tmp_path)
 
     with pytest.raises(requests.HTTPError, match="503"):
-        dataset.retrieve_records()
+        dataset.download()
 
-    bulk_api.metadata_error = None
-    make_bulk_dataset(tmp_path).retrieve_records()
     assert len(bulk_api.submissions()) == 1
+    assert not [call for call in bulk_api.calls if call[0] == "archive"]
+    assert not list(dataset.output_path.rglob("records.csv"))
+    assert not list(dataset.output_path.rglob("imgs"))
 
 
-def test_bulk_uncertain_submission_does_not_blindly_resubmit(tmp_path, bulk_api):
-    """A lost POST response requires reconciliation, including on a fresh run."""
+def test_bulk_submission_error_propagates_without_record_creation(tmp_path, bulk_api):
+    """An SDK submission error fails the current run without requiring recovery state."""
     bulk_api.submission_error = requests.Timeout("Submission response lost")
     dataset = make_bulk_dataset(tmp_path)
 
     with pytest.raises(requests.Timeout):
         dataset.retrieve_records()
 
-    bulk_api.submission_error = None
-    with pytest.raises(RuntimeError, match="(?i)(uncertain|unknown|reconcil|submission)"):
-        make_bulk_dataset(tmp_path).retrieve_records()
     assert len(bulk_api.submissions()) == 1
+    assert not [call for call in bulk_api.calls if call[0] in {"metadata", "archive"}]
+    assert not list(dataset.output_path.rglob("records.csv"))
 
 
-def test_bulk_all_cached_records_need_no_network_or_credentials(tmp_path, bulk_api, monkeypatch):
+def test_bulk_all_cached_records_need_no_network_or_credentials(
+    tmp_path, bulk_api, monkeypatch
+):
     """An existing readable CSV remains usable completely offline."""
     dataset = make_bulk_dataset(tmp_path)
     path = dataset.output_path / "Mus musculus" / "records.csv"
@@ -1779,7 +1888,9 @@ def test_bulk_all_cached_records_need_no_network_or_credentials(tmp_path, bulk_a
     assert path.read_bytes() == original
 
 
-def test_bulk_preserves_cached_species_when_retrieving_missing_species(tmp_path, bulk_api):
+def test_bulk_preserves_cached_species_when_retrieving_missing_species(
+    tmp_path, bulk_api
+):
     """A partial cache is preserved while only missing species are requested."""
     dataset = make_bulk_dataset(tmp_path, species=["Mus musculus", "Rattus rattus"])
     path = dataset.output_path / "Mus musculus" / "records.csv"
@@ -1787,13 +1898,31 @@ def test_bulk_preserves_cached_species_when_retrieving_missing_species(tmp_path,
     pd.DataFrame({"source_group_id": [999]}).to_csv(path, index=False)
     original = path.read_bytes()
     bulk_api.matches["Rattus rattus"] = make_bulk_match("Rattus rattus", key="200")
+    bulk_api.archive = make_bulk_archive(
+        occurrences=[
+            {
+                "gbifID": "123",
+                "speciesKey": "200",
+                "taxonKey": "200",
+                "species": "Rattus rattus",
+                "scientificName": "Rattus rattus",
+                "year": "2022",
+            }
+        ]
+    )
 
     dataset.retrieve_records()
 
     assert path.read_bytes() == original
-    assert bulk_predicate_values(bulk_api.submitted_body()["predicate"], "TAXON_KEY") == {"200"}
+    assert len(bulk_api.submissions()) == 1
+    assert bulk_predicate_values(
+        bulk_api.submitted_body()["predicate"], "TAXON_KEY"
+    ) == {"200"}
+    assert [call[1] for call in bulk_api.calls if call[0] == "match"] == [
+        "Rattus rattus"
+    ]
     missing_records = pd.read_csv(dataset.output_path / "Rattus rattus" / "records.csv")
-    assert missing_records.empty
+    assert missing_records["source_group_id"].tolist() == [123]
 
 
 def test_bulk_archive_preserves_image_level_schema_and_attribution(tmp_path, bulk_api):
@@ -1820,10 +1949,21 @@ def test_bulk_archive_preserves_image_level_schema_and_attribution(tmp_path, bul
     assert not (dataset.output_path / "Mus musculus" / "imgs").exists()
 
 
-@pytest.mark.parametrize("image_license", [None, "", "http://creativecommons.org/licenses/by/4.0/"])
-def test_bulk_never_substitutes_occurrence_license_for_image_license(tmp_path, bulk_api, image_license):
+@pytest.mark.parametrize(
+    "image_license", [None, "", "http://creativecommons.org/licenses/by/4.0/"]
+)
+def test_bulk_never_substitutes_occurrence_license_for_image_license(
+    tmp_path, bulk_api, image_license
+):
     """An open occurrence does not make its photos eligible under another license."""
-    media = [{"gbifID": "123", "identifier": "https://example.test/photo.jpg", "type": "StillImage", "license": image_license}]
+    media = [
+        {
+            "gbifID": "123",
+            "identifier": "https://example.test/photo.jpg",
+            "type": "StillImage",
+            "license": image_license,
+        }
+    ]
     bulk_api.archive = make_bulk_archive(media=media)
     dataset = make_bulk_dataset(tmp_path)
 
@@ -1844,6 +1984,75 @@ def test_bulk_rejects_archives_missing_required_tables(tmp_path, bulk_api, omitt
         dataset.retrieve_records()
 
     assert not list(dataset.output_path.rglob("records.csv"))
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "invalid_xml",
+        "missing_core",
+        "missing_media",
+        "missing_location",
+        "missing_coreid",
+        "negative_index",
+        "wide_index",
+    ],
+)
+def test_bulk_rejects_invalid_archive_descriptors(tmp_path, bulk_api, problem):
+    """Broken table mappings fail before any image records are saved."""
+    buffer = BytesIO()
+    with ZipFile(BytesIO(bulk_api.archive)) as source, ZipFile(buffer, "w") as target:
+        descriptor = ET.fromstring(source.read("meta.xml"))
+        core = descriptor.find("{*}core")
+        media = descriptor.find("{*}extension")
+        if problem == "missing_core":
+            descriptor.remove(core)
+        elif problem == "missing_media":
+            descriptor.remove(media)
+        elif problem == "missing_location":
+            core.find("{*}files").remove(core.find("{*}files/{*}location"))
+        elif problem == "missing_coreid":
+            media.remove(media.find("{*}coreid"))
+        elif problem == "negative_index":
+            core.find("{*}id").set("index", "-1")
+        elif problem == "wide_index":
+            core.find("{*}id").set("index", "999")
+        elif problem == "invalid_xml":
+            pass  # Supply invalid bytes below rather than build invalid ElementTree nodes.
+        else:
+            raise AssertionError(f"Unhandled descriptor problem: {problem}")
+        metadata = b"<unclosed" if problem == "invalid_xml" else ET.tostring(descriptor)
+        for name in source.namelist():
+            target.writestr(name, metadata if name == "meta.xml" else source.read(name))
+    bulk_api.archive = buffer.getvalue()
+    dataset = make_bulk_dataset(tmp_path)
+
+    with pytest.raises(ValueError, match="(?i)(archive|table|location|index|meta)"):
+        dataset.retrieve_records()
+
+    assert not list(dataset.output_path.rglob("records.csv"))
+
+
+@pytest.mark.parametrize("empty_table", ["occurrence.txt", "multimedia.txt"])
+def test_bulk_header_only_archive_tables_produce_empty_records(
+    tmp_path, bulk_api, empty_table
+):
+    """Present tables with declared columns but no rows are valid empty results."""
+    buffer = BytesIO()
+    with ZipFile(BytesIO(bulk_api.archive)) as source, ZipFile(buffer, "w") as target:
+        for name in source.namelist():
+            content = source.read(name)
+            if name == empty_table:
+                content = content.splitlines(keepends=True)[0]
+            target.writestr(name, content)
+    bulk_api.archive = buffer.getvalue()
+    dataset = make_bulk_dataset(tmp_path)
+
+    dataset.retrieve_records()
+
+    records = pd.read_csv(dataset.output_path / "Mus musculus" / "records.csv")
+    assert records.empty
+    assert list(records.columns) == list(dataset._record_columns())
 
 
 def test_bulk_rejects_corrupt_zip(tmp_path, bulk_api):
@@ -1878,40 +2087,24 @@ def test_bulk_rejects_unsafe_archive_locations(tmp_path, bulk_api):
     assert not list(dataset.output_path.rglob("records.csv"))
 
 
-def test_bulk_partial_archive_transfer_can_resume(tmp_path, bulk_api):
-    """Interrupted bytes are not promoted to a completed archive or records."""
+def test_bulk_partial_archive_transfer_does_not_create_records(tmp_path, bulk_api):
+    """A failed SDK archive transfer is not mistaken for usable image records."""
     bulk_api.archive_error = requests.ConnectionError("Archive interrupted")
     dataset = make_bulk_dataset(tmp_path)
 
     with pytest.raises(requests.ConnectionError, match="interrupted"):
-        dataset.retrieve_records()
+        dataset.download()
 
-    assert not list(dataset.output_path.rglob("*.zip"))
-    assert not list(dataset.output_path.rglob("records.csv"))
-    bulk_api.archive_error = None
-    make_bulk_dataset(tmp_path).retrieve_records()
     assert len(bulk_api.submissions()) == 1
-    assert (dataset.output_path / "Mus musculus" / "records.csv").is_file()
+    assert not list(dataset.output_path.rglob("records.csv"))
+    assert not list(dataset.output_path.rglob("imgs"))
 
 
-def test_bulk_completed_archive_is_reused_for_new_sampling(tmp_path, bulk_api):
-    """Changing local sampling reuses downloaded data, not another remote job."""
-    dataset = make_bulk_dataset(tmp_path)
-    dataset.retrieve_records()
-    records_path = dataset.output_path / "Mus musculus" / "records.csv"
-    records_path.unlink()
-    calls_before = len(bulk_api.calls)
-
-    make_bulk_dataset(tmp_path, seed=17, max_img_num=0).retrieve_records()
-
-    assert len(bulk_api.calls) == calls_before
-    assert pd.read_csv(records_path).empty
-
-
-def test_bulk_csv_write_is_atomic_and_retryable(tmp_path, bulk_api, monkeypatch):
+def test_bulk_csv_write_failure_does_not_leave_partial_records(
+    tmp_path, bulk_api, monkeypatch
+):
     """A failed CSV write cannot leave a partial records cache for the next run."""
     dataset = make_bulk_dataset(tmp_path)
-    original_to_csv = pd.DataFrame.to_csv
 
     def interrupted_write(frame, destination, *args, **kwargs):
         """Write partial bytes before simulating a storage failure."""
@@ -1928,13 +2121,11 @@ def test_bulk_csv_write_is_atomic_and_retryable(tmp_path, bulk_api, monkeypatch)
 
     records_path = dataset.output_path / "Mus musculus" / "records.csv"
     assert not records_path.exists()
-    make_bulk_dataset(tmp_path).retrieve_records()
-    assert len(bulk_api.submissions()) == 1
-    assert len(pd.read_csv(records_path)) == 1
-    assert pd.DataFrame.to_csv is original_to_csv
 
 
-def test_bulk_records_feed_existing_image_download_workflow(tmp_path, bulk_api, monkeypatch):
+def test_bulk_records_feed_existing_image_download_workflow(
+    tmp_path, bulk_api, monkeypatch
+):
     """Converted records remain compatible with the unchanged image phase."""
     dataset = make_bulk_dataset(tmp_path)
     session = Mock()
@@ -1953,7 +2144,9 @@ def test_bulk_records_feed_existing_image_download_workflow(tmp_path, bulk_api, 
 
 
 @pytest.mark.parametrize("preexisting", [False, True])
-def test_bulk_script_loads_dotenv_without_overriding_environment(tmp_path, monkeypatch, preexisting):
+def test_bulk_script_loads_dotenv_without_overriding_environment(
+    tmp_path, monkeypatch, preexisting
+):
     """The entry point loads an explicit .env before constructing the loader."""
     from scripts import download_gbif_data as entrypoint
 
@@ -1974,7 +2167,12 @@ def test_bulk_script_loads_dotenv_without_overriding_environment(tmp_path, monke
         """Inspect credentials as visible when the loader is constructed."""
         import os
 
-        observed.update({name: os.environ.get(name) for name in ["GBIF_USER", "GBIF_PWD", "GBIF_EMAIL"]})
+        observed.update(
+            {
+                name: os.environ.get(name)
+                for name in ["GBIF_USER", "GBIF_PWD", "GBIF_EMAIL"]
+            }
+        )
         return client
 
     monkeypatch.setattr(entrypoint.GbifDataset, "from_config", construct)
@@ -1982,7 +2180,9 @@ def test_bulk_script_loads_dotenv_without_overriding_environment(tmp_path, monke
     entrypoint.main(tmp_path / "config.yaml", env_file=env_path)
 
     assert observed["GBIF_USER"] == ("environment-user" if preexisting else "file-user")
-    assert observed["GBIF_PWD"] == ("environment-password" if preexisting else "file-password")
+    assert observed["GBIF_PWD"] == (
+        "environment-password" if preexisting else "file-password"
+    )
     assert observed["GBIF_EMAIL"] == "file@example.invalid"
     client.download.assert_called_once_with()
 
@@ -2002,9 +2202,15 @@ def test_bulk_missing_explicit_env_file_fails_clearly(tmp_path, monkeypatch):
 
 def test_bulk_rejects_archive_without_image_identifiers(tmp_path, bulk_api):
     """Missing a required media column is an archive error, not an empty sample."""
-    bulk_api.archive = make_bulk_archive(media=[{
-        "gbifID": "123", "type": "StillImage", "license": "cc-by-nc",
-    }])
+    bulk_api.archive = make_bulk_archive(
+        media=[
+            {
+                "gbifID": "123",
+                "type": "StillImage",
+                "license": "cc-by-nc",
+            }
+        ]
+    )
     dataset = make_bulk_dataset(tmp_path)
 
     with pytest.raises(ValueError, match="(?i)identifier"):
@@ -2014,10 +2220,15 @@ def test_bulk_rejects_archive_without_image_identifiers(tmp_path, bulk_api):
 
 
 @settings(max_examples=15, suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(years=st.lists(st.integers(min_value=1900, max_value=2026), min_size=1, max_size=6, unique=True))
+@given(
+    years=st.lists(
+        st.integers(min_value=1900, max_value=2026), min_size=1, max_size=6, unique=True
+    )
+)
 def test_bulk_year_predicate_preserves_exact_year_set(bulk_api, years):
     """Arbitrary sparse year selections are never broadened to a range."""
     bulk_api.calls.clear()
+    bulk_api.keys.clear()
     bulk_api.polls = 0
     with TemporaryDirectory() as output_path:
         dataset = make_bulk_dataset(Path(output_path), years=years)
@@ -2025,20 +2236,31 @@ def test_bulk_year_predicate_preserves_exact_year_set(bulk_api, years):
         dataset.retrieve_records()
 
         body = bulk_api.submitted_body()
-        assert bulk_predicate_values(body["predicate"], "YEAR") == {str(year) for year in years}
+        assert bulk_predicate_values(body["predicate"], "YEAR") == {
+            str(year) for year in years
+        }
         assert len(bulk_api.submissions()) == 1
 
 
 @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(accepted_keys=st.lists(st.sampled_from(["100", "200", "300"]), min_size=1, max_size=5))
-def test_bulk_taxon_deduplication_preserves_all_input_mappings(bulk_api, accepted_keys):
-    """Several synonyms may share a request key without losing input labels."""
+@given(
+    accepted_keys=st.lists(
+        st.sampled_from(["100", "200", "300"]), min_size=1, max_size=5
+    )
+)
+def test_bulk_each_species_requests_its_accepted_taxon_key(bulk_api, accepted_keys):
+    """Input species get separate jobs even when their accepted taxon keys coincide."""
     bulk_api.calls.clear()
+    bulk_api.keys.clear()
     bulk_api.polls = 0
     bulk_api.matches.clear()
     names = [f"Synthetic species{index}" for index in range(len(accepted_keys))]
-    for index, (name, accepted_key) in enumerate(zip(names, accepted_keys, strict=True)):
-        match = make_bulk_match(name, key=str(1000 + index), accepted_name=f"Resolved species{accepted_key}")
+    for index, (name, accepted_key) in enumerate(
+        zip(names, accepted_keys, strict=True)
+    ):
+        match = make_bulk_match(
+            name, key=str(1000 + index), accepted_name=f"Resolved species{accepted_key}"
+        )
         match["acceptedUsage"]["key"] = accepted_key
         match["classification"][0]["key"] = accepted_key
         bulk_api.matches[name] = match
@@ -2047,43 +2269,65 @@ def test_bulk_taxon_deduplication_preserves_all_input_mappings(bulk_api, accepte
 
         dataset.retrieve_records()
 
-        assert bulk_predicate_values(bulk_api.submitted_body()["predicate"], "TAXON_KEY") == set(accepted_keys)
-        provenance = json.dumps(bulk_persisted_json(dataset.output_path))
-        assert all(name in provenance for name in names)
-        assert all((dataset.output_path / name / "records.csv").is_file() for name in names)
+        submissions = bulk_api.submissions()
+        assert len(submissions) == len(names)
+        assert [
+            bulk_predicate_values(body["predicate"], "TAXON_KEY")
+            for _, body in submissions
+        ] == [{key} for key in accepted_keys]
+        assert all(
+            (dataset.output_path / name / "records.csv").is_file() for name in names
+        )
 
 
 @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(
-    licenses=st.lists(st.sampled_from(["cc-by-nc", "cc-by", "cc0", "", None]), max_size=12),
+    licenses=st.lists(
+        st.sampled_from(["cc-by-nc", "cc-by", "cc0", "", None]), max_size=12
+    ),
     cap=st.integers(min_value=0, max_value=12),
     reverse_columns=st.booleans(),
 )
-def test_bulk_media_join_filter_and_sampling_properties(bulk_api, licenses, cap, reverse_columns):
+def test_bulk_media_join_filter_and_sampling_properties(
+    bulk_api, licenses, cap, reverse_columns
+):
     """Joined eligible images retain their occurrence IDs across column orders."""
     bulk_api.calls.clear()
+    bulk_api.keys.clear()
     bulk_api.polls = 0
     bulk_api.matches.clear()
     occurrences = [
-        {"gbifID": str(key), "speciesKey": "100", "taxonKey": "100", "species": "Mus musculus", "year": "2022"}
+        {
+            "gbifID": str(key),
+            "speciesKey": "100",
+            "taxonKey": "100",
+            "species": "Mus musculus",
+            "year": "2022",
+        }
         for key in [123, 124]
     ]
     media = [
         {
-            "gbifID": str(123 + index % 2), "type": "StillImage",
-            "identifier": f"https://example.test/{index}.jpg", "license": license,
+            "gbifID": str(123 + index % 2),
+            "type": "StillImage",
+            "identifier": f"https://example.test/{index}.jpg",
+            "license": license,
         }
         for index, license in enumerate(licenses)
     ]
     # Keep required columns in the header even when there are no actual media.
     if not media:
-        media = [{"gbifID": "123", "type": "StillImage", "identifier": "", "license": ""}]
+        media = [
+            {"gbifID": "123", "type": "StillImage", "identifier": "", "license": ""}
+        ]
     eligible = {
         f"https://example.test/{index}.jpg": 123 + index % 2
         for index, license in enumerate(licenses)
         if license == "cc-by-nc"
     }
-    bulk_api.archive = make_bulk_archive(occurrences=occurrences, media=media, reverse_columns=reverse_columns)
+    bulk_api.archive = make_bulk_archive(
+        occurrences=occurrences, media=media, reverse_columns=reverse_columns
+    )
     with TemporaryDirectory() as output_path:
         dataset = make_bulk_dataset(Path(output_path), max_img_num=cap, seed=17)
 
@@ -2096,17 +2340,23 @@ def test_bulk_media_join_filter_and_sampling_properties(bulk_api, licenses, cap,
         assert set(records["image_url"]) <= set(eligible)
         for _, row in records.iterrows():
             assert row["source_group_id"] == eligible[row["image_url"]]
-        original_calls = len(bulk_api.calls)
-        records_path.unlink()
-
-        make_bulk_dataset(Path(output_path), max_img_num=cap, seed=17).retrieve_records()
-
-        pd.testing.assert_frame_equal(pd.read_csv(records_path), records)
-        assert len(bulk_api.calls) == original_calls
-        # The same archive, mapped with the opposite column order, has identical output.
-        bulk_api.archive = make_bulk_archive(occurrences=occurrences, media=media, reverse_columns=not reverse_columns)
-        other = make_bulk_dataset(Path(output_path) / "reordered", max_img_num=cap, seed=17)
-        other.retrieve_records()
-        pd.testing.assert_frame_equal(
-            pd.read_csv(other.output_path / "Mus musculus" / "records.csv"), records
+        # Independent downloads with the same seed must produce the same sample.
+        repeated = make_bulk_dataset(
+            Path(output_path) / "repeated", max_img_num=cap, seed=17
         )
+        repeated.retrieve_records()
+        pd.testing.assert_frame_equal(
+            pd.read_csv(repeated.output_path / "Mus musculus" / "records.csv"), records
+        )
+        # Mapping the opposite column order must preserve that same output.
+        bulk_api.archive = make_bulk_archive(
+            occurrences=occurrences, media=media, reverse_columns=not reverse_columns
+        )
+        reordered = make_bulk_dataset(
+            Path(output_path) / "reordered", max_img_num=cap, seed=17
+        )
+        reordered.retrieve_records()
+        pd.testing.assert_frame_equal(
+            pd.read_csv(reordered.output_path / "Mus musculus" / "records.csv"), records
+        )
+        assert len(bulk_api.submissions()) == 3
