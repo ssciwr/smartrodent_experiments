@@ -1,6 +1,7 @@
-from typing import Protocol, runtime_checkable
-import pandas as pd
 from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+import pandas as pd
 
 
 @runtime_checkable
@@ -53,8 +54,16 @@ class Filterable(Configurable, Protocol):
 
 @runtime_checkable
 class DatasetLoader(Configurable, Protocol):
-    """Protocol for objects that execute a download method to get data"""
+    """Protocol for dataset loaders with separate record and image phases."""
+
+    def retrieve_records(self) -> None:
+        """Retrieve and save all species records without downloading images."""
+        ...
+
+    def download_images(self) -> None:
+        """Download images using saved records, without retrieving records."""
+        ...
 
     def download(self) -> None:
-        """Fetch records and download allowed photos for every configured species."""
+        """Retrieve all species records first, then download their images."""
         ...

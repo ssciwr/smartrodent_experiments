@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import shutil
 from collections.abc import Sequence
@@ -256,7 +257,8 @@ class InaturalistDataset(DatasetLoader):
 
         records_df = pd.json_normalize(records)
         if records_df.empty:
-            return records_df
+            # A header-only CSV must remain readable by the separate image phase.
+            return pd.DataFrame(columns=["id", "photos"])
 
         # Random sampling prevents the API's ordering from biasing a capped dataset.
         records_df: pd.DataFrame = records_df.sample(
@@ -352,29 +354,68 @@ class InaturalistDataset(DatasetLoader):
         return downloaded_images
 
     def download(self) -> None:
-        """Fetch records and download allowed photos for every configured species.
-
-        Each species receives a `records.csv` file and an `imgs` directory below
-        the dataset root. Records are written before any image is downloaded, so
-        they are saved even when no photo has an allowed license. Species are
-        processed one after another and existing files are overwritten, which
-        makes a re-run of an interrupted download resume at species granularity.
+        """Retrieve records for all species before downloading any images.
 
         Raises:
-            requests.HTTPError: If an image request returns an error status.
-                Species processed before the failure keep their downloaded data.
+            requests.HTTPError: If a record or image request fails. Saved
+                records and images remain available for a subsequent run.
+        """
+        self.retrieve_records()
+        self.download_images()
+
+    def retrieve_records(self) -> None:
+        """Retrieve and save records for all species without downloading images.
+
+        Existing readable ``records.csv`` files are reused, including empty
+        tables with column headers. Delete a cache to retrieve fresh records.
+
+        Raises:
+            requests.HTTPError: If an observation request returns an error.
         """
         for species in self.species:
             self.logger.info(f"species: {species}")
             species_path = self.output_path / species
-            images_path = species_path / "imgs"
             species_path.mkdir(parents=True, exist_ok=True)
+
+            try:
+                pd.read_csv(
+                    species_path / "records.csv", converters={"photos": ast.literal_eval}
+                )
+            except FileNotFoundError:
+                self.logger.info("Retrieving species records")
+                records_df = self._get_species_records(species)
+                records_df.to_csv(species_path / "records.csv", index=False)
+            else:
+                self.logger.info(
+                    "Found existing records.csv for %s, skipping retrieval", species
+                )
+
+    def download_images(self) -> None:
+        """Download allowed photos from saved records, skipping existing images.
+
+        No species records are retrieved during this phase.
+
+        Raises:
+            FileNotFoundError: If a species has no saved records. Run
+                ``retrieve_records()`` first or provide its ``records.csv``.
+            requests.HTTPError: If an image request returns an error status.
+        """
+        for species in self.species:
+            species_path = self.output_path / species
+            records_path = species_path / "records.csv"
+            try:
+                # Restore photo lists stored as Python literals in the CSV.
+                records_df = pd.read_csv(
+                    records_path, converters={"photos": ast.literal_eval}
+                )
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    f"Missing records for {species}: {records_path}. "
+                    "Run retrieve_records() before download_images()."
+                ) from exc
+
+            images_path = species_path / "imgs"
             images_path.mkdir(exist_ok=True)
-
-            self.logger.info("Retrieving species records")
-            records_df = self._get_species_records(species)
-            records_df.to_csv(species_path / "records.csv", index=False)
-
-            self.logger.info("Downloading images")
+            self.logger.info("Downloading images for %s", species)
             downloaded = self._download_species_images(records_df, images_path)
             self.logger.info("Downloaded %s images for %s", downloaded, species)
