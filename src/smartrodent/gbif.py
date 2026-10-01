@@ -642,38 +642,60 @@ class GbifDataset(DatasetLoader):
                 )
 
     def download(self) -> None:
-        """Download image-level records and a per-image report for each species."""
+        """Retrieve records for all species before downloading any images."""
+        self.retrieve_records()
+        self.download_images()
 
+    def retrieve_records(self) -> None:
+        """Retrieve and save records for all species without downloading images.
+
+        Existing readable ``records.csv`` files are reused, including empty
+        tables with column headers. Delete a cache to retrieve fresh records.
+        """
         for sp in self.species:
             self.logger.info(f"species: {sp}")
             species_path = self.output_path / sp
-            images_path = species_path / "imgs"
             species_path.mkdir(parents=True, exist_ok=True)
-            images_path.mkdir(exist_ok=True)
 
-            self.logger.info("Retrieving species records")
-
-            is_there = False
             try:
                 records_df = pd.read_csv(species_path / "records.csv")
-                self.logger.info(
-                    "Found existing records.csv for %s, skipping. Delete it to re-download.",
-                    sp,
-                )
-                if len(records_df):
-                    is_there = True
-
             except FileNotFoundError:
-                if not is_there:
-                    records_df = self._get_species_records(sp)
-                    records_df.to_csv(species_path / "records.csv", index=False)
+                self.logger.info("Retrieving species records")
+                records_df = self._get_species_records(sp)
+                records_df.to_csv(species_path / "records.csv", index=False)
+            else:
+                self.logger.info(
+                    "Found existing records.csv for %s, skipping retrieval", sp
+                )
 
-                    self.logger.info("Downloading images")
-                    report = self._download_species_images(records_df, images_path)
-                    report.to_csv(
-                        species_path / "download_report.csv",
-                        index=True,
-                        index_label="index",
-                    )
-                    downloaded = int(report["success"].sum())
-                    self.logger.info("Downloaded %s images for %s", downloaded, sp)
+    def download_images(self) -> None:
+        """Download images from saved records and refresh per-image reports.
+
+        Valid existing images are reused. No species records are retrieved.
+
+        Raises:
+            FileNotFoundError: If a species has no saved records. Run
+                ``retrieve_records()`` first or provide its ``records.csv``.
+        """
+        for sp in self.species:
+            species_path = self.output_path / sp
+            records_path = species_path / "records.csv"
+            try:
+                records_df = pd.read_csv(records_path)
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    f"Missing records for {sp}: {records_path}. "
+                    "Run retrieve_records() before download_images()."
+                ) from exc
+
+            images_path = species_path / "imgs"
+            images_path.mkdir(exist_ok=True)
+            self.logger.info("Downloading images for %s", sp)
+            report = self._download_species_images(records_df, images_path)
+            report.to_csv(
+                species_path / "download_report.csv",
+                index=True,
+                index_label="index",
+            )
+            downloaded = int(report["success"].sum())
+            self.logger.info("Downloaded %s images for %s", downloaded, sp)
