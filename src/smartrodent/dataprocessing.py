@@ -1,10 +1,4 @@
-"""Image preprocessing and CLIP-based filtering utilities.
-
-The helpers in this module support the exploratory BioTrove workflow in
-``notebooks/process_biotrove.ipynb``. They load an OpenAI CLIP model, preprocess
-image batches, compare images against short text prompts, separate confident from
-ambiguous prompt matches, and visualize the results for manual review.
-"""
+"""Create YOLO detection and classification datasets from SpeciesNet outputs."""
 
 import json
 import shutil
@@ -21,7 +15,111 @@ from .base import YoloDatasetCreatorBase
 from .utils import path_component
 
 
-class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
+class _SpeciesNetDatasetMixin:
+    """Shared SpeciesNet input and detection filtering for dataset creators."""
+
+    @staticmethod
+    def _load_speciesnet_predictions(path_to_labels: str | Path) -> dict:
+        """Merge per-species SpeciesNet ``predictions.json`` files."""
+        merged_labels = {"predictions": []}
+        data_root = Path(path_to_labels)
+
+        for species_dir in sorted(p for p in data_root.iterdir() if p.is_dir()):
+            predictions_path = species_dir / "predictions.json"
+            if not predictions_path.exists():
+                continue
+
+            with open(predictions_path, "r") as f:
+                species_labels = json.load(f)
+
+            merged_labels["predictions"].extend(species_labels.get("predictions", []))
+
+        if not merged_labels["predictions"]:
+            raise FileNotFoundError(
+                f"No SpeciesNet predictions found under species folders in {data_root}"
+            )
+
+        return merged_labels
+
+    @staticmethod
+    def _filter_label_items(
+        detections: list,
+        *,
+        allowed_classes: list[str],
+        confidence_threshold: float,
+        iou_threshold: float,
+    ) -> list[tuple[int, dict]]:
+        """Filter detections by confidence/class and NMS, preserving original indices."""
+        # Keep original indices because SpeciesNet crop filenames include the
+        # detection index; index tracking must survive filtering and NMS.
+        candidates = [
+            (idx, deepcopy(detection)) for idx, detection in enumerate(detections)
+        ]
+        candidates = [
+            (idx, detection)
+            for idx, detection in candidates
+            if detection.get("conf", detection.get("confidence", 0.0))
+            >= confidence_threshold
+            and detection.get("label", detection.get("class")) in allowed_classes
+        ]
+        candidates.sort(
+            key=lambda item: item[1].get("conf", item[1].get("confidence", 0.0)),
+            reverse=True,
+        )
+
+        def bbox_xywh_to_xyxy_tensor(bbox: list[float]) -> torch.Tensor:
+            """Convert SpeciesNet [x_min, y_min, width, height] to xyxy for IoU."""
+            x_min, y_min, width, height = bbox
+            return torch.tensor(
+                [[x_min, y_min, x_min + width, y_min + height]], dtype=torch.float32
+            )
+
+        if not candidates:
+            return []
+
+        keep = []
+        suppressed = set()
+        # Confidence sorting lets each higher-confidence box suppress overlapping
+        # lower-confidence candidates, matching standard greedy NMS behavior.
+        for i, detection in enumerate(candidates):
+            if i in suppressed:
+                continue
+
+            keep.append(detection)
+            bbox = bbox_xywh_to_xyxy_tensor(detection[1]["bbox"])
+            for j in range(i + 1, len(candidates)):
+                if j in suppressed:
+                    continue
+
+                other_bbox = bbox_xywh_to_xyxy_tensor(candidates[j][1]["bbox"])
+                if box_iou(bbox, other_bbox).item() > iou_threshold:
+                    suppressed.add(j)
+
+        return keep
+
+    @staticmethod
+    def _background_image_paths(
+        background_image_dir: str | Path | None,
+        img_types: tuple[str, ...] | list[str],
+    ) -> list[Path]:
+        """Return valid background images, or an empty list if none were configured."""
+        if background_image_dir is None:
+            return []
+
+        directory = Path(background_image_dir)
+        if not directory.exists():
+            raise ValueError(f"Background image directory {directory} does not exist")
+
+        return sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() in img_types
+        )
+
+
+class YoloDetectorDatasetCreatorFromSpeciesnet(
+    _SpeciesNetDatasetMixin, YoloDatasetCreatorBase
+):
     def __init__(
         self,
         path_to_image_data: str,
@@ -60,98 +158,7 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
             create_detection_dirs=create_detection_dirs,
         )
         self.allowed_classes = labels_to_filter
-        self.labels = self._load_speciesnet_predictions()
-
-    def _load_speciesnet_predictions(self) -> dict:
-        """Merge per-species SpeciesNet ``predictions.json`` files.
-
-        ``path_to_image_data`` is expected to point at a directory whose immediate
-        children are species folders, each containing images plus a
-        ``predictions.json`` file produced for that species.
-        """
-        merged_labels = {"predictions": []}
-        data_root = Path(self.path_to_labels)
-
-        for species_dir in sorted(p for p in data_root.iterdir() if p.is_dir()):
-            predictions_path = species_dir / "predictions.json"
-            if not predictions_path.exists():
-                continue
-
-            with open(predictions_path, "r") as f:
-                species_labels = json.load(f)
-
-            merged_labels["predictions"].extend(species_labels.get("predictions", []))
-
-        if not merged_labels["predictions"]:
-            raise FileNotFoundError(
-                f"No SpeciesNet predictions found under species folders in {data_root}"
-            )
-
-        return merged_labels
-
-    def _filter_label_items(self, detections: list) -> list[tuple[int, dict]]:
-        """Filter SpeciesNet detections while preserving original detection indices.
-
-        The detector dataset only needs the filtered detection dictionaries, but the
-        classifier dataset must map each accepted detection back to a crop filename.
-        SpeciesNet crop names include the original detection index, so this helper keeps
-        ``(original_index, detection)`` pairs through confidence filtering, allowed-class
-        filtering, and NMS.
-        """
-
-        # this uses non-maximum suppression (NMS) to filter out overlapping detections based on their confidence scores.
-        # The assumption is that allowed classes represent **the same** class which got conflated by
-        # speciesnet, so there is no extra class equality check below anymore.
-
-        _detections = [
-            (idx, deepcopy(detection)) for idx, detection in enumerate(detections)
-        ]
-
-        # keep only those detections in which we are confident enough and which are in
-        # the classes we assume represent detections of relevant animals (allowed_classes)
-        _detections = [
-            (idx, detection)
-            for idx, detection in _detections
-            if detection.get("conf", detection.get("confidence", 0.0))
-            >= self.confidence_threshold
-            and detection.get("label", detection.get("class")) in self.allowed_classes
-        ]
-        _detections.sort(
-            key=lambda x: x[1].get("conf", x[1].get("confidence", 0.0)), reverse=True
-        )
-
-        def bbox_xywh_to_xyxy_tensor(bbox: list[float]) -> torch.Tensor:
-            """SpeciesNet bbox is [x_min, y_min, width, height]; box_iou expects [[x1, y1, x2, y2]]."""
-            x_min, y_min, width, height = bbox
-            return torch.tensor(
-                [[x_min, y_min, x_min + width, y_min + height]], dtype=torch.float32
-            )
-
-        if len(_detections) == 0:
-            return []
-
-        keep = []
-        suppressed = set()
-        # Go over detections sorted by confidence. If a later/lower-confidence detection
-        # overlaps enough with an earlier/higher-confidence detection, suppress it.
-        for i, d1 in enumerate(_detections):
-            if i in suppressed:
-                continue
-
-            keep.append(d1)
-            bbox_d1 = bbox_xywh_to_xyxy_tensor(d1[1]["bbox"])
-
-            for j in range(i + 1, len(_detections)):
-                if j in suppressed:
-                    continue
-
-                bbox_d2 = bbox_xywh_to_xyxy_tensor(_detections[j][1]["bbox"])
-                iou = box_iou(bbox_d1, bbox_d2).item()
-
-                if iou > self.IoU_threshold:
-                    suppressed.add(j)
-
-        return keep
+        self.labels = self._load_speciesnet_predictions(self.path_to_labels)
 
     def _filter_labels(self, detections: list) -> list:
         """Return only filtered SpeciesNet detection dictionaries.
@@ -160,7 +167,13 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
         ``_filter_label_items``. It keeps existing detector behavior unchanged while
         allowing the classifier dataset to use original detection indices.
         """
-        return [detection for _, detection in self._filter_label_items(detections)]
+        filtered = self._filter_label_items(
+            detections,
+            allowed_classes=self.allowed_classes,
+            confidence_threshold=self.confidence_threshold,
+            iou_threshold=self.IoU_threshold,
+        )
+        return [detection for _, detection in filtered]
 
     def _filter_by_observation(self, labels: dict) -> dict:
 
@@ -226,27 +239,6 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
             label_data[key] = detections_for_key
 
         return label_data
-
-    def _background_image_paths(self) -> list[Path]:
-        """Return background/empty full-image examples, if configured.
-
-        For YOLO detection these images are copied with empty ``.txt`` label files;
-        background is not added as a detector class. For classification subclasses the
-        same paths are copied into the background class directory.
-        """
-        if self.background_image_dir is None:
-            return []
-
-        if not self.background_image_dir.exists():
-            raise ValueError(
-                f"Background image directory {self.background_image_dir} does not exist"
-            )
-
-        return sorted(
-            p
-            for p in self.background_image_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in self.img_types
-        )
 
     def _split_paths(self, img_paths: list[Path]) -> dict[str, list[Path]]:
         """Shuffle and split image paths according to the configured fractions."""
@@ -349,7 +341,9 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
                     shutil.copy(src, dst)
                     assignments[split_name].append(dst)
 
-        background_split_images = self._split_paths(self._background_image_paths())
+        background_split_images = self._split_paths(
+            self._background_image_paths(self.background_image_dir, self.img_types)
+        )
         for split_name, split_paths in background_split_images.items():
             for src in split_paths:
                 dst = Path(self.dataset_output_path) / "images" / split_name / src.name
@@ -426,13 +420,13 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(YoloDatasetCreatorBase):
 
 
 class YoloClassifierDatasetCreatorFromSpeciesnet(
-    YoloDetectorDatasetCreatorFromSpeciesnet
+    _SpeciesNetDatasetMixin, YoloDatasetCreatorBase
 ):
     """Create an Ultralytics YOLO classification dataset from SpeciesNet crops.
 
     This assumes that SpeciesNet writes crops under per-species folders such as
     ``<species>/crops/animal/<source_stem>_<hash>_<detection_index>.jpg``. This class
-    reuses te YoloDetectorDatasetCreatorFromSpeciesnet's confidence, allowed-label, and NMS filtering, then
+    reuses the SpeciesNet mixin's confidence, allowed-label, and NMS filtering, then
     copies only the accepted crop files into the standard classification layout:
     ``train/<species>/``, ``val/<species>/``, and ``test/<species>/``.
 
@@ -484,20 +478,23 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
         self.background_class_name = background_class_name
         self.crop_records: dict[str, list[dict]] = {}
         self.missing_crops: list[dict] = []
+        resolved_labels_path = path_to_labels or path_to_image_data
         super().__init__(
             path_to_image_data=path_to_image_data,
-            path_to_labels=path_to_labels or path_to_image_data,
+            path_to_labels=resolved_labels_path,
             dataset_output_path=dataset_output_path,
             class_names=class_names,
             train_val_test_split=train_val_test_split,
             rng_seed=rng_seed,
             confidence_threshold=confidence_threshold,
             IoU_threshold=IoU_threshold,
-            labels_to_filter=labels_to_filter,
             create_detection_dirs=False,
-            background_image_dir=background_image_dir,
-            background_class_names=(),
         )
+        self.background_image_dir = (
+            Path(background_image_dir) if background_image_dir else None
+        )
+        self.allowed_classes = labels_to_filter
+        self.labels = self._load_speciesnet_predictions(self.path_to_labels)
 
     def _find_crop_path(
         self,
@@ -554,7 +551,10 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
             # Keep the original SpeciesNet detection index through filtering because it
             # is part of the crop filename written by ``extract_crop``.
             for detection_index, detection in self._filter_label_items(
-                pred.get("detections", [])
+                pred.get("detections", []),
+                allowed_classes=self.allowed_classes,
+                confidence_threshold=self.confidence_threshold,
+                iou_threshold=self.IoU_threshold,
             ):
                 crop_path = self._find_crop_path(
                     species=species,
@@ -584,7 +584,9 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(
                 )
 
         if self.background_class_name in records_by_species:
-            for image_path in self._background_image_paths():
+            for image_path in self._background_image_paths(
+                self.background_image_dir, self.img_types
+            ):
                 records_by_species[self.background_class_name].append(
                     {
                         "species": self.background_class_name,
