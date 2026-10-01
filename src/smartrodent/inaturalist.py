@@ -371,10 +371,16 @@ class InaturalistDataset(DatasetLoader):
             species_path.mkdir(parents=True, exist_ok=True)
             images_path.mkdir(exist_ok=True)
 
-            self.logger.info("Retrieving species records")
-            records_df = self._get_species_records(species)
-            records_df.to_csv(species_path / "records.csv", index=False)
+            try:
+                records_df = pd.read_csv(species_path / "records.csv")
+                self.logger.info(
+                    "Found existing records.csv for %s, skipping retrieval", species
+                )
+            except FileNotFoundError:
+                self.logger.info("Retrieving species records")
+                records_df = self._get_species_records(species)
+                records_df.to_csv(species_path / "records.csv", index=False)
 
-            self.logger.info("Downloading images")
-            downloaded = self._download_species_images(records_df, images_path)
-            self.logger.info("Downloaded %s images for %s", downloaded, species)
+                self.logger.info("Downloading images")
+                downloaded = self._download_species_images(records_df, images_path)
+                self.logger.info("Downloaded %s images for %s", downloaded, species)
