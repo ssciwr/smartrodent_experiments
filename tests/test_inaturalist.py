@@ -282,9 +282,7 @@ def test_file_not_found_outside_cache_read_propagates(dataset, monkeypatch, phas
     records = pd.DataFrame({"id": [123]})
     error = FileNotFoundError("phase failed")
     retrieve = (
-        Mock(side_effect=error)
-        if phase == "retrieval"
-        else Mock(return_value=records)
+        Mock(side_effect=error) if phase == "retrieval" else Mock(return_value=records)
     )
     download_images = Mock(side_effect=error)
     monkeypatch.setattr(dataset, "_get_species_records", retrieve)
@@ -388,7 +386,9 @@ def test_retrieve_records_does_not_download_images(dataset, monkeypatch, cached)
         assert [call.args[0] for call in retrieve.call_args_list] == dataset.species
     for species in dataset.species:
         species_path = dataset.output_path / species
-        pd.testing.assert_frame_equal(pd.read_csv(species_path / "records.csv"), records)
+        pd.testing.assert_frame_equal(
+            pd.read_csv(species_path / "records.csv"), records
+        )
         assert not (species_path / "imgs").exists()
         assert not (species_path / "download_report.csv").exists()
 
@@ -499,7 +499,13 @@ def test_inaturalist_no_observations_can_cross_phase_boundary(tmp_path, monkeypa
     species_path = dataset.output_path / "Mus musculus"
     records = pd.read_csv(species_path / "records.csv")
     assert records.empty
-    assert list(records.columns) == ["id", "photos"]
+    assert list(records.columns) == [
+        "id",
+        "photo_index",
+        "photo.id",
+        "photo.url",
+        "photo.license_code",
+    ]
     assert not (species_path / "imgs").exists()
 
     dataset.download_images()
@@ -507,3 +513,194 @@ def test_inaturalist_no_observations_can_cross_phase_boundary(tmp_path, monkeypa
     observations.assert_called_once()
     image_request.assert_not_called()
     assert (species_path / "imgs").is_dir()
+
+
+def make_dataset(output_path, **settings):
+    """Build a downloader whose output is isolated from project data."""
+    return InaturalistDataset(
+        output_path=output_path, species=["Mus musculus"], years=[2022], **settings
+    )
+
+
+def make_photo(photo_id, license_code="cc-by-nc"):
+    """Return representative photo metadata with a distinct identifier."""
+    return {
+        "id": photo_id,
+        "url": f"https://example.test/{photo_id}/square.jpg",
+        "license_code": license_code,
+        "attribution": "Example photographer",
+    }
+
+
+def test_retrieval_duplicates_observation_metadata_per_photo(tmp_path, monkeypatch):
+    """Each photo retains its own fields and its observation's metadata."""
+    dataset = make_dataset(tmp_path)
+    observations = [
+        {
+            "id": 123,
+            "observed_on": "2022-03-04",
+            "taxon": {"name": "Mus musculus", "id": 456},
+            "photos": [make_photo(11), make_photo(12, "cc0")],
+        },
+        {"id": 124, "photos": []},
+        {"id": 125},
+    ]
+    monkeypatch.setattr(
+        "smartrodent.inaturalist.get_observations",
+        Mock(return_value={"results": observations}),
+    )
+
+    records = dataset._get_species_records("Mus musculus")
+
+    assert len(records) == 2
+    assert "photos" not in records.columns
+    assert records["id"].tolist() == [123, 123]
+    assert records["taxon.name"].tolist() == ["Mus musculus"] * 2
+    assert records["taxon.id"].tolist() == [456] * 2
+    assert records["observed_on"].tolist() == ["2022-03-04"] * 2
+    assert records["photo_index"].tolist() == [0, 1]
+    assert records["photo.id"].tolist() == [11, 12]
+    assert records["photo.license_code"].tolist() == ["cc-by-nc", "cc0"]
+    assert records["photo.attribution"].tolist() == ["Example photographer"] * 2
+
+
+@pytest.mark.parametrize("observations", [[], [{"id": 123, "photos": []}]])
+def test_empty_flat_records_cross_csv_boundary(tmp_path, monkeypatch, observations):
+    """No photos produce a readable header-only flat CSV and no requests."""
+    dataset = make_dataset(tmp_path)
+    monkeypatch.setattr(
+        "smartrodent.inaturalist.get_observations",
+        Mock(return_value={"results": observations}),
+    )
+    get = Mock()
+    monkeypatch.setattr("smartrodent.inaturalist.requests.get", get)
+
+    dataset.retrieve_records()
+    records = pd.read_csv(tmp_path / "Mus musculus" / "records.csv")
+    dataset.download_images()
+
+    assert records.empty
+    assert {"id", "photo_index", "photo.id", "photo.url", "photo.license_code"} <= set(
+        records.columns
+    )
+    assert "photos" not in records.columns
+    get.assert_not_called()
+
+
+def test_flat_records_download_and_resume_original_filenames(tmp_path, monkeypatch):
+    """CSV round-trips preserve photo indices, licenses, URLs, and resume paths."""
+    dataset = make_dataset(tmp_path)
+    observations = [
+        {"id": 123, "photos": [make_photo(11), make_photo(12, "cc0"), make_photo(13)]}
+    ]
+    fetch = Mock(return_value={"results": observations})
+    monkeypatch.setattr("smartrodent.inaturalist.get_observations", fetch)
+    dataset.retrieve_records()
+    records_path = tmp_path / "Mus musculus" / "records.csv"
+    original_bytes = records_path.read_bytes()
+    images_path = tmp_path / "Mus musculus" / "imgs"
+    images_path.mkdir()
+    (images_path / "123_0.jpg").write_bytes(b"existing image")
+    get = Mock(return_value=Mock(content=b"new image"))
+    monkeypatch.setattr("smartrodent.inaturalist.requests.get", get)
+
+    dataset.download()
+
+    assert (images_path / "123_0.jpg").read_bytes() == b"existing image"
+    assert not (images_path / "123_1.jpg").exists()
+    assert (images_path / "123_2.jpg").read_bytes() == b"new image"
+    get.assert_called_once_with("https://example.test/13/large.jpg", timeout=30)
+    fetch.assert_called_once()
+    assert records_path.read_bytes() == original_bytes
+
+
+def test_flat_records_respect_download_cap(tmp_path, monkeypatch):
+    """Multiple photos on one observation cannot exceed the image limit."""
+    dataset = make_dataset(tmp_path, max_img_num=2)
+    monkeypatch.setattr(
+        "smartrodent.inaturalist.get_observations",
+        Mock(
+            return_value={
+                "results": [
+                    {
+                        "id": 123,
+                        "photos": [make_photo(11), make_photo(12), make_photo(13)],
+                    }
+                ]
+            }
+        ),
+    )
+    get = Mock(return_value=Mock(content=b"image"))
+    monkeypatch.setattr("smartrodent.inaturalist.requests.get", get)
+
+    dataset.download()
+
+    assert get.call_count == 2
+    assert sorted(p.name for p in (tmp_path / "Mus musculus" / "imgs").iterdir()) == [
+        "123_0.jpg",
+        "123_1.jpg",
+    ]
+
+
+def test_missing_flat_photo_url_is_skipped_after_csv_round_trip(tmp_path, monkeypatch):
+    """Missing URL cells become NaN on CSV read and must not be requested."""
+    dataset = make_dataset(tmp_path)
+    monkeypatch.setattr(
+        "smartrodent.inaturalist.get_observations",
+        Mock(
+            return_value={
+                "results": [
+                    {
+                        "id": 123,
+                        "photos": [
+                            {"id": 11, "license_code": "cc-by-nc"},
+                            make_photo(12),
+                        ],
+                    }
+                ]
+            }
+        ),
+    )
+    get = Mock(return_value=Mock(content=b"image"))
+    monkeypatch.setattr("smartrodent.inaturalist.requests.get", get)
+
+    dataset.download()
+
+    get.assert_called_once_with("https://example.test/12/large.jpg", timeout=30)
+    assert not (tmp_path / "Mus musculus" / "imgs" / "123_0.jpg").exists()
+
+
+@given(photo_counts=st.lists(st.integers(min_value=0, max_value=5), max_size=8))
+def test_flattening_preserves_every_photo_and_observation_identity(photo_counts):
+    """Arbitrary photo counts retain each photo exactly once with its owner."""
+    observations = [
+        {
+            "id": owner,
+            "photos": [make_photo(owner * 10 + index) for index in range(count)],
+        }
+        for owner, count in enumerate(photo_counts, start=1)
+    ]
+    with TemporaryDirectory() as directory:
+        dataset = make_dataset(directory)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(dataset.logger, "disabled", True)
+            patch.setattr(
+                "smartrodent.inaturalist.get_observations",
+                Mock(return_value={"results": observations}),
+            )
+            records = dataset._get_species_records("Mus musculus")
+            repeated = dataset._get_species_records("Mus musculus")
+        assert len(records) == sum(photo_counts)
+        assert "photos" not in records.columns
+        actual = set(
+            records[["id", "photo_index", "photo.id"]].itertuples(
+                index=False, name=None
+            )
+        )
+        expected = {
+            (owner, index, owner * 10 + index)
+            for owner, count in enumerate(photo_counts, start=1)
+            for index in range(count)
+        }
+        assert actual == expected
+        pd.testing.assert_frame_equal(records, repeated)

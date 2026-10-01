@@ -226,20 +226,20 @@ class InaturalistDataset(DatasetLoader):
             shutil.copy2(self.config_path, destination)
 
     def _get_species_records(self, species: str) -> pd.DataFrame:
-        """Fetch and deterministically shuffle observation records for a species.
+        """Fetch image-level records with duplicated observation metadata.
 
-        One paginated API request is made per configured year, and the combined
-        results are flattened into a table. Shuffling with `seed` keeps the
-        selection reproducible while stopping the API's ordering from biasing a
-        dataset that is later capped by `max_img_num`.
+        One paginated API request is made per configured year. Observations are
+        shuffled and capped as before, then expanded into one row per photo.
+        The original photo index is retained for stable download filenames.
 
         Args:
             species: Scientific name to request from iNaturalist.
 
         Returns:
-            The flattened observation records in shuffled order, or an empty
-            frame if no observation was found. Columns follow the iNaturalist
-            response, with nested fields flattened to dotted names.
+            One row per photo, with observation fields duplicated and photo
+            fields prefixed by ``photo.``. ``id`` identifies the observation;
+            ``photo_index`` is its original zero-based photo position.
+            Observations without photos contribute no rows.
         """
         records: list[dict[str, Any]] = []
         for year in self.years:
@@ -258,7 +258,7 @@ class InaturalistDataset(DatasetLoader):
         records_df = pd.json_normalize(records)
         if records_df.empty:
             # A header-only CSV must remain readable by the separate image phase.
-            return pd.DataFrame(columns=["id", "photos"])
+            return self._flatten_photo_records(records_df)
 
         # Random sampling prevents the API's ordering from biasing a capped dataset.
         records_df: pd.DataFrame = records_df.sample(
@@ -269,7 +269,56 @@ class InaturalistDataset(DatasetLoader):
         if len(records_df) > self.max_img_num:
             records_df: pd.DataFrame = records_df.head(self.max_img_num)
 
-        return records_df
+        return self._flatten_photo_records(records_df)
+
+    @staticmethod
+    def _flatten_photo_records(observations: pd.DataFrame) -> pd.DataFrame:
+        """Duplicate observation fields for each photo, preserving its position."""
+        rows: list[dict[str, Any]] = []
+        for observation in observations.to_dict(orient="records"):
+            photos = observation.pop("photos", None)
+            if not isinstance(photos, list):
+                continue
+            for index, photo in enumerate(photos):
+                if isinstance(photo, dict):
+                    rows.append({**observation, "photo_index": index, "photo": photo})
+
+        # Empty or incomplete photo metadata still needs a readable CSV schema.
+        required_columns = [
+            "id",
+            "photo_index",
+            "photo.id",
+            "photo.url",
+            "photo.license_code",
+        ]
+        records = pd.json_normalize(rows)
+        columns = list(dict.fromkeys([*records.columns, *required_columns]))
+        return records.reindex(columns=columns)
+
+    @staticmethod
+    def _record_photos(record: pd.Series) -> list[tuple[int, dict[str, Any]]]:
+        """Read a flat photo row or a legacy observation's nested photo list."""
+        if "photo_index" in record.index:
+            index = record["photo_index"]
+            if pd.isna(index):
+                return []
+            photo = {
+                column.removeprefix("photo."): value
+                for column, value in record.items()
+                if column.startswith("photo.")
+            }
+            return [(int(index), photo)]
+        elif "photos" in record.index:
+            photos = record["photos"]
+            if not isinstance(photos, list):
+                return []
+            return [
+                (index, photo)
+                for index, photo in enumerate(photos)
+                if isinstance(photo, dict)
+            ]
+        else:
+            return []
 
     def _download_photo(
         self, photo: dict[str, Any], images_path: Path, observation_id: int, index: int
@@ -297,7 +346,8 @@ class InaturalistDataset(DatasetLoader):
             return False
 
         photo_url = photo.get("url")
-        if not photo_url:
+        # Empty CSV cells read back as NaN rather than None or an empty string.
+        if not isinstance(photo_url, str) or not photo_url:
             return False
 
         image_path = images_path / f"{observation_id}_{index}.jpg"
@@ -314,14 +364,13 @@ class InaturalistDataset(DatasetLoader):
     ) -> int:
         """Download up to `max_img_num` allowed photos from a species' records.
 
-        Records are processed in the shuffled order they arrive in, and records
-        without a usable id or photo list are skipped. The cap is checked both
-        between records and between the photos of one record, so an observation
-        with many photos cannot overshoot it.
+        Flat image rows and legacy observation rows with nested photo lists are
+        supported. Records without a usable observation id or photo are skipped.
+        The image cap applies across both formats.
 
         Args:
-            records_df: Observation records, as returned by
-                `_get_species_records`.
+            records_df: Image-level records returned by `_get_species_records`,
+                or legacy observation-level records loaded from a CSV cache.
             images_path: Directory the images are written to.
 
         Returns:
@@ -335,20 +384,17 @@ class InaturalistDataset(DatasetLoader):
             if downloaded_images >= self.max_img_num:
                 break
 
-            photos = record.get("photos", [])
             observation_id = record.get("id")
-            if not isinstance(photos, list) or pd.isna(observation_id):
+            if pd.isna(observation_id):
                 continue
 
             # A record without an id turns the whole column into floats, so the
             # id is normalised back to an integer for the file name.
             observation_id = int(observation_id)
-            for index, photo in enumerate(photos):
+            for index, photo in self._record_photos(record):
                 if downloaded_images >= self.max_img_num:
                     break
-                if isinstance(photo, dict) and self._download_photo(
-                    photo, images_path, observation_id, index
-                ):
+                if self._download_photo(photo, images_path, observation_id, index):
                     downloaded_images += 1
 
         return downloaded_images
@@ -366,8 +412,10 @@ class InaturalistDataset(DatasetLoader):
     def retrieve_records(self) -> None:
         """Retrieve and save records for all species without downloading images.
 
-        Existing readable ``records.csv`` files are reused, including empty
-        tables with column headers. Delete a cache to retrieve fresh records.
+        New CSVs contain one row per photo, duplicating observation metadata.
+        Existing readable CSVs are reused without conversion, including legacy
+        observation-level tables and empty tables with headers. Delete a cache
+        to retrieve fresh records.
 
         Raises:
             requests.HTTPError: If an observation request returns an error.
@@ -405,7 +453,7 @@ class InaturalistDataset(DatasetLoader):
             species_path = self.output_path / species
             records_path = species_path / "records.csv"
             try:
-                # Restore photo lists stored as Python literals in the CSV.
+                # Only legacy CSVs contain photo lists stored as Python literals.
                 records_df = pd.read_csv(
                     records_path, converters={"photos": ast.literal_eval}
                 )
