@@ -652,28 +652,15 @@ class GbifDataset(DatasetLoader):
             images_path.mkdir(exist_ok=True)
 
             self.logger.info("Retrieving species records")
+            records_df = self._get_species_records(sp)
+            records_df.to_csv(species_path / "records.csv", index=False)
 
-            is_there = False
-            try:
-                records_df = pd.read_csv(species_path / "records.csv")
-                self.logger.info(
-                    "Found existing records.csv for %s, skipping. Delete it to re-download.",
-                    sp,
-                )
-                if len(records_df):
-                    is_there = True
-
-            except FileNotFoundError:
-                if not is_there:
-                    records_df = self._get_species_records(sp)
-                    records_df.to_csv(species_path / "records.csv", index=False)
-
-                    self.logger.info("Downloading images")
-                    report = self._download_species_images(records_df, images_path)
-                    report.to_csv(
-                        species_path / "download_report.csv",
-                        index=True,
-                        index_label="index",
-                    )
-                    downloaded = int(report["success"].sum())
-                    self.logger.info("Downloaded %s images for %s", downloaded, sp)
+            self.logger.info("Downloading images")
+            report = self._download_species_images(records_df, images_path)
+            report.to_csv(
+                species_path / "download_report.csv",
+                index=True,
+                index_label="index",
+            )
+            downloaded = int(report["success"].sum())
+            self.logger.info("Downloaded %s images for %s", downloaded, sp)
