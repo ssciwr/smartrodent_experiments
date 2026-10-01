@@ -37,3 +37,6 @@ datasets
 training
 tuning
 outputs
+
+# env files
+.env
