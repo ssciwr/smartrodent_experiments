@@ -20,6 +20,7 @@ from pygbif import species as gbif_species
 
 import smartrodent.gbif as gbif_module
 from smartrodent.gbif import GbifDataset
+from smartrodent.gbif_archive import GbifArchiveReader
 from smartrodent.licenses import (
     LICENSE_MANAGER_TYPES,
     CreativeCommonsLicenseManager,
@@ -1421,7 +1422,9 @@ def make_bulk_match(name="Mus musculus", key="100", accepted_name=None):
     }
 
 
-def make_bulk_archive(occurrences=None, media=None, reverse_columns=False, omit=()):
+def make_bulk_archive(
+    occurrences=None, media=None, reverse_columns=False, omit=(), field_defaults=None
+):
     """Build a small DWCA with explicit term mappings and linked media rows."""
     if occurrences is None:
         occurrences = [
@@ -1510,6 +1513,20 @@ def make_bulk_archive(occurrences=None, media=None, reverse_columns=False, omit=
                 else:
                     base = "http://rs.tdwg.org/dwc/terms/"
                 ET.SubElement(table, "field", index=str(index), term=base + field)
+            for name, default in (field_defaults or {}).get(tag, {}).items():
+                declaration = next(
+                    (
+                        field
+                        for field in table.findall("field")
+                        if field.attrib["term"].rsplit("/", 1)[-1] == name
+                    ),
+                    None,
+                )
+                if declaration is None:
+                    declaration = ET.SubElement(
+                        table, "field", term="http://rs.tdwg.org/dwc/terms/" + name
+                    )
+                declaration.set("default", default)
             stream = StringIO()
             writer = csv.DictWriter(
                 stream, fieldnames=fields, delimiter="\t", lineterminator="\n"
@@ -1521,6 +1538,115 @@ def make_bulk_archive(occurrences=None, media=None, reverse_columns=False, omit=
         if "meta.xml" not in omit:
             archive.writestr("meta.xml", ET.tostring(root, encoding="utf-8"))
     return buffer.getvalue()
+
+
+@pytest.mark.parametrize("table_tag", ["core", "extension"])
+@pytest.mark.parametrize("default", ["WGS84", ""])
+def test_archive_default_only_field_applies_to_every_media_row(
+    tmp_path, table_tag, default
+):
+    """A constant XML field needs no physical column and preserves media joins."""
+    media = [
+        {"gbifID": "123", "identifier": "https://example.test/first.jpg"},
+        {"gbifID": "123", "identifier": "https://example.test/second.jpg"},
+    ]
+    archive_path = tmp_path / "default-field.zip"
+    with ZipFile(BytesIO(make_bulk_archive(media=media))) as source:
+        descriptor = ET.fromstring(source.read("meta.xml"))
+        table = descriptor.find(f"{{*}}{table_tag}")
+        assert table is not None
+        # GBIF declares the shared coordinate datum once, without a table index.
+        ET.SubElement(
+            table,
+            "{http://rs.tdwg.org/dwc/text/}field",
+            term="http://rs.tdwg.org/dwc/terms/geodeticDatum",
+            default=default,
+        )
+        with ZipFile(archive_path, "w") as target:
+            for name in source.namelist():
+                content = (
+                    ET.tostring(descriptor, encoding="utf-8")
+                    if name == "meta.xml"
+                    else source.read(name)
+                )
+                target.writestr(name, content)
+
+    records = GbifArchiveReader(archive_path).read()
+
+    column = "geodeticDatum" if table_tag == "core" else "media_geodeticDatum"
+    actual = records[column].astype(object).where(records[column].notna(), None)
+    assert actual.tolist() == [default or None, default or None]
+    assert records["_core_id"].tolist() == ["123", "123"]
+    assert records["media_identifier"].tolist() == [
+        "https://example.test/first.jpg",
+        "https://example.test/second.jpg",
+    ]
+
+
+@pytest.mark.parametrize("table_tag", ["core", "extension"])
+@given(
+    default=st.sampled_from(["WGS84", "EPSG:4326", ""]),
+    values=st.lists(
+        st.sampled_from(["", "EPSG:4258", "NA", " "]), min_size=1, max_size=8
+    ),
+)
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_archive_indexed_defaults_fill_only_empty_values(
+    tmp_path, table_tag, default, values
+):
+    """Indexed defaults fill empty cells, preserving explicit values and row count."""
+    occurrences = [
+        {"gbifID": str(index), "geodeticDatum": value}
+        for index, value in enumerate(values)
+    ]
+    media = [
+        {
+            "gbifID": str(index),
+            "identifier": f"https://example.test/{index}.jpg",
+            "geodeticDatum": value,
+        }
+        for index, value in enumerate(values)
+    ]
+    path = tmp_path / "indexed-defaults.zip"
+    path.write_bytes(
+        make_bulk_archive(
+            occurrences=occurrences,
+            media=media,
+            field_defaults={table_tag: {"geodeticDatum": default}},
+        )
+    )
+
+    records = GbifArchiveReader(path).read()
+
+    column = "geodeticDatum" if table_tag == "core" else "media_geodeticDatum"
+    expected = [value if value != "" else (default or None) for value in values]
+    actual = records[column].astype(object).where(records[column].notna(), None)
+    assert actual.tolist() == expected
+    assert records["_core_id"].tolist() == [str(index) for index in range(len(values))]
+
+
+@pytest.mark.parametrize("empty_table", ["core", "extension"])
+def test_archive_constant_defaults_do_not_create_rows_for_empty_tables(
+    tmp_path, empty_table
+):
+    """Defaults preserve empty results and their declared columns."""
+    path = tmp_path / "empty-defaults.zip"
+    path.write_bytes(
+        make_bulk_archive(
+            occurrences=[] if empty_table == "core" else None,
+            media=[] if empty_table == "extension" else None,
+            field_defaults={
+                "core": {"geodeticDatum": "WGS84"},
+                "extension": {"identifier": "https://example.test/default.jpg"},
+            },
+        )
+    )
+
+    records = GbifArchiveReader(path).read()
+
+    assert records.empty
+    assert "geodeticDatum" in records.columns
+    assert "media_identifier" in records.columns
 
 
 @pytest.fixture
@@ -1996,6 +2122,7 @@ def test_bulk_rejects_archives_missing_required_tables(tmp_path, bulk_api, omitt
         "missing_coreid",
         "negative_index",
         "wide_index",
+        "missing_field_index_and_default",
     ],
 )
 def test_bulk_rejects_invalid_archive_descriptors(tmp_path, bulk_api, problem):
@@ -2017,6 +2144,8 @@ def test_bulk_rejects_invalid_archive_descriptors(tmp_path, bulk_api, problem):
             core.find("{*}id").set("index", "-1")
         elif problem == "wide_index":
             core.find("{*}id").set("index", "999")
+        elif problem == "missing_field_index_and_default":
+            del core.find("{*}field").attrib["index"]
         elif problem == "invalid_xml":
             pass  # Supply invalid bytes below rather than build invalid ElementTree nodes.
         else:

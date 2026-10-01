@@ -13,7 +13,7 @@ import pandas as pd
 class GbifArchiveReader:
     """Join GBIF media to occurrences without extracting archive members.
 
-    XML is used only for table locations, column meanings, and join indices.
+    XML supplies table locations, column meanings, field defaults, and join indices.
     Pandas handles the tabular data; this is not a general-purpose DWCA reader.
 
     Args:
@@ -88,10 +88,19 @@ class GbifArchiveReader:
         if identifier is None or identifier.get("index") is None:
             raise ValueError(f"GBIF table {location} is missing its {id_tag} index")
         id_index = int(identifier.attrib["index"])
-        fields = {
-            int(field.attrib["index"]): field.attrib["term"].rsplit("/", 1)[-1]
-            for field in table.findall("{*}field")
-        }
+        fields = {}
+        defaults = {}
+        for field in table.findall("{*}field"):
+            name = field.attrib["term"].rsplit("/", 1)[-1]
+            index = field.get("index")
+            if index is None and "default" not in field.attrib:
+                raise ValueError(
+                    f"GBIF table {location} field {name} has neither index nor default"
+                )
+            if index is not None:
+                fields[int(index)] = name
+            if "default" in field.attrib:
+                defaults[name] = field.attrib["default"]
         indices = [id_index, *fields]
         if min(indices) < 0:
             raise ValueError(f"Invalid column index in GBIF table {location}")
@@ -119,4 +128,11 @@ class GbifArchiveReader:
         core_ids = frame[id_index]
         frame = frame.rename(columns=fields)
         frame["_core_id"] = core_ids
+        # Apply defaults before normalizing empty cells: explicit values must survive.
+        for name, default in defaults.items():
+            if name in frame.columns:
+                frame[name] = frame[name].replace("", default)
+            else:
+                # Constant descriptor fields have no physical column in the table.
+                frame[name] = default
         return frame.replace("", None)
