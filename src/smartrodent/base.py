@@ -72,48 +72,6 @@ class DatasetLoader(Configurable, Protocol):
         ...
 
 
-class ImageFilterBase(ABC):
-    """Abstract base for image filters that load a model and score images."""
-
-    def __init__(self, model: str, tol: float):
-        self.tol = tol
-        self._load_model(self.resolve_local_model(model))
-
-    @abstractmethod
-    def _load_model(self, model: str):
-        """Load the model identified by ``model``."""
-        pass
-
-    def resolve_local_model(self, model_name: str | Path) -> str:
-        """Resolve bundled model weights relative to this file when present."""
-        model_path = Path(model_name)
-        if model_path.is_absolute():
-            return str(model_path)
-
-        bundled_path = Path(__file__).with_name(str(model_name))
-        return str(bundled_path) if bundled_path.exists() else str(model_name)
-
-    @abstractmethod
-    def compute_similarity(
-        self, images: torch.Tensor | list | np.ndarray
-    ) -> torch.Tensor:
-        """Compute similarities for the supplied images."""
-        pass
-
-    @abstractmethod
-    def filter_similarities(
-        self,
-        similarity: torch.Tensor | list | np.ndarray,
-    ) -> tuple | list:
-        """Filter similarity scores and return the selected results."""
-        pass
-
-    @abstractmethod
-    def decisions(self, imgs: list, decided: torch.Tensor | list | np.ndarray) -> dict:
-        """Map filtered results back to their input images."""
-        pass
-
-
 class YoloDatasetCreatorBase(ABC):
     """Shared setup and interface for YOLO dataset creators."""
 
@@ -176,33 +134,6 @@ class YoloDatasetCreatorBase(ABC):
             (output_path / "images").mkdir(parents=True, exist_ok=True)
 
     @abstractmethod
-    def _filter_by_observation(self) -> dict[str, list[Path]]:
-        """Select observations suitable for dataset creation."""
-        pass
-
-    @abstractmethod
-    def _filter_labels(self, detections: list) -> list:
-        """Filter raw detections according to creator settings."""
-        pass
-
-    @abstractmethod
-    def _split_train_val_test(
-        self,
-    ) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
-        """Assign selected images to the train, validation, and test splits."""
-        pass
-
-    @abstractmethod
-    def _preprocess_labels(self, raw_labels: dict) -> dict:
-        """Convert raw labels into the format expected by the writer."""
-        pass
-
-    @abstractmethod
-    def _write_labels(
-        self,
-        paths: dict[str, list[Path]],
-        assignments: dict[str, list[Path]],
-        preprocessed_labels: dict,
-    ) -> Path:
-        """Write images and labels into the generated dataset."""
+    def create(self) -> Path:
+        """Create the configured dataset and return its output directory."""
         pass
