@@ -1,0 +1,58 @@
+gbif:
+  output_path: ./datasets/gbif/
+  years: []
+  first_year: 2000
+  last_year: 2026
+  species:
+    - Rattus norvegicus # brown rat
+    - Rattus rattus # black rat
+    - Mus musculus # house mouse
+    - Apodemus agrarius # striped field mouse
+    - Apodemus flavicollis # yellow-necked field mouse
+    - Apodemus sylvaticus # wood mouse
+    - Arvicola amphibius #
+    - Microtus arvalis #
+    - Clethrionomys glareolus #
+    - Microtus agrestis #
+    - Crocidura leucodon #
+    - Sorex araneus #
+    - Sorex minutus #
+    - Sorex coronatus #
+    # rodents in sri lanka
+    - Suncus murinus #
+    - Bandicota indica # greater bandicot rat
+    - Bandicota bengalensis # lessert bandicot rat
+    - Mus booduga # little indian field mouse
+    - Vandeleuria oleraceus #
+    # predators of snakes and rodents (birds, mammals )
+    - Vulpes vulpes # red fox
+    - Buteo buteo # common buzzard
+    - Meles meles # european badger
+    - Ciconia ciconia # white stork
+    - Ardea cinerea # grey heron
+    # snakes
+    - Vipera berus # common european adder
+    - Coronella austriaca # smooth snake
+    - Natrix natrix # grass snake
+    - Natrix helvetica # barred grass snake
+    # snakes in sri lanka
+    - Ptyas mucosa #
+    - Bungarus caeruleus #
+    - Naja naja #
+    - Daboia russelii #
+    - Coelognathus helena #
+    # predators from sri lanka
+    - Spilornis cheela
+    - Varanus bengalensis #
+    - Centropus sinensis #
+    - Pavo cristatus # peacock
+  seed: 42
+  maxlen: 2500
+  allowed_licenses:
+    creative-commons:
+      - cc0
+      - cc-by
+      - cc-by-sa
+      - cc-by-nc
+      - cc-by-nc-sa
+  media_type: StillImage
