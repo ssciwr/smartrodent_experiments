@@ -363,12 +363,6 @@ class InaturalistDataset(DatasetLoader):
         self.retrieve_records()
         self.download_images()
 
-    def _read_species_records(self, records_path: Path) -> pd.DataFrame:
-        """Read cached observations, restoring nested photo metadata from CSV."""
-        # CSV stores nested photo lists as Python literals; restore them so
-        # cached records behave like freshly retrieved observations.
-        return pd.read_csv(records_path, converters={"photos": ast.literal_eval})
-
     def retrieve_records(self) -> None:
         """Retrieve and save records for all species without downloading images.
 
@@ -384,7 +378,9 @@ class InaturalistDataset(DatasetLoader):
             species_path.mkdir(parents=True, exist_ok=True)
 
             try:
-                self._read_species_records(species_path / "records.csv")
+                pd.read_csv(
+                    species_path / "records.csv", converters={"photos": ast.literal_eval}
+                )
             except FileNotFoundError:
                 self.logger.info("Retrieving species records")
                 records_df = self._get_species_records(species)
@@ -408,7 +404,10 @@ class InaturalistDataset(DatasetLoader):
             species_path = self.output_path / species
             records_path = species_path / "records.csv"
             try:
-                records_df = self._read_species_records(records_path)
+                # Restore photo lists stored as Python literals in the CSV.
+                records_df = pd.read_csv(
+                    records_path, converters={"photos": ast.literal_eval}
+                )
             except FileNotFoundError as exc:
                 raise FileNotFoundError(
                     f"Missing records for {species}: {records_path}. "
