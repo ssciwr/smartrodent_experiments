@@ -86,6 +86,7 @@ data:
     cache_file: /mnt/dataLinux/machinelearning_data/smartrodent/datasets/inaturalist/api_requests.db
     ratelimit_path: /mnt/dataLinux/machinelearning_data/smartrodent/datasets/inaturalist/api_ratelimit.db
     backoff_factor: 0.5
+    # Bounds request retries in both the API session and downloader retry loops.
     max_retries: 5
     allowed_licenses:
       - cc0

@@ -52,7 +52,7 @@ class InaturalistDataset(DatasetLoader):
         ratelimit_path: Persistent SQLite rate-limit path. Defaults next to
             `output_path` and is retained after downloads.
         backoff_factor: Exponential backoff factor for API retries.
-        max_retries: Maximum API retries performed by the persistent session.
+        max_retries: Maximum retries after the initial failure for API requests.
         config_path: Optional source YAML file to copy into `output_path`.
 
     Attributes:
@@ -117,6 +117,11 @@ class InaturalistDataset(DatasetLoader):
             raise ValueError("max_observations must be an integer")
         if self.max_observations < 0:
             raise ValueError("max_observations must be zero or greater")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int):
+            raise ValueError("max_retries must be a nonnegative integer")
+        if max_retries < 0:
+            raise ValueError("max_retries must be a nonnegative integer")
+        self.max_retries = max_retries
         if not self.species:
             raise ValueError("species must contain at least one scientific name")
 
@@ -296,6 +301,7 @@ class InaturalistDataset(DatasetLoader):
         """
         records: list[dict[str, Any]] = []
         remaining = self.max_observations
+        consecutive_errors = 0
         page = 1
         with tqdm(
             total=self.max_observations, desc=f"Fetching {species} records"
@@ -320,6 +326,7 @@ class InaturalistDataset(DatasetLoader):
                         fields="all",
                         session=self.session,
                     )
+                    consecutive_errors = 0
                     page_records = response.get("results", [])[:remaining]
                     records.extend(page_records)
                     retrieved = len(page_records)
@@ -335,13 +342,19 @@ class InaturalistDataset(DatasetLoader):
                     page += 1
                 except requests.exceptions.RetryError as exc:
                     self.logger.error("Retry error while fetching records: %s", exc)
-                    time.sleep(30)
+                    consecutive_errors = self._retry_after_error(
+                        exc, consecutive_errors, delay_seconds=30
+                    )
                 except requests.HTTPError as exc:
                     self.logger.error("Failed to fetch records: %s", exc)
-                    time.sleep(30)
+                    consecutive_errors = self._retry_after_error(
+                        exc, consecutive_errors, delay_seconds=30
+                    )
                 except requests.RequestException as exc:
                     self.logger.error("Request error while fetching records: %s", exc)
-                    time.sleep(30)
+                    consecutive_errors = self._retry_after_error(
+                        exc, consecutive_errors, delay_seconds=30
+                    )
                 except Exception as exc:
                     self.logger.error(
                         "Unexpected error while fetching records: %s", exc
@@ -375,6 +388,28 @@ class InaturalistDataset(DatasetLoader):
             self.max_img_num
         )
         return records_df.reset_index(drop=True)
+
+    def _retry_after_error(
+        self, error: Exception, consecutive_errors: int, *, delay_seconds: int
+    ) -> int:
+        """Bound a manual retry loop using the configured retry budget.
+
+        Args:
+            error: The latest anticipated request failure.
+            consecutive_errors: Number of failures for the current request so far.
+            delay_seconds: Delay before retrying, if retries remain.
+
+        Returns:
+            Updated consecutive error count.
+
+        Raises:
+            The original request exception after ``max_retries`` retries.
+        """
+        next_error_count = consecutive_errors + 1
+        if next_error_count > self.max_retries:
+            raise error
+        time.sleep(delay_seconds)
+        return next_error_count
 
     def _download_photo(
         self, photo: dict[str, Any], images_path: Path, observation_id: int, index: int
@@ -440,6 +475,7 @@ class InaturalistDataset(DatasetLoader):
             )
 
         downloaded_images = 0
+        consecutive_errors = 0
         with tqdm(total=len(records_df)) as progress:
             i = 0
             while i < len(records_df) and downloaded_images < self.max_img_num:
@@ -454,6 +490,7 @@ class InaturalistDataset(DatasetLoader):
                         or not isinstance(photo_url, str)
                         or not photo_url
                     ):
+                        consecutive_errors = 0
                         i += 1
                         progress.update(1)
                         continue
@@ -479,20 +516,29 @@ class InaturalistDataset(DatasetLoader):
                         )
                     progress.update(1)
                     i += 1
+                    consecutive_errors = 0
                 except requests.exceptions.RetryError as exc:
                     self.logger.error("Retry error while fetching image: %s", exc)
-                    time.sleep(20)
+                    consecutive_errors = self._retry_after_error(
+                        exc, consecutive_errors, delay_seconds=20
+                    )
                 except urllib3.exceptions.MaxRetryError as exc:
                     self.logger.error(
                         "Max retries exceeded while fetching image: %s", exc
                     )
-                    time.sleep(20)
+                    consecutive_errors = self._retry_after_error(
+                        exc, consecutive_errors, delay_seconds=20
+                    )
                 except requests.HTTPError as exc:
                     self.logger.error("Failed to fetch image: %s", exc)
-                    time.sleep(20)
+                    consecutive_errors = self._retry_after_error(
+                        exc, consecutive_errors, delay_seconds=20
+                    )
                 except requests.RequestException as exc:
                     self.logger.error("Request error while fetching image: %s", exc)
-                    time.sleep(20)
+                    consecutive_errors = self._retry_after_error(
+                        exc, consecutive_errors, delay_seconds=20
+                    )
                 except Exception as exc:
                     self.logger.error("Unexpected error while fetching image: %s", exc)
                     raise

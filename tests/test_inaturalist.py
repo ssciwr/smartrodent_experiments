@@ -600,6 +600,17 @@ def test_inaturalist_rejects_non_integer_observation_budget(tmp_path, max_observ
         )
 
 
+@pytest.mark.parametrize("max_retries", [-1, 1.5, True])
+def test_inaturalist_rejects_invalid_retry_budget(tmp_path, max_retries):
+    with pytest.raises(ValueError, match="max_retries"):
+        InaturalistDataset(
+            output_path=tmp_path / "dataset",
+            species=["Mus musculus"],
+            years=[2022],
+            max_retries=max_retries,
+        )
+
+
 def test_inaturalist_v2_retrieval_combines_filters_and_honors_budget(
     tmp_path, monkeypatch
 ):
@@ -743,10 +754,55 @@ def test_download_removes_response_cache_but_retains_rate_accounting(
     assert unrelated.read_bytes() == b"unrelated"
 
 
-def test_permanent_api_failure_is_not_retried_forever(tmp_path, monkeypatch):
-    """A permanent HTTP failure propagates after the configured client retries."""
+def test_photo_retry_budget_resets_after_each_successful_image(tmp_path, monkeypatch):
+    """One transient failure on each photo stays within the per-photo budget."""
+    dataset = InaturalistDataset(
+        output_path=tmp_path / "dataset",
+        species=["Mus musculus"],
+        years=[2022],
+        max_retries=1,
+        cache_file=tmp_path / "api_requests.db",
+        ratelimit_path=tmp_path / "api_ratelimit.db",
+    )
+    records = pd.DataFrame(
+        {
+            "id": [123, 456],
+            "photo_index": [0, 0],
+            "photo.url": [
+                "https://example.test/first-square.jpg",
+                "https://example.test/second-square.jpg",
+            ],
+        }
+    )
+    success_response = Mock(content=b"image")
+    request = Mock(
+        side_effect=[
+            requests.HTTPError("first transient"),
+            success_response,
+            requests.HTTPError("second transient"),
+            success_response,
+        ]
+    )
+    sleep = Mock()
+    images_path = tmp_path / "imgs"
+    images_path.mkdir()
+    monkeypatch.setattr("smartrodent.inaturalist.requests.get", request)
+    monkeypatch.setattr("smartrodent.inaturalist.time.sleep", sleep)
+
+    count, returned = dataset._download_species_images(records, images_path)
+
+    assert count == 2
+    assert request.call_count == 4
+    assert sleep.call_count == 2
+    assert returned["image_path"].notna().all()
+
+
+def test_permanent_api_failure_stops_after_max_retries(tmp_path, monkeypatch):
+    """Permanent record API errors stop after the configured retry budget."""
     request = Mock(side_effect=requests.HTTPError("permanent failure"))
+    sleep = Mock(side_effect=[None, None, AssertionError("retry loop was unbounded")])
     monkeypatch.setattr("smartrodent.inaturalist.get_observations_v2", request)
+    monkeypatch.setattr("smartrodent.inaturalist.time.sleep", sleep)
     dataset = InaturalistDataset(
         output_path=tmp_path / "dataset",
         species=["Mus musculus"],
@@ -760,7 +816,37 @@ def test_permanent_api_failure_is_not_retried_forever(tmp_path, monkeypatch):
     with pytest.raises(requests.HTTPError, match="permanent failure"):
         dataset.retrieve_records()
 
-    request.assert_called_once()
+    assert request.call_count == 3
+    assert sleep.call_count == 2
+
+
+def test_permanent_photo_failure_stops_after_max_retries(tmp_path, monkeypatch):
+    """Permanent image errors also stop after the configured retry budget."""
+    dataset = InaturalistDataset(
+        output_path=tmp_path / "dataset",
+        species=["Mus musculus"],
+        years=[2022],
+        max_retries=1,
+        cache_file=tmp_path / "api_requests.db",
+        ratelimit_path=tmp_path / "api_ratelimit.db",
+    )
+    records = pd.DataFrame(
+        {
+            "id": [123],
+            "photo_index": [0],
+            "photo.url": ["https://example.test/square.jpg"],
+        }
+    )
+    request = Mock(side_effect=requests.HTTPError("permanent photo failure"))
+    sleep = Mock(side_effect=[None, AssertionError("retry loop was unbounded")])
+    monkeypatch.setattr("smartrodent.inaturalist.requests.get", request)
+    monkeypatch.setattr("smartrodent.inaturalist.time.sleep", sleep)
+
+    with pytest.raises(requests.HTTPError, match="permanent photo failure"):
+        dataset._download_species_images(records, tmp_path / "imgs")
+
+    assert request.call_count == 2
+    sleep.assert_called_once_with(20)
 
 
 def test_photo_rows_are_annotated_in_place_without_license_filtering(
