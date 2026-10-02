@@ -8,7 +8,8 @@ Empty species frames remain valid and return empty annotated dataframes.
 
 import pandas as pd
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 from pandas.testing import assert_frame_equal
 
 
@@ -197,7 +198,7 @@ def test_invalid_input_is_rejected_without_mutation(splitter_type, invalid_kind)
         records = records.drop(columns="source_group_id")
     elif invalid_kind == "null_id":
         records["source_group_id"] = records["source_group_id"].astype("Int64")
-        records.iloc[0, records.columns.get_loc("source_group_id")] = pd.NA
+        records["source_group_id"] = pd.array([pd.NA, 0, 1, 1, 2, 2], dtype="Int64")
     elif invalid_kind == "existing_split":
         records["dataset_split"] = "train"
     else:
@@ -227,11 +228,81 @@ def test_conflicting_strata_within_an_observation_are_rejected(splitter_type):
 
 
 @pytest.mark.parametrize(
-    "fractions", [(0.7, 0.2, 0.2), (-0.1, 0.5, 0.6), (float("nan"), 0.2, 0.1)]
+    "fractions",
+    [
+        (0.7, 0.2, 0.2),
+        (-0.1, 0.5, 0.6),
+        (float("nan"), 0.2, 0.1),
+        (float("inf"), 0.2, 0.1),
+        (0.8, 0.2),
+    ],
 )
 def test_invalid_fractions_are_rejected(splitter_type, fractions):
     with pytest.raises(ValueError):
         make_splitter(splitter_type, train_val_test_split=fractions)
+
+
+@pytest.mark.parametrize("columns", [(), ("id", "id"), ("",), "id"])
+def test_invalid_group_columns_are_rejected(splitter_type, columns):
+    with pytest.raises(ValueError):
+        splitter_type(group_columns=columns)
+
+
+@pytest.mark.parametrize("seed", [-1, 1.5, True])
+def test_invalid_seeds_are_rejected(splitter_type, seed):
+    with pytest.raises(ValueError):
+        make_splitter(splitter_type, rng_seed=seed)
+
+
+@pytest.mark.parametrize(
+    "group_sizes,countries",
+    [([4, 3, 2], ["DE", "FR", "GB"]), ([2, 2, 2, 2], ["DE", "DE", "FR", "FR"])],
+)
+def test_sparse_strata_still_populate_all_species_splits(
+    splitter_type, group_sizes, countries
+):
+    records = make_records(group_sizes)
+    records["country_code"] = [
+        country
+        for size, country in zip(group_sizes, countries, strict=True)
+        for _ in range(size)
+    ]
+    splitter = make_splitter(splitter_type, stratify_columns=("country_code",))
+
+    result = splitter.split({"Mus musculus": records})["Mus musculus"]
+
+    assert set(result["dataset_split"]) == {"train", "validation", "test"}
+    assert result.groupby("source_group_id")["dataset_split"].nunique().eq(1).all()
+    assert_frame_equal(result.drop(columns="dataset_split"), records)
+
+
+def test_zero_target_fractions_do_not_override_nonempty_splits(splitter_type):
+    splitter = make_splitter(splitter_type, train_val_test_split=(1.0, 0.0, 0.0))
+
+    result = splitter.split({"Mus musculus": make_records([4, 2, 1])})["Mus musculus"]
+
+    assert result["dataset_split"].value_counts().to_dict() == {
+        "train": 4,
+        "validation": 2,
+        "test": 1,
+    } or result["dataset_split"].value_counts().to_dict() == {
+        "train": 4,
+        "validation": 1,
+        "test": 2,
+    }
+
+
+def test_null_strata_and_duplicate_columns_are_rejected(splitter_type):
+    records = make_records([2, 2, 2])
+    records["country_code"] = pd.array([pd.NA, "DE", "FR", "FR", "GB", "GB"])
+    splitter = make_splitter(splitter_type, stratify_columns=("country_code",))
+
+    with pytest.raises(ValueError):
+        splitter.split({"Mus musculus": records})
+
+    duplicate_columns = pd.concat([records, records[["source_group_id"]]], axis=1)
+    with pytest.raises(ValueError):
+        make_splitter(splitter_type).split({"Mus musculus": duplicate_columns})
 
 
 @given(
