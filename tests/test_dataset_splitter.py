@@ -1,6 +1,6 @@
 """Behavioral contract for dataframe-only, leakage-safe YOLO partitioning.
 
-The public seam is YoloDatasetSplitter.split(records_by_species). A nonempty
+The public seam is DatasetSplitter.split(records_by_species). A nonempty
 species with fewer than three independent groups must raise ValueError: three
 nonempty splits cannot then coexist with group integrity and row preservation.
 Empty species frames remain valid and return empty annotated dataframes.
@@ -16,9 +16,9 @@ from pandas.testing import assert_frame_equal
 @pytest.fixture
 def splitter_type():
     """Load the proposed interface without preventing test collection."""
-    from smartrodent.dataprocessing import YoloDatasetSplitter
+    from smartrodent.dataset_splitting import DatasetSplitter
 
-    return YoloDatasetSplitter
+    return DatasetSplitter
 
 
 def make_records(group_sizes, group_column="source_group_id"):
@@ -340,7 +340,7 @@ def test_assign_strata_contains_each_row_position_exactly_once(
     group_sizes, stratify_columns
 ):
     """Check the agreed private seam for omissions and duplicate membership."""
-    from smartrodent.dataprocessing import YoloDatasetSplitter
+    from smartrodent.dataset_splitting import DatasetSplitter
 
     records = make_records(group_sizes)
     records["country_code"] = records["source_group_id"].map(
@@ -349,7 +349,7 @@ def test_assign_strata_contains_each_row_position_exactly_once(
     records["year"] = 2023 + records["source_group_id"] % 3
     # Shuffling interleaves groups while retaining duplicate index labels.
     records = records.sample(frac=1, random_state=7)
-    splitter = YoloDatasetSplitter(
+    splitter = DatasetSplitter(
         group_columns=("source_group_id",), stratify_columns=stratify_columns
     )
 
@@ -386,11 +386,11 @@ def test_assign_strata_contains_each_row_position_exactly_once(
 )
 def test_generated_observations_never_leak_or_lose_rows(group_sizes, seed):
     """Exercise leakage and preservation through the same public seam as callers."""
-    from smartrodent.dataprocessing import YoloDatasetSplitter
+    from smartrodent.dataset_splitting import DatasetSplitter
 
     records = make_records(group_sizes)
     original = records.copy(deep=True)
-    splitter = YoloDatasetSplitter(group_columns=("source_group_id",), rng_seed=seed)
+    splitter = DatasetSplitter(group_columns=("source_group_id",), rng_seed=seed)
 
     result = splitter.split({"Mus musculus": records})["Mus musculus"]
 

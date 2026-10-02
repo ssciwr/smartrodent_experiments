@@ -13,7 +13,7 @@ from pandas.testing import assert_frame_equal
 @pytest.fixture
 def sampler_type():
     """Load the proposed interface without preventing test collection."""
-    from smartrodent.dataprocessing import TrainingDatasetSampler
+    from smartrodent.dataset_splitting import TrainingDatasetSampler
 
     return TrainingDatasetSampler
 
@@ -310,7 +310,7 @@ def test_generated_valid_multiplier_preserves_per_stratum_allocation_invariants(
     multiplier,
 ):
     """Exercise target counts and copied-row validity through the public seam."""
-    from smartrodent.dataprocessing import TrainingDatasetSampler
+    from smartrodent.dataset_splitting import TrainingDatasetSampler
 
     records = make_split_records()
     result = TrainingDatasetSampler(
