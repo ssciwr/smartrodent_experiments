@@ -142,8 +142,13 @@ class YoloDatasetSplitter:
                     f"{species}: an observation belongs to conflicting strata"
                 )
 
-    def _assign_rows(self, frame: pd.DataFrame, rng: np.random.Generator) -> np.ndarray:
-        """Allocate positional indices so duplicate dataframe indices are safe."""
+    def _assign_strata(self, frame: pd.DataFrame) -> dict[tuple, list[np.ndarray]]:
+        """Organize indivisible observation groups by stratum using row positions.
+
+        Expects validated metadata: each observation has one stratum. Every input
+        row position belongs to exactly one returned group, regardless of whether
+        dataframe index labels are duplicated.
+        """
         # .indices maps each observation key to an array of row POSITIONS, not
         # dataframe index labels: e.g. {observation_id: array([0, 3, 5])}.
         # This matters because index labels can be duplicated. sort=True orders
@@ -166,7 +171,11 @@ class YoloDatasetSplitter:
             # setdefault creates an empty list only if this key is new, then
             # returns the stored list so we can append the observation group.
             strata.setdefault(key, []).append(positions)
+        return strata
 
+    def _assign_rows(self, frame: pd.DataFrame, rng: np.random.Generator) -> np.ndarray:
+        """Allocate positional indices so duplicate dataframe indices are safe."""
+        strata = self._assign_strata(frame)
         # Split numbers 0, 1, 2 correspond to these three names throughout.
         names = np.array(["train", "validation", "test"])
         # Allocate one output slot per input row. np.empty is uninitialized;
@@ -174,7 +183,7 @@ class YoloDatasetSplitter:
         assignments = np.empty(len(frame), dtype=object)
         # "Global" here means the entire species, across all its strata.
         global_counts = np.zeros(3, dtype=int)
-        remaining_groups = len(group_indices)
+        remaining_groups = sum(len(groups) for groups in strata.values())
         for groups in strata.values():
             # permutation(n) produces a seeded shuffle of integers 0 through
             # n-1. Use those integers to reorder groups, then sort largest first.

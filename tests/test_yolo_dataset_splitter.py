@@ -332,6 +332,54 @@ def test_null_strata_and_duplicate_columns_are_rejected(splitter_type):
 
 @given(
     group_sizes=st.lists(
+        st.integers(min_value=1, max_value=12), min_size=1, max_size=25
+    ),
+    stratify_columns=st.sampled_from([(), ("country_code",), ("country_code", "year")]),
+)
+def test_assign_strata_contains_each_row_position_exactly_once(
+    group_sizes, stratify_columns
+):
+    """Check the agreed private seam for omissions and duplicate membership."""
+    from smartrodent.dataprocessing import YoloDatasetSplitter
+
+    records = make_records(group_sizes)
+    records["country_code"] = records["source_group_id"].map(
+        lambda group_id: "DE" if group_id % 2 == 0 else "FR"
+    )
+    records["year"] = 2023 + records["source_group_id"] % 3
+    # Shuffling interleaves groups while retaining duplicate index labels.
+    records = records.sample(frac=1, random_state=7)
+    splitter = YoloDatasetSplitter(
+        group_columns=("source_group_id",), stratify_columns=stratify_columns
+    )
+
+    strata = splitter._assign_strata(records)
+
+    positions = [
+        int(position)
+        for groups in strata.values()
+        for group in groups
+        for position in group
+    ]
+    # Sorted list equality checks multiplicity as well as coverage: a set
+    # comparison alone would miss positions occurring in multiple groups.
+    assert sorted(positions) == list(range(len(records)))
+    for key, groups in strata.items():
+        for group in groups:
+            rows = records.iloc[group]
+            assert rows["source_group_id"].nunique() == 1
+            group_id = int(rows["source_group_id"].iloc[0])
+            assert len(rows) == group_sizes[group_id]
+            assert all(
+                tuple(row) == key
+                for row in rows[list(stratify_columns)].itertuples(
+                    index=False, name=None
+                )
+            )
+
+
+@given(
+    group_sizes=st.lists(
         st.integers(min_value=1, max_value=12), min_size=3, max_size=25
     ),
     seed=st.integers(min_value=0, max_value=2**32 - 1),
