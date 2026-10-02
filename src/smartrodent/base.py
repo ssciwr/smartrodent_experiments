@@ -26,33 +26,20 @@ class Configurable(Protocol):
 
 @runtime_checkable
 class Filterable(Configurable, Protocol):
-    """Protocol for objects that filter a set of images and report results."""
+    """Protocol for per-species dataframe filters that only read images."""
 
-    def filter_data(self) -> pd.DataFrame:
-        """Run filtering over the input data.
-
-        Returns:
-            pd.DataFrame: One row per processed item describing the outcome.
-        """
-        ...
-
-    def save_results(self, res_df: pd.DataFrame) -> Path:
-        """Persist filtering results to disk.
+    def filter_data(
+        self, records_by_species: dict[str, pd.DataFrame]
+    ) -> dict[str, pd.DataFrame]:
+        """Annotate per-species photo records with filter results.
 
         Args:
-            res_df: The results DataFrame returned by :meth:`filter_data`.
+            records_by_species: Species names mapped to photo metadata frames.
 
         Returns:
-            Path: The path the results were written to.
+            Per-species frames with filter-result columns added.
         """
         ...
-
-    def collect_image_paths(self) -> list[Path]:
-        """Gather the image paths that should be filtered.
-
-        Returns:
-            list[Path]: Paths of the images to process.
-        """
 
 
 @runtime_checkable

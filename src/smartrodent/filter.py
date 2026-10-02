@@ -2,9 +2,9 @@ import base64
 import gc
 import json
 import logging
-import os
-import shutil
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, cast
 
 import ollama
 import pandas as pd
@@ -12,69 +12,65 @@ import yaml
 from tqdm.auto import tqdm
 
 from .base import Filterable
-from .utils import resolve_data_path
 
 
 class VLMFilter(Filterable):
-    """Shared scaffolding for kept/rejected/unsure wildlife image classification.
+    """Classify dataframe photo records without modifying image files.
 
-    Subclasses provide the actual inference backend by overriding filter_data().
+    Each species dataframe is handled independently. Model labels are written
+    to task-specific nullable boolean columns.
     """
 
     def __init__(
         self,
+        *,
         prompt: str,
         system_prompt: str,
-        imgs_root: Path,
-        kept_root: Path,
-        unsure_root: Path,
-        rejected_root: Path,
-        failure_root: Path,
-        image_suffixes: set[str],
-        species: list[str] | None = None,
-        mode: str = "copy",
-        log_level=logging.INFO,
+        labels: Sequence[str],
+        taskname: str,
+        photo_id_column: str = "photo.id",
+        image_path_column: str = "image_path",
+        log_level: int = logging.INFO,
     ):
-        """Initialize the filter.
+        """Initialize a dataframe filter.
 
         Args:
             prompt: User prompt sent to the VLM for each image.
             system_prompt: System prompt sent to the VLM.
-            imgs_root: Root directory containing per-species image subfolders.
-            kept_root: Destination root for images classified as kept.
-            unsure_root: Destination root for images classified as unsure.
-            rejected_root: Destination root for images classified as rejected.
-            failure_root: Destination root for images whose classification failed.
-            image_suffixes: File suffixes (e.g. ``.jpg``) treated as images.
-            species: Species names to include. If None, all species subfolders
-                under ``imgs_root`` are processed.
-            mode: How to place classified images into destination folders:
-                ``"copy"``, ``"move"``, or ``"symlink"``.
+            labels: Distinct labels that the model may return.
+            taskname: Suffix for label columns, e.g. ``kept_animal``.
+            photo_id_column: Dataframe column identifying a photo.
+            image_path_column: Dataframe column containing its on-disk path.
+            log_level: Logging level for backend messages.
 
         Raises:
-            ValueError: If ``mode`` is not ``"copy"``, ``"move"``, or
-                ``"symlink"``.
+            ValueError: If labels, task name, or column names are invalid.
         """
+        if (
+            not isinstance(labels, Sequence)
+            or isinstance(labels, str)
+            or not labels
+            or any(not isinstance(label, str) or not label.strip() for label in labels)
+            or len(set(labels)) != len(labels)
+        ):
+            raise ValueError("labels must be a nonempty sequence of unique strings")
+        if not isinstance(taskname, str) or not taskname.strip():
+            raise ValueError("taskname must be a nonempty string")
+        if not isinstance(photo_id_column, str) or not photo_id_column:
+            raise ValueError("photo_id_column must be a nonempty string")
+        if not isinstance(image_path_column, str) or not image_path_column:
+            raise ValueError("image_path_column must be a nonempty string")
+
         self.prompt = prompt
         self.system_prompt = system_prompt
-        self.imgs_root = Path(imgs_root)
-        self.kept_root = Path(kept_root)
-        self.unsure_root = Path(unsure_root)
-        self.rejected_root = Path(rejected_root)
-        self.failure_root = Path(failure_root)
-        self.image_suffixes = set(image_suffixes)
-        self.species = species
+        self.labels = list(labels)
+        self._normalized_labels = {label.strip().lower(): label for label in labels}
+        self.taskname = taskname
+        self.photo_id_column = photo_id_column
+        self.image_path_column = image_path_column
         self.log_level = log_level
-        if self.species is not None:
-            self.species = [s.lower() for s in self.species]
-        if mode == "copy":
-            self.data_func = shutil.copy2
-        elif mode == "move":
-            self.data_func = shutil.move
-        elif mode == "symlink":
-            self.data_func = os.symlink
-        else:
-            raise ValueError("Error, mode must be 'move', 'symlink' or 'copy'")
+        self.logger = logging.getLogger(type(self).__name__)
+        self.logger.setLevel(log_level)
 
     def __enter__(self):
         """Return this filter for use in a context manager."""
@@ -89,239 +85,219 @@ class VLMFilter(Filterable):
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> "VLMFilter":
-        """Build a filter instance from a YAML config file.
-
-        Reads paths, prompts, species, and backend-specific settings from the
-        config, creates the output directories (kept/unsure/rejected/failure),
-        and copies the config into each for provenance.
+        """Build a filter instance from YAML configuration.
 
         Args:
-            config_path: Path to the YAML config file. Must specify a
-                ``backend`` of either ``"ollama"`` or ``"vllm"``, along with
-                the corresponding backend settings section.
+            config_path: YAML containing ``backend``, ``labels``, ``taskname``,
+                prompts, and backend-specific settings.
 
         Returns:
-            Filter: A ``FilterOllama`` or ``FilterVLLM`` instance, depending
-            on the configured backend.
+            A configured Ollama- or vLLM-backed filter.
 
         Raises:
-            ValueError: If ``backend`` is not ``"ollama"`` or ``"vllm"``.
+            ValueError: If the configured backend is unsupported.
         """
-        config_path = Path(config_path)
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
+        with Path(config_path).open(encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+        columns = config.get("columns", {})
+        common = {
+            "prompt": config["prompt"],
+            "system_prompt": config["system_prompt"],
+            "labels": config["labels"],
+            "taskname": config["taskname"],
+            "photo_id_column": columns.get("photo_id", "photo.id"),
+            "image_path_column": columns.get("image_path", "image_path"),
+        }
 
-        imgs_root = resolve_data_path(config["paths"]["imgs_root"])
         backend = config["backend"]
-        common = dict(
-            prompt=config["prompt"],
-            system_prompt=config["system_prompt"],
-            imgs_root=imgs_root,
-            image_suffixes=set(config["paths"]["image_suffixes"]),
-            species=config.get("species"),
-            mode=config.get("mode", "copy"),
-        )
-
         if backend == "ollama":
-            detector_cls, extra = (
-                FilterOllama,
-                dict(
-                    model=config["ollama"]["model"],
-                    pull_model=config["ollama"].get("pull_model", True),
-                ),
+            return FilterOllama(
+                **common,
+                model=config["ollama"]["model"],
+                pull_model=config["ollama"].get("pull_model", True),
             )
-        elif backend == "vllm":
-            detector_cls, extra = (
-                FilterVLLM,
-                dict(
-                    model_name=config["vllm"]["model"],
-                    gpu_memory_utilization=config["vllm"]["gpu_memory_utilization"],
-                    max_model_len=config["vllm"]["max_model_len"],
-                    max_new_tokens=config["vllm"]["max_new_tokens"],
-                    batch_size=config["vllm"]["batch_size"],
+        if backend == "vllm":
+            settings = config["vllm"]
+            return FilterVLLM(
+                **common,
+                model_name=settings["model"],
+                gpu_memory_utilization=settings.get("gpu_memory_utilization", 0.7),
+                max_model_len=settings.get(
+                    "max_model_len", settings.get("max-model-len", 8192)
                 ),
+                max_new_tokens=settings.get(
+                    "max_new_tokens", settings.get("max-new-tokens", 300)
+                ),
+                batch_size=settings.get("batch_size", 64),
             )
-        else:
-            raise ValueError(f"Unknown backend {backend!r}")
-
-        kept_root = imgs_root.parent / "filtered_kept"
-        unsure_root = imgs_root.parent / "filtered_undecided"
-        rejected_root = imgs_root.parent / "filtered_rejected"
-        failure_root = imgs_root.parent / "filtered_failure"
-
-        # Drop a copy of the config next to each output so the stage that
-        # produced a given folder can always be identified after the fact.
-        for root in (kept_root, unsure_root, rejected_root, failure_root):
-            root.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(config_path, root / config_path.name)
-
-        return detector_cls(
-            **common,
-            kept_root=kept_root,
-            unsure_root=unsure_root,
-            rejected_root=rejected_root,
-            failure_root=failure_root,
-            **extra,
-        )
+        raise ValueError(f"Unknown backend {backend!r}")
 
     @property
     def model_tag(self) -> str:
-        """str: Short identifier for the backend model, used e.g. in filenames."""
+        """str: Short identifier for the backend model."""
         raise NotImplementedError
-
-    def filter_data(self) -> pd.DataFrame:
-        """Classify all collected images and sort them into destination folders.
-
-        Returns:
-            pd.DataFrame: One row per processed image with its classification.
-        """
-        raise NotImplementedError
-
-    def save_results(self, res_df: pd.DataFrame) -> Path:
-        """Write filtering results to a CSV next to the images root.
-
-        Args:
-            res_df: The results DataFrame returned by :meth:`filter_data`.
-
-        Returns:
-            Path: Path to the written ``filter_results.csv`` file.
-        """
-        out_path = self.imgs_root.parent / "filter_results.csv"
-        res_df.to_csv(out_path)
-        return out_path
-
-    def process_image(self, src: Path, dst_root: Path) -> Path:
-        """Process one image to dst_root while preserving its path below imgs_root, using the configured 'mode':
-        - mode="copy": copy the image, src and new image preserved
-        - mode="move": move the image, thereby removing the original at src, only keeping the new one
-        - mode="symlink": create a link that points to source which behaves like an actual file, but without moving actual data.
-        Args:
-            src: Path to the source image, located under ``self.imgs_root``.
-            dst_root: Destination root directory to copy/move the image into.
-
-        Returns:
-            Path: The destination path the image was written to.
-        """
-        if not src.exists():
-            raise FileNotFoundError(f"Source image does not exist: {src}")
-
-        relative_path = src.relative_to(self.imgs_root)
-        dst = dst_root / relative_path
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.data_func(src, dst)
-        except shutil.SameFileError:
-            pass
-        except Exception as e:
-            raise e
-        return dst
-
-    @staticmethod
-    def parse_response(raw: str) -> dict:
-        """Turn a model's raw JSON text response into the standard result schema.
-
-        Args:
-            raw: Raw text response returned by the VLM backend, expected to
-                be a JSON object.
-
-        Returns:
-            dict: A result dict with keys ``label``, ``visible_animal``,
-            ``evidence_kept``, ``evidence_rejected``, ``image_quality``,
-            ``needs_human_review``, ``raw_response``, and ``parse_error``.
-            ``label`` falls back to ``"failure"`` if parsing fails or the
-            label is not one of ``"kept"``, ``"rejected"``, ``"unsure"``.
-        """
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return {
-                "label": "failure",
-                "visible_animal": None,
-                "evidence_kept": [],
-                "evidence_rejected": [],
-                "image_quality": "unknown",
-                "needs_human_review": True,
-                "raw_response": raw,
-                "parse_error": True,
-            }
-
-        label = str(data.get("label", "failure")).strip().lower()
-
-        if label not in ["kept", "rejected", "unsure"]:
-            label = "failure"
-
-        return {
-            "label": label,
-            "visible_animal": data.get("visible_animal"),
-            "evidence_kept": data.get("evidence_kept", []),
-            "evidence_rejected": data.get("evidence_rejected", []),
-            "image_quality": data.get("image_quality", "unsure"),
-            "needs_human_review": bool(
-                data.get("needs_human_review", label == "unsure")
-            ),
-            "raw_response": raw,
-            "parse_error": False,
-        }
-
-    def collect_image_paths(self) -> list[Path]:
-        """Gather image paths from imgs_root, optionally filtered by species.
-
-        Returns:
-            list[Path]: Paths of images whose suffix is in
-            ``self.image_suffixes``, found in the (optionally species-filtered)
-            subdirectories of ``self.imgs_root``.
-        """
-        species_dirs = sorted(p for p in self.imgs_root.iterdir() if p.is_dir())
-
-        if self.species is not None:
-            species_dirs = [s for s in species_dirs if s.name.lower() in self.species]
-
-        image_paths = [
-            image_path
-            for species_path in species_dirs
-            for image_path in sorted(species_path.iterdir())
-            if image_path.is_file() and image_path.suffix.lower() in self.image_suffixes
-        ]
-
-        return image_paths
 
     @property
-    def dest_by_label(self) -> dict[str, Path]:
-        """dict[str, Path]: Mapping from classification label to destination root."""
+    def task_columns(self) -> dict[str, str]:
+        """dict[str, str]: Configured-label to output-column mapping."""
+        return {label: f"{label}_{self.taskname}" for label in self.labels}
+
+    def parse_response(self, raw: str | None) -> dict:
+        """Parse a model JSON response against configured labels.
+
+        Args:
+            raw: Raw model response expected to be a JSON object with ``label``.
+
+        Returns:
+            A result mapping. Invalid JSON or unconfigured labels have a null
+            label and ``parse_error=True``.
+        """
+        if raw is None:
+            return {"label": None, "raw_response": None, "parse_error": True}
+        try:
+            response = json.loads(raw)
+        except json.JSONDecodeError:
+            response = None
+        if not isinstance(response, dict):
+            return {"label": None, "raw_response": raw, "parse_error": True}
+
+        candidate = response.get("label")
+        label = (
+            self._normalized_labels.get(candidate.strip().lower())
+            if isinstance(candidate, str)
+            else None
+        )
         return {
-            "kept": self.kept_root,
-            "rejected": self.rejected_root,
-            "unsure": self.unsure_root,
-            "failure": self.failure_root,
+            "label": label,
+            "raw_response": raw,
+            "parse_error": label is None,
         }
+
+    def filter_data(
+        self, records_by_species: dict[str, pd.DataFrame]
+    ) -> dict[str, pd.DataFrame]:
+        """Return per-species copies annotated with model-label columns.
+
+        Duplicate photo IDs are collapsed within their species only. Every row
+        with the same ID must refer to the same image path and receives one
+        shared classification. Input frames are not mutated and files are only
+        read by the inference backend.
+
+        Args:
+            records_by_species: Species names mapped to one-row-per-photo frames.
+
+        Returns:
+            Per-species dataframe copies with nullable boolean columns. A valid
+            label produces one ``True`` and ``False`` for other labels; a failed
+            or unrecognized response produces ``pd.NA`` in every task column.
+
+        Raises:
+            TypeError: If the input mapping or any frame has the wrong type.
+            ValueError: If columns/IDs are invalid, output columns already
+                exist, or duplicate IDs have different image paths.
+        """
+        groups_by_species = self._validate_and_group(records_by_species)
+        results = {}
+        try:
+            for species, (frame, groups) in groups_by_species.items():
+                annotated = frame.copy(deep=True)
+                for output_column in self.task_columns.values():
+                    annotated[output_column] = pd.Series(
+                        pd.NA, index=annotated.index, dtype="boolean"
+                    )
+
+                paths = [path for _, path in groups]
+                classifications = self._classify_paths(paths)
+                if len(classifications) != len(groups):
+                    raise RuntimeError("Backend returned a different number of results")
+
+                for (positions, _), classification in zip(
+                    groups, classifications, strict=True
+                ):
+                    label = classification.get("label")
+                    if classification.get("parse_error") or label not in self.labels:
+                        continue
+                    for configured_label, output_column in self.task_columns.items():
+                        annotated.iloc[
+                            positions, annotated.columns.get_loc(output_column)
+                        ] = (configured_label == label)
+                results[species] = annotated
+        finally:
+            self.close()
+        return results
+
+    def _validate_and_group(self, records_by_species):
+        """Validate every frame before inference and group duplicate photos."""
+        if not isinstance(records_by_species, dict):
+            raise TypeError("records_by_species must be a dict of dataframes")
+
+        grouped = {}
+        required_columns = {self.photo_id_column, self.image_path_column}
+        task_columns = set(self.task_columns.values())
+        for species, frame in records_by_species.items():
+            if not isinstance(frame, pd.DataFrame):
+                raise TypeError(f"{species}: expected a pandas DataFrame")
+            missing = required_columns.difference(frame.columns)
+            if missing:
+                raise ValueError(
+                    f"{species}: missing required columns {sorted(missing)}"
+                )
+            existing = task_columns.intersection(frame.columns)
+            if existing:
+                raise ValueError(
+                    f"{species}: task output columns already exist: {sorted(existing)}"
+                )
+            if frame[self.photo_id_column].isna().any():
+                raise ValueError(
+                    f"{species}: {self.photo_id_column} values must not be null"
+                )
+            if frame[self.image_path_column].isna().any():
+                raise ValueError(
+                    f"{species}: {self.image_path_column} values must not be null"
+                )
+
+            species_groups = []
+            for positions in frame.groupby(
+                self.photo_id_column, sort=False, dropna=False
+            ).indices.values():
+                paths = [
+                    Path(frame.iloc[position][self.image_path_column])
+                    for position in positions
+                ]
+                if any(path != paths[0] for path in paths[1:]):
+                    raise ValueError(
+                        f"{species}: duplicate {self.photo_id_column} rows must have "
+                        f"the same {self.image_path_column}"
+                    )
+                species_groups.append((positions, paths[0]))
+            grouped[species] = (frame, species_groups)
+        return grouped
+
+    def _classify_paths(self, image_paths: list[Path]) -> list[dict]:
+        """Classify paths through the selected backend."""
+        raise NotImplementedError
 
 
 class FilterOllama(VLMFilter):
-    """Classify images through one persistent Ollama server connection.
-
-    SmartRodent does not start or stop the Ollama daemon: it may be shared by
-    other work.  ``close`` unloads this filter's model from GPU memory.
-    """
+    """Classify dataframe image records using a persistent Ollama connection."""
 
     def __init__(self, *, model: str, pull_model: bool = True, **kwargs):
         """Initialize the Ollama-backed filter.
 
         Args:
-            model: Name of the Ollama model to use for classification.
-            pull_model: Whether to download the model when it is not already available locally.
-            **kwargs: Additional arguments forwarded to :class:`VLMFilter`.
+            model: Ollama model name.
+            pull_model: Whether to download the model if it is not local.
+            **kwargs: Arguments forwarded to :class:`VLMFilter`.
         """
         super().__init__(**kwargs)
-        self.logger = logging.getLogger("FilterOllama")
-        self.logger.setLevel(self.log_level)
         self.client = ollama.Client()
         self.model = model
         self._closed = False
-
         if pull_model:
             self.logger.info("Download model")
-            output = self.client.pull(model, stream=False)
-            self.logger.info("Model download result: %s", output)
+            self.logger.info(
+                "Model download result: %s", self.client.pull(model, stream=False)
+            )
 
     @property
     def model_tag(self) -> str:
@@ -329,107 +305,50 @@ class FilterOllama(VLMFilter):
         return self.model
 
     def classify(self, path: Path) -> dict:
-        """Classify a single image via the Ollama server.
+        """Classify one image via Ollama.
 
         Args:
-            path: Path to the image file to classify.
+            path: On-disk path of the image to classify.
 
         Returns:
-            dict: The parsed classification result, as returned by
-            :meth:`VLMFilter.parse_response`.
+            Parsed response containing a configured label or a parse error.
         """
-        img_b64 = base64.b64encode(Path(path).read_bytes()).decode("utf-8")
-        payload = {
-            "model": self.model,
-            "system": self.system_prompt,
-            "prompt": self.prompt,
-            "images": [img_b64],
-            "format": "json",
-            "stream": False,
-            "think": False,
-            "options": {
-                "temperature": 0,
-            },
-        }
-
+        encoded_image = base64.b64encode(Path(path).read_bytes()).decode("utf-8")
         response = self.client.generate(
-            model=payload["model"],
-            system=payload["system"],
-            prompt=payload["prompt"],
-            images=payload["images"],
-            format=payload["format"],
-            stream=payload["stream"],
-            think=payload["think"],
-            options=payload["options"],
+            model=self.model,
+            system=self.system_prompt,
+            prompt=self.prompt,
+            images=[encoded_image],
+            format="json",
+            stream=False,
+            think=False,
+            options={"temperature": 0},
         )
-
         return self.parse_response(response.response)
+
+    def _classify_paths(self, image_paths: list[Path]) -> list[dict]:
+        """Classify each unique photo, preserving input order."""
+        return [
+            self.classify(path)
+            for path in tqdm(image_paths, desc="OLLAMA filtering images")
+        ]
 
     def close(self) -> None:
         """Unload the model while leaving the externally managed daemon alive."""
         if self._closed:
             return
-
         try:
             self.client.generate(model=self.model, keep_alive=0)
         except Exception:
-            # Cleanup must not hide an earlier classification exception.
             self.logger.warning(
                 "Could not unload Ollama model %s", self.model, exc_info=True
             )
         else:
             self._closed = True
 
-    def filter_data(self) -> pd.DataFrame:
-        """Classify each collected image one at a time via Ollama.
-
-        Each image is classified, tagged with its species (inferred from its
-        parent folder name), and copied/moved into the destination folder for
-        its label.
-
-        Returns:
-            pd.DataFrame: One row per processed image with its classification
-            and species.
-        """
-        results = []
-        image_paths = self.collect_image_paths()
-        dest_by_label = self.dest_by_label
-
-        try:
-            for image_path in tqdm(image_paths, desc="OLLAMA filtering images"):
-                res = self.classify(image_path)
-                res["species"] = image_path.relative_to(self.imgs_root).parts[0]
-                results.append(res)
-                self.process_image(image_path, dest_by_label[res["label"]])
-        finally:
-            self.close()
-
-        return pd.DataFrame(results)
-
 
 class FilterVLLM(VLMFilter):
-    """Classifies images in batches via a local vLLM offline inference engine."""
-
-    RESPONSE_JSON_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "label": {"type": "string", "enum": ["kept", "rejected", "unsure"]},
-            "visible_animal": {"type": "boolean"},
-            "evidence_kept": {"type": "array", "items": {"type": "string"}},
-            "evidence_rejected": {"type": "array", "items": {"type": "string"}},
-            "image_quality": {"type": "string", "enum": ["clear", "poor", "unusable"]},
-            "needs_human_review": {"type": "boolean"},
-        },
-        "required": [
-            "label",
-            "visible_animal",
-            "evidence_kept",
-            "evidence_rejected",
-            "image_quality",
-            "needs_human_review",
-        ],
-        "additionalProperties": False,
-    }
+    """Classify dataframe image records in batches using vLLM."""
 
     def __init__(
         self,
@@ -445,49 +364,56 @@ class FilterVLLM(VLMFilter):
 
         Args:
             model_name: Name or path of the vLLM model to load.
-            gpu_memory_utilization: Fraction of GPU memory vLLM is allowed
-                to reserve.
+            gpu_memory_utilization: Fraction of GPU memory vLLM may reserve.
             max_model_len: Maximum context length for the model.
-            max_new_tokens: Maximum number of tokens to generate per response.
-            batch_size: Number of images to classify per batched chat call.
-            **kwargs: Additional arguments forwarded to :class:`VLMFilter`.
+            max_new_tokens: Maximum generated tokens per response.
+            batch_size: Number of unique photos to classify in each batch.
+            **kwargs: Arguments forwarded to :class:`VLMFilter`.
         """
         super().__init__(**kwargs)
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         self.model_name = model_name
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
         self.max_new_tokens = max_new_tokens
         self.batch_size = batch_size
-        self._llm = None
-        self._sampling_params = None
+        self._llm: Any = None
+        self._sampling_params: Any = None
         self._closed = False
 
     @property
     def model_tag(self) -> str:
-        """str: The vLLM model name, with any path prefix stripped."""
+        """str: The vLLM model name, without any path prefix."""
         return self.model_name.split("/")[-1]
 
+    @property
+    def response_json_schema(self) -> dict:
+        """dict: Structured-output schema containing this filter's labels."""
+        return {
+            "type": "object",
+            "properties": {"label": {"type": "string", "enum": self.labels}},
+            "required": ["label"],
+            "additionalProperties": False,
+        }
+
     def _ensure_engine(self) -> None:
-        """Lazily construct the vLLM engine and sampling params on first use."""
+        """Lazily construct the vLLM engine and sampling parameters."""
         if self._llm is not None:
             return
-
-        # Imported lazily so the Ollama fallback still works without vLLM installed/working.
         from vllm import LLM, SamplingParams
         from vllm.sampling_params import StructuredOutputsParams
 
         self._llm = LLM(
             model=self.model_name,
             limit_mm_per_prompt={"image": 1},
-            # 0.9 (vLLM's default) OOMs on a 24GB card once the desktop/other
-            # processes already hold a couple GB of VRAM; 0.7 leaves headroom.
             gpu_memory_utilization=self.gpu_memory_utilization,
             max_model_len=self.max_model_len,
         )
         self._sampling_params = SamplingParams(
             temperature=0,
             max_tokens=self.max_new_tokens,
-            structured_outputs=StructuredOutputsParams(json=self.RESPONSE_JSON_SCHEMA),
+            structured_outputs=StructuredOutputsParams(json=self.response_json_schema),
         )
 
     @staticmethod
@@ -495,28 +421,25 @@ class FilterVLLM(VLMFilter):
         """Encode an image file as a base64 data URL.
 
         Args:
-            path: Path to the image file.
+            path: Image path.
 
         Returns:
-            str: A ``data:image/<suffix>;base64,...`` URL suitable for use in
-            a vLLM chat message.
+            A ``data:image/<suffix>;base64,...`` URL.
         """
         suffix = path.suffix.lower().lstrip(".") or "jpeg"
         if suffix == "jpg":
             suffix = "jpeg"
-        b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
-        return f"data:image/{suffix};base64,{b64}"
+        encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
+        return f"data:image/{suffix};base64,{encoded}"
 
     def build_conversation(self, image_path: Path) -> list[dict]:
-        """Build the vLLM chat message list for classifying one image.
+        """Build a vLLM chat conversation for one image.
 
         Args:
-            image_path: Path to the image to include in the conversation.
+            image_path: On-disk image path to include in the conversation.
 
         Returns:
-            list[dict]: A system message followed by a user message
-            containing the image (as a data URL) and the classification
-            prompt.
+            System and user messages for the vLLM chat endpoint.
         """
         return [
             {"role": "system", "content": self.system_prompt},
@@ -533,46 +456,54 @@ class FilterVLLM(VLMFilter):
         ]
 
     def _classify_batch(self, image_paths: list[Path]) -> list[dict]:
-        """Run one batched vLLM chat call and return parsed results in input order.
-
-        Args:
-            image_paths: Paths of the images to classify together in one batch.
-
-        Returns:
-            list[dict]: Parsed classification results, in the same order as
-            ``image_paths``.
-        """
+        """Classify paths in one vLLM request, preserving their input order."""
         self._ensure_engine()
-        conversations = [self.build_conversation(p) for p in image_paths]
+        conversations = [self.build_conversation(path) for path in image_paths]
         outputs = self._llm.chat(
-            conversations, sampling_params=self._sampling_params, use_tqdm=False
+            cast(Any, conversations),
+            sampling_params=self._sampling_params,
+            use_tqdm=False,
         )
         return [self.parse_response(output.outputs[0].text) for output in outputs]
 
     def classify(self, path: Path) -> dict:
-        """Classify one image through the lazily-created vLLM engine."""
+        """Classify one image through the vLLM engine.
+
+        Args:
+            path: On-disk path of the image to classify.
+
+        Returns:
+            Parsed response containing a configured label or a parse error.
+        """
         return self._classify_batch([path])[0]
 
+    def _classify_paths(self, image_paths: list[Path]) -> list[dict]:
+        """Classify unique photos in batches, without initializing for no work."""
+        results = []
+        for start in tqdm(
+            range(0, len(image_paths), self.batch_size), desc="vLLM filtering images"
+        ):
+            results.extend(
+                self._classify_batch(image_paths[start : start + self.batch_size])
+            )
+        return results
+
     def close(self) -> None:
-        """Shut down a lazily-created vLLM engine and release GPU references."""
+        """Shut down the vLLM engine and release GPU references."""
         if self._closed:
             return
-
         try:
             engine = getattr(self._llm, "llm_engine", None)
             shutdown = getattr(engine, "shutdown", None)
             if callable(shutdown):
                 shutdown()
         except Exception:
-            logging.getLogger("FilterVLLM").warning(
-                "Could not shut down vLLM engine", exc_info=True
-            )
+            self.logger.warning("Could not shut down vLLM engine", exc_info=True)
         finally:
             self._llm = None
             self._sampling_params = None
             self._closed = True
             gc.collect()
-
         try:
             import torch
 
@@ -580,33 +511,3 @@ class FilterVLLM(VLMFilter):
                 torch.cuda.empty_cache()
         except ImportError:
             pass
-
-    def filter_data(self) -> pd.DataFrame:
-        """Classify each collected image in batches via vLLM.
-
-        Images are processed in chunks of ``self.batch_size``, tagged with
-        their species (inferred from their parent folder name), and
-        copied/moved into the destination folder for their label.
-
-        Returns:
-            pd.DataFrame: One row per processed image with its classification
-            and species.
-        """
-        results = []
-        try:
-            self._ensure_engine()
-            image_paths = self.collect_image_paths()
-            dest_by_label = self.dest_by_label
-            with tqdm(total=len(image_paths), desc="vLLM filtering images") as pbar:
-                for start in range(0, len(image_paths), self.batch_size):
-                    chunk = image_paths[start : start + self.batch_size]
-                    for image_path, res in zip(chunk, self._classify_batch(chunk)):
-                        res["species"] = image_path.relative_to(self.imgs_root).parts[0]
-
-                        results.append(res)
-                        self.process_image(image_path, dest_by_label[res["label"]])
-                    pbar.update(len(chunk))
-        finally:
-            self.close()
-
-        return pd.DataFrame(results)
