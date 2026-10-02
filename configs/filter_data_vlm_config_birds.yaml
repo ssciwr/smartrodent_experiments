@@ -1,4 +1,9 @@
 backend: vllm # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
+taskname: bird
+labels: [kept, rejected]
+columns:
+  photo_id: photo.id
+  image_path: image_path
 
 paths:
   imgs_root: smartrodent_experiments/datasets/full_dataset/filtered_kept
@@ -15,8 +20,6 @@ vllm:
   batch_size: 24
   tensor-parallel-size: 8
   max-model-len: 262144
-mode: move
-
 species:
   - Buteo buteo # common buzzard
   - Ciconia ciconia # white stork
