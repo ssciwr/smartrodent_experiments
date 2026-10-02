@@ -3,6 +3,8 @@
 import json
 import shutil
 from collections import defaultdict
+from collections.abc import Callable, Mapping
+from numbers import Real
 from copy import deepcopy
 from math import ceil, floor
 from pathlib import Path
@@ -233,6 +235,207 @@ class YoloDatasetSplitter:
                 # Row totals increase by group size; groups remaining drops by one.
                 remaining_groups -= 1
         return assignments
+
+
+class TrainingDatasetSampler:
+    """Oversample training metadata after a leakage-safe dataset split.
+
+    Call :class:`YoloDatasetSplitter` first, then pass its annotated dataframes
+    to :meth:`sample`. This sampler duplicates only ``dataset_split == "train"``
+    rows, separately within each configured stratum. Validation and test rows
+    are retained exactly, so they continue to represent the unmodified dataset.
+
+    Do not sample before splitting. Although group-aware splitting would keep a
+    copied image with its source observation, duplicates would alter group row
+    weights during allocation and may be assigned to validation or test. That
+    distorts evaluation distributions and weakens the splitter's proportional
+    allocation guarantee.
+    """
+
+    def __init__(
+        self,
+        group_columns: tuple[str, ...],
+        stratify_columns: tuple[str, ...],
+        oversampling_rule: Callable[
+            [str, pd.DataFrame, Mapping[str, pd.DataFrame]], float
+        ],
+        rng_seed: int = 42,
+    ):
+        """Configure reproducible, stratified train-only oversampling.
+
+        Args:
+            group_columns: Composite observation key. A training image is sampled
+                by first choosing one of these groups, then one of its image rows.
+            stratify_columns: Columns defining strata. The sampler applies the
+                multiplier separately to each training stratum, retaining their
+                proportions apart from integer rounding.
+            oversampling_rule: Callable receiving a species name, that species'
+                full split dataframe, and all species frames. It returns a finite
+                multiplier of at least ``1.0`` for that species' training rows.
+            rng_seed: Nonnegative integer seed for reproducible sampling.
+
+        Raises:
+            ValueError: If the configured columns or seed are invalid.
+            TypeError: If ``oversampling_rule`` is not callable.
+        """
+        self.group_columns = self._validate_columns(group_columns, required=True)
+        self.stratify_columns = self._validate_columns(stratify_columns, required=False)
+        if not callable(oversampling_rule):
+            raise TypeError("oversampling_rule must be callable")
+        if not isinstance(rng_seed, int) or isinstance(rng_seed, bool) or rng_seed < 0:
+            raise ValueError("rng_seed must be a nonnegative integer")
+        self.oversampling_rule = oversampling_rule
+        self.rng_seed = rng_seed
+
+    @staticmethod
+    def _validate_columns(
+        columns: tuple[str, ...], *, required: bool
+    ) -> tuple[str, ...]:
+        """Reject ambiguous column configuration rather than guessing semantics."""
+        if isinstance(columns, str):
+            raise TypeError("Columns must be a sequence of names, not a string")
+        names = tuple(columns)
+        if (
+            (required and not names)
+            or any(not isinstance(name, str) or not name for name in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError("Column names must be unique nonempty strings")
+        return names
+
+    def sample(
+        self, records_by_species: Mapping[str, pd.DataFrame]
+    ) -> dict[str, pd.DataFrame]:
+        """Return split dataframes with additional, stratified training rows.
+
+        Every original row remains in the same order and retains its index. New
+        rows are appended and are exact copies of original training rows. For a
+        multiplier ``m``, each training stratum receives
+        ``ceil(m * original_stratum_rows)`` total rows. The sampling sequence is
+        seeded: it chooses an observation uniformly, then an image uniformly
+        from that observation.
+
+        This method must follow :class:`YoloDatasetSplitter`; it relies on its
+        ``dataset_split`` column to isolate training rows. Applying it first can
+        cause copied rows to enter validation/test when the later splitter assigns
+        their observation, changing the evaluation population.
+
+        Args:
+            records_by_species: Per-species dataframe output from the splitter.
+
+        Returns:
+            New per-species frames with original validation/test rows unchanged
+            and copies appended only to their training portion.
+
+        Raises:
+            ValueError: If metadata is invalid, a rule result is not a finite
+                multiplier of at least one, or a multiplier above one is requested
+                for a species with no training rows.
+        """
+        frames = dict(records_by_species)
+        for species, frame in frames.items():
+            self._validate_frame(species, frame)
+
+        multipliers = {
+            species: self._validate_multiplier(
+                species, self.oversampling_rule(species, frame, frames)
+            )
+            for species, frame in frames.items()
+        }
+        rng = np.random.default_rng(self.rng_seed)
+        return {
+            species: self._sample_species(frame, multipliers[species], rng)
+            for species, frame in frames.items()
+        }
+
+    def _validate_frame(self, species: str, frame: pd.DataFrame) -> None:
+        """Validate fields needed to select coherent training observations."""
+        if not isinstance(frame, pd.DataFrame):
+            raise ValueError(f"{species}: records must be a pandas DataFrame")
+        if not frame.columns.is_unique:
+            raise ValueError(f"{species}: dataframe column names must be unique")
+        columns = ["dataset_split", *self.group_columns, *self.stratify_columns]
+        missing = [name for name in dict.fromkeys(columns) if name not in frame.columns]
+        if missing:
+            raise ValueError(f"{species}: missing columns {missing}")
+        valid_splits = {"train", "validation", "test"}
+        if not frame["dataset_split"].isin(valid_splits).all():
+            raise ValueError(f"{species}: dataset_split contains an invalid value")
+
+        training = frame.loc[frame["dataset_split"] == "train"]
+        metadata_columns = list(
+            dict.fromkeys((*self.group_columns, *self.stratify_columns))
+        )
+        if training[metadata_columns].isna().any().any():
+            raise ValueError(
+                f"{species}: training group and stratum values must not be null"
+            )
+        if training.empty or not self.stratify_columns:
+            return
+        groups = training.groupby(list(self.group_columns), sort=True, observed=True)
+        conflicts = groups[list(self.stratify_columns)].nunique().gt(1)
+        if conflicts.any().any():
+            raise ValueError(
+                f"{species}: a training observation belongs to conflicting strata"
+            )
+
+    @staticmethod
+    def _validate_multiplier(species: str, multiplier: object) -> float:
+        """Return a finite multiplier that cannot remove training rows."""
+        if (
+            not isinstance(multiplier, Real)
+            or isinstance(multiplier, bool)
+            or not np.isfinite(multiplier)
+            or multiplier < 1.0
+        ):
+            raise ValueError(
+                f"{species}: oversampling rule must return a finite multiplier >= 1.0"
+            )
+        return float(multiplier)
+
+    def _sample_species(
+        self, frame: pd.DataFrame, multiplier: float, rng: np.random.Generator
+    ) -> pd.DataFrame:
+        """Append copies selected within each training stratum."""
+        if multiplier == 1.0:
+            return frame.copy(deep=True)
+
+        training = frame.loc[frame["dataset_split"] == "train"]
+        if training.empty:
+            raise ValueError("Cannot oversample a species without training rows")
+
+        if self.stratify_columns:
+            strata = [
+                stratum
+                for _, stratum in training.groupby(
+                    list(self.stratify_columns), sort=True, observed=True
+                )
+            ]
+        else:
+            strata = [training]
+
+        copies = []
+        for stratum in strata:
+            target_count = ceil(multiplier * len(stratum))
+            copies.extend(
+                self._sample_stratum(stratum, target_count - len(stratum), rng)
+            )
+        return pd.concat([frame, *copies])
+
+    def _sample_stratum(
+        self, stratum: pd.DataFrame, copy_count: int, rng: np.random.Generator
+    ) -> list[pd.DataFrame]:
+        """Select complete image rows by uniformly sampling groups then images."""
+        group_indices = stratum.groupby(
+            list(self.group_columns), sort=True, observed=True
+        ).indices
+        groups = list(group_indices.values())
+        copies = []
+        for _ in range(copy_count):
+            positions = groups[int(rng.integers(len(groups)))]
+            position = int(positions[rng.integers(len(positions))])
+            copies.append(stratum.iloc[[position]].copy(deep=True))
+        return copies
 
 
 class _SpeciesNetDatasetMixin:
