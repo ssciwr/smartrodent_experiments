@@ -130,9 +130,7 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(
         rng_seed: int = 42,
         confidence_threshold: float = 0.1,
         IoU_threshold: float = 0.45,
-        labels_to_filter: list[str] = [
-            "animal",
-        ],
+        labels_to_filter: tuple[str] = ("animal",),
         create_detection_dirs: bool = True,
         background_image_dir: str | Path | None = None,
         background_class_names: list[str] | tuple[str, ...] = ("empty",),
