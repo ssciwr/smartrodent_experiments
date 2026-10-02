@@ -5,9 +5,12 @@ from math import ceil
 
 import pandas as pd
 import pytest
+import yaml
 from hypothesis import given
 from hypothesis import strategies as st
 from pandas.testing import assert_frame_equal
+
+from smartrodent.base import Configurable
 
 
 @pytest.fixture
@@ -335,3 +338,199 @@ def test_generated_valid_multiplier_preserves_per_stratum_allocation_invariants(
     assert all(
         row in source_records for row in result.iloc[len(records) :].to_dict("records")
     )
+
+
+def test_from_config_resolves_rule_and_uses_runtime_context(
+    tmp_path, monkeypatch, sampler_type
+):
+    (tmp_path / "sampler_config_rules.py").write_text(
+        "def double_when_context_is_complete(species, frame, all_frames):\n"
+        "    if species == 'Mus musculus' and all_frames[species] is frame:\n"
+        "        return 2.0\n"
+        "    return 1.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "training_dataset_sampler": {
+                        "group_columns": ["source_group_id"],
+                        "stratify_columns": ["country_code"],
+                        "oversampling_rule": (
+                            "sampler_config_rules:double_when_context_is_complete"
+                        ),
+                        "rng_seed": 9,
+                    }
+                }
+            }
+        )
+    )
+
+    sampler = sampler_type.from_config(config_path)
+    result = sampler.sample({"Mus musculus": make_split_records()})["Mus musculus"]
+
+    assert sampler.rng_seed == 9
+    assert isinstance(sampler, Configurable)
+    assert (result["dataset_split"] == "train").sum() == 12
+
+
+def test_from_config_uses_sampler_default_seed(tmp_path, monkeypatch, sampler_type):
+    (tmp_path / "sampler_default_rules.py").write_text(
+        "def unchanged(*args):\n    return 1.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "training_dataset_sampler": {
+                        "group_columns": ["source_group_id"],
+                        "stratify_columns": ["country_code"],
+                        "oversampling_rule": "sampler_default_rules:unchanged",
+                    }
+                }
+            }
+        )
+    )
+
+    sampler = sampler_type.from_config(config_path)
+
+    assert sampler.rng_seed == 42
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[]\n",
+        "data: []\n",
+        "data: {}\n",
+        "data:\n  training_dataset_sampler: []\n",
+    ],
+)
+def test_from_config_rejects_invalid_sampler_configuration_structure(
+    tmp_path, sampler_type, content
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(content)
+
+    with pytest.raises(TypeError):
+        sampler_type.from_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "settings,missing_setting",
+    [
+        (
+            {"stratify_columns": ["country_code"], "oversampling_rule": "rules:rule"},
+            "group_columns",
+        ),
+        (
+            {"group_columns": ["source_group_id"], "oversampling_rule": "rules:rule"},
+            "stratify_columns",
+        ),
+        (
+            {
+                "group_columns": ["source_group_id"],
+                "stratify_columns": ["country_code"],
+            },
+            "oversampling_rule",
+        ),
+    ],
+)
+def test_from_config_requires_sampler_settings(
+    tmp_path, sampler_type, settings, missing_setting
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"data": {"training_dataset_sampler": settings}})
+    )
+
+    with pytest.raises(ValueError, match=missing_setting):
+        sampler_type.from_config(config_path)
+
+
+@pytest.mark.parametrize("reference", [123, "no_separator", "missing_module:rule"])
+def test_from_config_rejects_unresolvable_sampler_rule(
+    tmp_path, sampler_type, reference
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "training_dataset_sampler": {
+                        "group_columns": ["source_group_id"],
+                        "stratify_columns": ["country_code"],
+                        "oversampling_rule": reference,
+                    }
+                }
+            }
+        )
+    )
+
+    with pytest.raises(ValueError):
+        sampler_type.from_config(config_path)
+
+
+def test_from_config_rejects_missing_or_non_callable_sampler_rule(
+    tmp_path, monkeypatch, sampler_type
+):
+    (tmp_path / "invalid_sampler_rules.py").write_text("not_a_rule = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    for reference, error in [
+        ("invalid_sampler_rules:missing_rule", ValueError),
+        ("invalid_sampler_rules:not_a_rule", TypeError),
+    ]:
+        config_path = tmp_path / f"{reference.split(':')[1]}.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "data": {
+                        "training_dataset_sampler": {
+                            "group_columns": ["source_group_id"],
+                            "stratify_columns": ["country_code"],
+                            "oversampling_rule": reference,
+                        }
+                    }
+                }
+            )
+        )
+
+        with pytest.raises(error):
+            sampler_type.from_config(config_path)
+
+
+def test_from_config_rejects_a_missing_sampler_file(tmp_path, sampler_type):
+    with pytest.raises(FileNotFoundError):
+        sampler_type.from_config(tmp_path / "missing.yaml")
+
+
+def test_from_config_rejects_invalid_sampler_static_settings(
+    tmp_path, monkeypatch, sampler_type
+):
+    (tmp_path / "sampler_invalid_settings_rules.py").write_text(
+        "def unchanged(*args):\n    return 1.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "training_dataset_sampler": {
+                        "group_columns": "source_group_id",
+                        "stratify_columns": ["country_code"],
+                        "oversampling_rule": "sampler_invalid_settings_rules:unchanged",
+                        "rng_seed": -1,
+                    }
+                }
+            }
+        )
+    )
+
+    with pytest.raises(TypeError):
+        sampler_type.from_config(config_path)

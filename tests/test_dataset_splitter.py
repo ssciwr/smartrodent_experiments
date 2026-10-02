@@ -8,6 +8,9 @@ Empty species frames remain valid and return empty annotated dataframes.
 
 import pandas as pd
 import pytest
+import yaml
+
+from smartrodent.base import Configurable
 from hypothesis import given
 from hypothesis import strategies as st
 from pandas.testing import assert_frame_equal
@@ -401,3 +404,100 @@ def test_generated_observations_never_leak_or_lose_rows(group_sizes, seed):
     assert_frame_equal(
         result, splitter.split({"Mus musculus": records})["Mus musculus"]
     )
+
+
+def test_from_config_loads_splitter_settings_and_creates_a_working_instance(
+    tmp_path, splitter_type
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "dataset_splitter": {
+                        "group_columns": ["source_group_id"],
+                        "stratify_columns": ["photo_index"],
+                        "train_val_test_split": [0.6, 0.3, 0.1],
+                        "rng_seed": 9,
+                    }
+                }
+            }
+        )
+    )
+
+    splitter = splitter_type.from_config(config_path)
+    result = splitter.split({"Mus musculus": make_records([1, 1, 1])})["Mus musculus"]
+
+    assert isinstance(splitter, Configurable)
+    assert splitter.group_columns == ("source_group_id",)
+    assert splitter.stratify_columns == ("photo_index",)
+    assert tuple(splitter.fractions) == pytest.approx((0.6, 0.3, 0.1))
+    assert splitter.rng_seed == 9
+    assert set(result["dataset_split"]) == {"train", "validation", "test"}
+
+
+def test_from_config_uses_splitter_constructor_defaults(tmp_path, splitter_type):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {"data": {"dataset_splitter": {"group_columns": ["source_group_id"]}}}
+        )
+    )
+
+    splitter = splitter_type.from_config(config_path)
+
+    assert splitter.group_columns == ("source_group_id",)
+    assert splitter.stratify_columns == ()
+    assert tuple(splitter.fractions) == pytest.approx((0.7, 0.2, 0.1))
+    assert splitter.rng_seed == 42
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["[]\n", "data: []\n", "data: {}\n", "data:\n  dataset_splitter: []\n"],
+)
+def test_from_config_rejects_invalid_splitter_configuration_structure(
+    tmp_path, splitter_type, content
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(content)
+
+    with pytest.raises(TypeError):
+        splitter_type.from_config(config_path)
+
+
+def test_from_config_rejects_a_missing_splitter_file(tmp_path, splitter_type):
+    with pytest.raises(FileNotFoundError):
+        splitter_type.from_config(tmp_path / "missing.yaml")
+
+
+def test_from_config_requires_splitter_group_column(tmp_path, splitter_type):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"data": {"dataset_splitter": {}}}))
+
+    with pytest.raises(ValueError, match="group_columns"):
+        splitter_type.from_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "settings,error",
+    [
+        ({"group_columns": "source_group_id"}, TypeError),
+        (
+            {
+                "group_columns": ["source_group_id"],
+                "train_val_test_split": [0.7, 0.2, 0.2],
+            },
+            ValueError,
+        ),
+        ({"group_columns": ["source_group_id"], "rng_seed": -1}, ValueError),
+    ],
+)
+def test_from_config_delegates_splitter_setting_validation(
+    tmp_path, splitter_type, settings, error
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"data": {"dataset_splitter": settings}}))
+
+    with pytest.raises(error):
+        splitter_type.from_config(config_path)

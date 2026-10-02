@@ -1,14 +1,43 @@
 """Split and oversample downloader metadata without accessing images."""
 
+import importlib
 from collections.abc import Callable, Mapping
 from math import ceil
 from numbers import Real
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
+
+from .base import Configurable
 
 
-class DatasetSplitter:
+def _load_configuration_section(config_path: str | Path, section: str) -> dict:
+    """Load one required mapping below the project's ``data`` YAML section."""
+    path = Path(config_path).expanduser().resolve()
+    with path.open(encoding="utf-8") as config_file:
+        configuration = yaml.safe_load(config_file)
+    if not isinstance(configuration, dict):
+        raise TypeError(f"Expected a mapping in configuration file {path}")
+    data = configuration.get("data")
+    if not isinstance(data, dict):
+        raise TypeError("The 'data' configuration must be a mapping")
+    section_configuration = data.get(section)
+    if not isinstance(section_configuration, dict):
+        raise TypeError(f"The 'data.{section}' configuration must be a mapping")
+    return section_configuration
+
+
+def _required_setting(configuration: dict, section: str, setting: str) -> object:
+    """Read a required setting with an actionable configuration error."""
+    try:
+        return configuration[setting]
+    except KeyError as exc:
+        raise ValueError(f"Missing required {section} setting: {setting}") from exc
+
+
+class DatasetSplitter(Configurable):
     """Partition image metadata while keeping observation groups indivisible.
 
     Fractions target row counts within each species/stratum. A largest-first
@@ -53,6 +82,25 @@ class DatasetSplitter:
             raise ValueError("rng_seed must be a nonnegative integer")
         self.fractions = fractions
         self.rng_seed = rng_seed
+
+    @classmethod
+    def from_config(cls, config_path: str | Path) -> "DatasetSplitter":
+        """Build a splitter from the ``data.dataset_splitter`` YAML mapping.
+
+        Args:
+            config_path: YAML file containing a ``data.dataset_splitter`` mapping.
+
+        Returns:
+            A configured metadata splitter.
+
+        Raises:
+            FileNotFoundError: If ``config_path`` does not exist.
+            TypeError: If required configuration sections are not mappings.
+            ValueError: If ``group_columns`` is missing or settings are invalid.
+        """
+        configuration = _load_configuration_section(config_path, "dataset_splitter")
+        _required_setting(configuration, "dataset_splitter", "group_columns")
+        return cls(**configuration)
 
     @staticmethod
     def _validate_columns(
@@ -226,7 +274,7 @@ class DatasetSplitter:
         return assignments
 
 
-class TrainingDatasetSampler:
+class TrainingDatasetSampler(Configurable):
     """Oversample training metadata after a leakage-safe dataset split.
 
     Call :class:`DatasetSplitter` first, then pass its annotated dataframes
@@ -275,6 +323,62 @@ class TrainingDatasetSampler:
             raise ValueError("rng_seed must be a nonnegative integer")
         self.oversampling_rule = oversampling_rule
         self.rng_seed = rng_seed
+
+    @classmethod
+    def from_config(cls, config_path: str | Path) -> "TrainingDatasetSampler":
+        """Build a sampler from ``data.training_dataset_sampler`` YAML settings.
+
+        The required ``oversampling_rule`` value uses ``module:function`` syntax.
+        The resolved callable receives the same species, dataframe, and complete
+        mapping arguments as a directly supplied rule.
+
+        Args:
+            config_path: YAML file containing sampler settings and rule reference.
+
+        Returns:
+            A configured train-only dataset sampler.
+
+        Raises:
+            FileNotFoundError: If ``config_path`` does not exist.
+            TypeError: If configuration sections are not mappings or the resolved
+                rule is not callable.
+            ValueError: If required settings are missing, the rule reference cannot
+                be resolved, or static sampler settings are invalid.
+        """
+        configuration = _load_configuration_section(
+            config_path, "training_dataset_sampler"
+        )
+        for setting in ("group_columns", "stratify_columns", "oversampling_rule"):
+            _required_setting(configuration, "training_dataset_sampler", setting)
+        rule_reference = configuration.pop("oversampling_rule")
+        return cls(
+            **configuration,
+            oversampling_rule=cls._resolve_rule_reference(rule_reference),
+        )
+
+    @staticmethod
+    def _resolve_rule_reference(rule_reference: object) -> Callable:
+        """Resolve a trusted local ``module:function`` oversampling rule."""
+        if not isinstance(rule_reference, str):
+            raise ValueError("oversampling_rule must use module:function syntax")
+        module_name, separator, function_name = rule_reference.partition(":")
+        if not separator or not module_name or not function_name:
+            raise ValueError("oversampling_rule must use module:function syntax")
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as exc:
+            raise ValueError(
+                f"Could not import oversampling rule module: {module_name}"
+            ) from exc
+        try:
+            rule = getattr(module, function_name)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Could not find oversampling rule: {rule_reference}"
+            ) from exc
+        if not callable(rule):
+            raise TypeError(f"Oversampling rule is not callable: {rule_reference}")
+        return rule
 
     @staticmethod
     def _validate_columns(
