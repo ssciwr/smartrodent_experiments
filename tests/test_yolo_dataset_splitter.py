@@ -177,6 +177,23 @@ def test_assignments_are_repeatable_and_independent_of_input_order(splitter_type
         )
 
 
+def test_equal_sized_group_tie_breaking_is_row_order_invariant(splitter_type):
+    records = make_records([2] * 12)
+    splitter = make_splitter(splitter_type, rng_seed=19)
+    expected = splitter.split({"Mus musculus": records})["Mus musculus"]
+
+    for shuffle_seed in (7, 23, 41):
+        shuffled = records.sample(frac=1, random_state=shuffle_seed)
+        actual = make_splitter(splitter_type, rng_seed=19).split(
+            {"Mus musculus": shuffled}
+        )["Mus musculus"]
+
+        assert_frame_equal(
+            expected.sort_values(["source_group_id", "photo_index"]),
+            actual.sort_values(["source_group_id", "photo_index"]),
+        )
+
+
 def test_empty_species_returns_an_empty_annotated_dataframe(splitter_type):
     records = make_records([1, 1, 1]).iloc[:0]
 
@@ -242,9 +259,17 @@ def test_invalid_fractions_are_rejected(splitter_type, fractions):
         make_splitter(splitter_type, train_val_test_split=fractions)
 
 
-@pytest.mark.parametrize("columns", [(), ("id", "id"), ("",), "id"])
-def test_invalid_group_columns_are_rejected(splitter_type, columns):
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize(
+    ("columns", "error"),
+    [
+        ((), ValueError),
+        (("id", "id"), ValueError),
+        (("",), ValueError),
+        ("id", TypeError),
+    ],
+)
+def test_invalid_group_columns_are_rejected(splitter_type, columns, error):
+    with pytest.raises(error):
         splitter_type(group_columns=columns)
 
 
