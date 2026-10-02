@@ -321,16 +321,24 @@ class TrainingDatasetSampler:
                 multiplier of at least one, or a multiplier above one is requested
                 for a species with no training rows.
         """
+        # Materialize the mapping once: rules receive the complete, original
+        # population and none of their inputs are modified by this sampler.
         frames = dict(records_by_species)
+        # Validate all frames before calling a rule or sampling. A malformed
+        # later species must not leave callers with a partially built result.
         for species, frame in frames.items():
             self._validate_frame(species, frame)
 
+        # Resolve every multiplier before generating copies for the same reason:
+        # rule failures are reported before sampling begins.
         multipliers = {
             species: self._validate_multiplier(
                 species, self.oversampling_rule(species, frame, frames)
             )
             for species, frame in frames.items()
         }
+        # One seeded generator makes the full mapping reproducible. Iterating
+        # the supplied mapping also preserves its species-key order in output.
         rng = np.random.default_rng(self.rng_seed)
         return {
             species: self._sample_species(frame, multipliers[species], rng)
@@ -351,6 +359,9 @@ class TrainingDatasetSampler:
         if not frame["dataset_split"].isin(valid_splits).all():
             raise ValueError(f"{species}: dataset_split contains an invalid value")
 
+        # Evaluation rows are never candidates for copying, so null group or
+        # stratum metadata there is irrelevant to sampling. Training rows need
+        # complete metadata to select observations and retain strata safely.
         training = frame.loc[frame["dataset_split"] == "train"]
         metadata_columns = list(
             dict.fromkeys((*self.group_columns, *self.stratify_columns))
@@ -387,13 +398,19 @@ class TrainingDatasetSampler:
     ) -> pd.DataFrame:
         """Append copies selected within each training stratum."""
         if multiplier == 1.0:
+            # A multiplier of one is a strict no-op: do not consume random
+            # numbers or alter row/index ordering, but still return a new frame.
             return frame.copy(deep=True)
 
+        # Start from the already split training subset. Validation/test rows stay
+        # only in ``frame`` and are never included in a candidate stratum.
         training = frame.loc[frame["dataset_split"] == "train"]
         if training.empty:
             raise ValueError("Cannot oversample a species without training rows")
 
         if self.stratify_columns:
+            # Apply the multiplier independently per stratum. This retains the
+            # training strata's proportions, except for unavoidable ceil rounding.
             strata = [
                 stratum
                 for _, stratum in training.groupby(
@@ -405,22 +422,33 @@ class TrainingDatasetSampler:
 
         copies = []
         for stratum in strata:
+            # ceil ensures the requested multiplier is reached rather than
+            # rounded below it when the target cannot be an integral row count.
             target_count = ceil(multiplier * len(stratum))
             copies.extend(
                 self._sample_stratum(stratum, target_count - len(stratum), rng)
             )
+        # Keep every original row first, in its input order and with its index.
+        # Appending copies makes the duplicated training population observable
+        # without adding provenance columns to downloader metadata.
         return pd.concat([frame, *copies])
 
     def _sample_stratum(
         self, stratum: pd.DataFrame, copy_count: int, rng: np.random.Generator
     ) -> list[pd.DataFrame]:
         """Select complete image rows by uniformly sampling groups then images."""
+        # Each value is an array of positional row locations for one observation.
+        # Sampling groups uniformly prevents an observation with many photos from
+        # being selected more often merely because it has more image rows.
         group_indices = stratum.groupby(
             list(self.group_columns), sort=True, observed=True
         ).indices
         groups = list(group_indices.values())
         copies = []
         for _ in range(copy_count):
+            # First choose an observation, then an image within it. ``iloc`` uses
+            # positions, so duplicate dataframe index labels remain safe. Copying
+            # the complete row preserves the observation-to-photo metadata link.
             positions = groups[int(rng.integers(len(groups)))]
             position = int(positions[rng.integers(len(positions))])
             copies.append(stratum.iloc[[position]].copy(deep=True))
