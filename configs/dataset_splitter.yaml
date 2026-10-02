@@ -1,0 +1,37 @@
+# Metadata-only dataset partitioning. Run TrainingDatasetSampler only after this
+# splitter if training data needs oversampling; sampling first distorts evaluation.
+paths:
+  # Root produced by an iNaturalist or GBIF downloader. It should contain the
+  # per-species records files that the future pipeline script will read.
+  dataset_splitter_input: "<path-to-downloaded-records-root>"
+  # Root where the future pipeline script will write annotated per-species records.
+  dataset_splitter_output: "<path-to-split-records-root>"
+  # This must be the splitter output above, because the sampler duplicates only
+  # rows whose dataset_split value is train.
+  training_dataset_sampler_input: "<path-to-split-records-root>"
+  # Root where the future pipeline script will write oversampled train metadata.
+  training_dataset_sampler_output: "<path-to-oversampled-records-root>"
+
+data:
+  dataset_splitter:
+    # Rows sharing all group-column values are an indivisible observation. Use
+    # [id] for iNaturalist records or [source_group_id] for GBIF records.
+    group_columns: [source_group_id]
+    # Columns whose joint distribution should be retained across splits. Add
+    # e.g. country_code and year here when those strata are required.
+    stratify_columns: []
+    train_val_test_split: [0.7, 0.15, 0.15]
+    rng_seed: 42
+
+  training_dataset_sampler:
+    # Must match the splitter's observation key: the sampler chooses an
+    # observation first, then one of its image rows to duplicate.
+    group_columns: [source_group_id]
+    # Must match the splitter's strata so oversampling retains the training
+    # distribution within each configured stratum, apart from ceil rounding.
+    stratify_columns: []
+    # Trusted Python callable in module:function form. It receives
+    # (species, species_dataframe, all_species_dataframes) and returns a finite
+    # multiplier >= 1.0; 1.0 is a strict no-op.
+    oversampling_rule: "<package.module:callable_name>"
+    rng_seed: 42
