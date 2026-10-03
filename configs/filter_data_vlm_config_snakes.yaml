@@ -6,8 +6,8 @@ columns:
   image_path: image_path
 
 paths:
-  imgs_root: smartrodent_experiments/datasets/full_dataset/filtered_kept
-  image_suffixes: [.jpg, .jpeg, .png]
+  input_root: datasets/inaturalist
+  output_root: datasets/full_dataset/filtered_snakes
 
 ollama:
   model: qwen3.6:35b-a3b
