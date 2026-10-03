@@ -1,8 +1,13 @@
 backend: vllm # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
+taskname: thermal
+labels: [kept, rejected]
+columns:
+  photo_id: photo.id
+  image_path: image_path
 
 paths:
-  imgs_root: smartrodent_experiments/datasets/full_dataset/filtered_kept
-  image_suffixes: [.jpg, .jpeg, .png]
+  input_root: datasets/inaturalist
+  output_root: datasets/full_dataset/filtered_thermal
 
 ollama:
   model: qwen3.6:35b-a3b
@@ -16,8 +21,6 @@ vllm:
   batch_size: 24
   tensor-parallel-size: 8
   max-model-len: 262144
-mode: move
-
 system_prompt: |
   You are a meticulous wildlife biologist and expert camera-trap image analyst. You
   have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision

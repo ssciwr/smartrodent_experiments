@@ -1,38 +1,37 @@
 stages:
-  download_gbif:
-    cmd: uv run python scripts/download_gbif_data.py configs/data_config_full.yaml
-    deps:
-      - scripts/download_gbif_data.py
-    params:
-      - configs/data_config_full.yaml:
-          - data.gbif
-    outs:
-      - datasets/full_dataset/raw
+  # download_gbif:
+  #   cmd: uv run python scripts/download_gbif_data.py configs/data_config_full.yaml
+  #   deps:
+  #     - scripts/download_gbif_data.py
+  #   params:
+  #     - configs/data_config_full.yaml:
+  #         - data.gbif
+  #   outs:
+  #     - datasets/inaturalist
 
   filter_animal:
     cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_animal.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_animal.yaml
-      - datasets/full_dataset/raw
+      - datasets/inaturalist
     outs:
-      - datasets/full_dataset/filtered_kept
-      - datasets/full_dataset/filtered_rejected
-      - datasets/full_dataset/filtered_failure
-      - datasets/full_dataset/filter_results.csv
+      - datasets/full_dataset/filtered_animal
 
   filter_snake:
     cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_snakes.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_snakes.yaml
+      - datasets/inaturalist
     outs:
-      - datasets/full_dataset/filtered_snakes.csv
+      - datasets/full_dataset/filtered_snakes
 
   filter_flying_bird:
     cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_birds.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_birds.yaml
+      - datasets/inaturalist
     outs:
-      - datasets/full_dataset/filtered_flying_birds.csv
+      - datasets/full_dataset/filtered_birds
