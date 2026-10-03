@@ -392,8 +392,28 @@ class FilterVLLM(VLMFilter):
         """dict: Structured-output schema containing this filter's labels."""
         return {
             "type": "object",
-            "properties": {"label": {"type": "string", "enum": self.labels}},
-            "required": ["label"],
+            "properties": {
+                "label": {"type": "string", "enum": self.labels},
+                "visible_animal": {"type": "boolean"},
+                "evidence_kept": {"type": "array", "items": {"type": "string"}},
+                "evidence_rejected": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "image_quality": {
+                    "type": "string",
+                    "enum": ["clear", "poor", "unusable"],
+                },
+                "needs_human_review": {"type": "boolean"},
+            },
+            "required": [
+                "label",
+                "visible_animal",
+                "evidence_kept",
+                "evidence_rejected",
+                "image_quality",
+                "needs_human_review",
+            ],
             "additionalProperties": False,
         }
 

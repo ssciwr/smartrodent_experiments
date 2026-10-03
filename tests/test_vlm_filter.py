@@ -445,13 +445,27 @@ def test_ollama_closes_after_filtering(monkeypatch, tmp_path):
     }
 
 
-def test_vllm_schema_uses_configured_labels(tmp_path):
+def test_vllm_schema_matches_prompt_and_uses_configured_labels(tmp_path):
     vlm_filter = make_vllm_filter(tmp_path, labels=["candidate", "discard"])
 
-    assert vlm_filter.response_json_schema["properties"]["label"]["enum"] == [
-        "candidate",
-        "discard",
-    ]
+    schema = vlm_filter.response_json_schema
+    assert schema["properties"]["label"]["enum"] == ["candidate", "discard"]
+    assert schema["properties"] == {
+        "label": {"type": "string", "enum": ["candidate", "discard"]},
+        "visible_animal": {"type": "boolean"},
+        "evidence_kept": {"type": "array", "items": {"type": "string"}},
+        "evidence_rejected": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "image_quality": {
+            "type": "string",
+            "enum": ["clear", "poor", "unusable"],
+        },
+        "needs_human_review": {"type": "boolean"},
+    }
+    assert schema["required"] == list(schema["properties"])
+    assert schema["additionalProperties"] is False
 
 
 def test_vllm_classify_builds_engine_with_configured_schema(monkeypatch, tmp_path):
