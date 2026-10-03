@@ -12,7 +12,7 @@ dependencies = [
     "PyYAML>=6.0",
     "tqdm>=4.69.0",
     "ultralytics>=8.4.68",
-    "vllm>=0.8",
+    "vllm==0.28.0",          # needs uv pip install "vllm==0.28.0" --torch-backend=auto to resolve bug: https://github.com/vllm-project/vllm/issues/58236
     "requests>=2.0",
     "pyinaturalist>=0.21.1",
     "pygbif>=0.6.6",
