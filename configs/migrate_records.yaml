@@ -1,3 +1,3 @@
 image_root: datasets/inaturalist
 old_root: /mnt/dataLinux/machinelearning_data/smartrodent/datasets/inaturalist/
-new_root: /home/hmack/projects/smartrodent_experiments/datasets/inaturalist/
+new_root: ./projects/smartrodent_experiments/datasets/inaturalist/

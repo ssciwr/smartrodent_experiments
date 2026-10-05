@@ -6,7 +6,7 @@ columns:
   image_path: image_path
 
 paths:
-  input_root: datasets/inaturalist
+  input_root: datasets/full_dataset/filtered_stage1_animal
   output_root: datasets/full_dataset/filtered_thermal
 
 ollama:
@@ -14,12 +14,12 @@ ollama:
   # model: qwen3-vl:8b
 
 vllm:
-  # model: Qwen/Qwen2.5-VL-3B-Instruct
+  # model: Qwen/Qwen3.6-35B-A3B
   model: Qwen/Qwen3.8-27B
   gpu_memory_utilization: 0.97
   max_new_tokens: 500
-  batch_size: 24
-  tensor-parallel-size: 8
+  batch_size: 4
+  # tensor-parallel-size: 8
   max-model-len: 262144
 system_prompt: |
   You are a meticulous wildlife biologist and expert camera-trap image analyst. You

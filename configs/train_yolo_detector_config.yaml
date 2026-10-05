@@ -1,4 +1,4 @@
-train_dataset: /home/hmack/projects/smartrodent_experiments/datasets/full_dataset/yolo_detector_training_dataset
+train_dataset: ./projects/smartrodent_experiments/datasets/full_dataset/yolo_detector_training_dataset
 model_name: yolo26x.pt
 include_macro_f1: true
 return_format: dataframe
@@ -9,7 +9,7 @@ train_kwargs:
   device: 0
   workers: 20
   patience: 25
-  project: /home/hmack/projects/smartrodent_experiments/training/yolo_detect
+  project: ./projects/smartrodent_experiments/training/yolo_detect
   name: full_data_detector_xl_with_recommended_defaults
   exist_ok: true
   plots: true

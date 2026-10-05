@@ -7,7 +7,7 @@ from pathlib import Path
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 with open(
-    "/home/hmack/projects/smartrodent_experiments/configs/train_yolo_classifier_config.yaml",
+    "./projects/smartrodent_experiments/configs/train_yolo_classifier_config.yaml",
     "r",
 ) as f:
     cfg = yaml.load(f, config_utils.get_loader())
