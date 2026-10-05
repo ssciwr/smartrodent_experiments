@@ -14,24 +14,25 @@ stages:
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_animal.yaml
-      - datasets/inaturalist
+      # - datasets/inaturalist
     outs:
-      - datasets/full_dataset/filtered_animal
-
-  filter_snake:
-    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_snakes.yaml
-    deps:
-      - scripts/filter_data_vlm.py
-      - configs/filter_data_vlm_config_snakes.yaml
-      - datasets/inaturalist
-    outs:
-      - datasets/full_dataset/filtered_snakes
+      - datasets/full_dataset/filtered_stage1_animal
 
   filter_flying_bird:
     cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_birds.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_birds.yaml
-      - datasets/inaturalist
+      - datasets/full_dataset/filtered_stage1_animal
     outs:
-      - datasets/full_dataset/filtered_birds
+      - datasets/full_dataset/filtered_stage2_birds
+
+  filter_snake:
+    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_snakes.yaml
+    deps:
+      - scripts/filter_data_vlm.py
+      - configs/filter_data_vlm_config_snakes.yaml
+      - datasets/full_dataset/filtered_stage2_birds
+    outs:
+      - datasets/full_dataset/filtered_stage3_snakes
+
