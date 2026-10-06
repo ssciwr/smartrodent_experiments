@@ -32,6 +32,7 @@ uv.lock
 
 # dataset stuff
 datasets
+datasets_backup
 
 # training
 training

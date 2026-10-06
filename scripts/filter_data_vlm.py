@@ -28,12 +28,33 @@ def main(config_path: Path) -> None:
         if selected_species is None or records_path.parent.name in selected_species
     }
 
+    # Get the records for species that are not selected, so we can write them out with the task labels set to False
+    other_records = {
+        records_path.parent.name: pd.read_csv(records_path)
+        for records_path in sorted(input_root.glob("*/records.csv"))
+        if selected_species is not None
+        and records_path.parent.name not in selected_species
+    }
+
     filtered_records = VLMFilter.from_config(config_path).filter_data(
         records_by_species
     )
     for species, records in filtered_records.items():
         output_path = output_root / species / "records.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        records.to_csv(output_path, index=False)
+
+    # Get the task name and labels from the config, and create a list of task-specific label names
+    task = config["taskname"]
+    labels = config["labels"]
+    task_labels = [f"{label}_{task}" for label in labels]
+
+    # Write out the other species records with the task labels set to False
+    for species, records in other_records.items():
+        output_path = output_root / species / "records.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        for label in task_labels:
+            records[label] = False
         records.to_csv(output_path, index=False)
 
 

@@ -7,7 +7,7 @@ columns:
 
 paths:
   input_root: datasets/inaturalist
-  output_root: datasets/full_dataset/filtered_stage1_animal
+  output_root:datasets/filtered_stage1_animal
 
 ollama:
   model: qwen3.6:35b-a3b
@@ -18,7 +18,7 @@ vllm:
   model: Qwen/Qwen3.8-27B
   gpu_memory_utilization: 0.97
   # max_new_tokens: 500
-  batch_size: 4
+  batch_size: 8
   # tensor-parallel-size: 8
   max-model-len: 262144
 system_prompt: |

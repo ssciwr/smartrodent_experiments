@@ -6,8 +6,8 @@ columns:
   image_path: image_path
 
 paths:
-  input_root: datasets/full_dataset/filtered_stage1_animal
-  output_root: datasets/full_dataset/filtered_thermal
+  input_root:datasets/filtered_stage1_animal
+  output_root:datasets/filtered_thermal
 
 ollama:
   model: qwen3.6:35b-a3b

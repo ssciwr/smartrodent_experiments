@@ -1,8 +1,8 @@
 data:
   biotrove:
     metadata_processor_info:
-      source_folder: ./datasets/BioTrove/BioTrove
-      destination_folder: ./datasets/biotrove-central-europe-large/biotrove-central-europe-large-filtered
+      source_folder: datasets/BioTrove/BioTrove
+      destination_folder: datasets/biotrove-central-europe-large/biotrove-central-europe-large-filtered
       categories: &categories # rodents in europe
         - Rattus norvegicus # brown rat
         - Rattus rattus # black rat
@@ -49,32 +49,32 @@ data:
         - Buteo buteo # common buzzard
 
       category_type: scientificName
-    filter_dir: ./datasets/biotrove-central-europe-large/central-europe_parquet
-    img_dir: ./datasets/biotrove-central-europe-large/biotrove-central-europe-large/imgs
+    filter_dir: datasets/biotrove-central-europe-large/central-europe_parquet
+    img_dir: datasets/biotrove-central-europe-large/biotrove-central-europe-large/imgs
     metadata_filter_and_shuffle_info:
-      species_count_data: ./datasets/biotrove-central-europe-large/biotrove-central-europe-large-filtered/combined_sample_counts_per_species.csv
-      directory: ./datasets/biotrove-central-europe-large
+      species_count_data: datasets/biotrove-central-europe-large/biotrove-central-europe-large-filtered/combined_sample_counts_per_species.csv
+      directory: datasets/biotrove-central-europe-large
       rare_threshold: 5
       cap_threshold: 100000
       part_size: 500
-      rare_dir: ./datasets/biotrove-central-europe-large/rare_cases
-      cap_filtered_dir_train: ./datasets/biotrove-central-europe-large/tmp_cap_filtered
-      capped_dir: ./datasets/biotrove-central-europe-large/overthecap_cases
-      merged_dir: ./datasets/biotrove-central-europe-large/processed_metadata
+      rare_dir: datasets/biotrove-central-europe-large/rare_cases
+      cap_filtered_dir_train: datasets/biotrove-central-europe-large/tmp_cap_filtered
+      capped_dir: datasets/biotrove-central-europe-large/overthecap_cases
+      merged_dir: datasets/biotrove-central-europe-large/processed_metadata
       files_per_chunk: 100
       random_seed: 42
     image_download_info:
-      processed_metadata_folder: ./datasets/biotrove-central-europe-large/processed_metadata
-      output_folder: ./datasets/biotrove-central-europe-large/img_txt
+      processed_metadata_folder: datasets/biotrove-central-europe-large/processed_metadata
+      output_folder: datasets/biotrove-central-europe-large/img_txt
       start_index: 0
       end_index: null
       concurrent_downloads: 100
     img_text_gen_info:
-      processed_metadata_folder: ./datasets/biotrove-central-europe-large/processed_metadata
-      img_folder: ./datasets/biotrove-central-europe-large/img_txt
+      processed_metadata_folder: datasets/biotrove-central-europe-large/processed_metadata
+      img_folder: datasets/biotrove-central-europe-large/img_txt
       generate_tar: true
   inaturalist:
-    output_path: ./datasets/inaturalist
+    output_path: datasets/inaturalist
     years: []
     first_year: 2000
     last_year: 2026
@@ -83,8 +83,8 @@ data:
     seed: 42
     max_img_num: 2500
     max_observations: 5000
-    cache_file: ./datasets/inaturalist/api_requests.db
-    ratelimit_path: ./datasets/inaturalist/api_ratelimit.db
+    cache_file: datasets/inaturalist/api_requests.db
+    ratelimit_path: datasets/inaturalist/api_ratelimit.db
     backoff_factor: 0.5
     # Bounds request retries in both the API session and downloader retry loops.
     max_retries: 5
@@ -95,7 +95,7 @@ data:
       - cc-by-nc
       - cc-by-nc-sa
   gbif:
-    output_path: ./datasets/inaturalist
+    output_path: datasets/inaturalist
     years: []
     first_year: 2000
     last_year: 2026
