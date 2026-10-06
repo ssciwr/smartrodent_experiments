@@ -60,21 +60,10 @@ def main(config_path: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     """Parse the VLM filtering configuration path."""
-    default_config = (
-        Path(__file__).resolve().parents[1]
-        / "configs"
-        / "filter_data_vlm_config_animal.yaml"
-    )
     parser = argparse.ArgumentParser(
         description="Annotate image metadata using a VLM backend."
     )
-    parser.add_argument(
-        "-c",
-        "--config",
-        type=Path,
-        default=default_config,
-        help=f"Path to a YAML config file (default: {default_config})",
-    )
+    parser.add_argument("config", type=Path, help="Path to a VLM filtering YAML file.")
     return parser.parse_args()
 
 

@@ -1,6 +1,7 @@
 """Migrate image path prefixes in per-species records files."""
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -19,32 +20,34 @@ def main(config_path: Path) -> None:
     image_root = Path(config["image_root"]).resolve()
     old_root = config["old_root"]
     new_root = config["new_root"]
-
-    for species_path in tqdm(sorted(image_root.iterdir())):
+    # Use one local timestamp for all backups produced by this migration run.
+    timestamp = datetime.now().strftime("%H%M%S_%d%m%Y")
+    backup_name = f"{config.get('backup_name', 'records_original')}_{timestamp}"
+    for species_path in tqdm(
+        sorted(image_root.iterdir()),
+    ):
         records_path = species_path / "records.csv"
         if not species_path.is_dir() or not records_path.is_file():
             continue
 
         print(species_path.name)
         records = pd.read_csv(records_path)
-        backup_path = species_path / "records_original.csv"
+        backup_path = species_path / f"{backup_name}.csv"
         if backup_path.exists():
             raise FileExistsError(f"Backup already exists: {backup_path}")
         records.to_csv(backup_path, index=False)
 
         mask = records["image_path"].str.startswith(old_root, na=False)
-        records.loc[mask, "image_path"] = records.loc[
-            mask, "image_path"
-        ].str.replace(old_root, new_root, regex=False)
+        records.loc[mask, "image_path"] = records.loc[mask, "image_path"].str.replace(
+            old_root, new_root, regex=False
+        )
 
         missing = [
-            path
-            for path in records.loc[mask, "image_path"]
-            if not Path(path).is_file()
+            path for path in records.loc[mask, "image_path"] if not Path(path).is_file()
         ]
         if missing:
             raise FileNotFoundError(
-                f"{len(missing)} rewritten image paths do not exist"
+                f"{len(missing)} rewritten image paths do not exist, e.g., {missing[:3]}"
             )
 
         records.to_csv(records_path, index=False)
