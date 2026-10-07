@@ -1,0 +1,23 @@
+# Train-only metadata oversampling, configured for scripts/sample_training_dataset.py.
+# Run scripts/split_dataset.py with configs/dataset_splitter.yaml first; sampling
+# before splitting distorts evaluation.
+paths:
+  # Must match dataset_splitter_output in configs/dataset_splitter.yaml. The
+  # sampler duplicates only rows whose dataset_split value is train.
+  training_dataset_sampler_input: "<path-to-split-records-root>"
+  # Root where the sampler will write oversampled per-species records.
+  training_dataset_sampler_output: "<path-to-oversampled-records-root>"
+
+data:
+  training_dataset_sampler:
+    # Must match the splitter's observation key: the sampler chooses an
+    # observation first, then one of its image rows to duplicate.
+    group_columns: [source_group_id]
+    # Must match the splitter's strata so oversampling retains the training
+    # distribution within each configured stratum, apart from ceil rounding.
+    stratify_columns: []
+    # Trusted Python callable in module:function form. It receives
+    # (species, species_dataframe, all_species_dataframes) and returns a finite
+    # multiplier >= 1.0; 1.0 is a strict no-op.
+    oversampling_rule: "<package.module:callable_name>"
+    rng_seed: 42
