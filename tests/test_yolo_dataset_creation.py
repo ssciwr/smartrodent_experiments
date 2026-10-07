@@ -12,6 +12,7 @@ import yaml
 from PIL import Image
 
 from smartrodent import yolo_dataset_creation
+from smartrodent.base import Configurable
 from speciesnet_test_support import SpeciesNetStub, detection
 from smartrodent.yolo_dataset_creation import (
     YoloClassifierDatasetCreatorFromSpeciesnet,
@@ -878,3 +879,182 @@ def test_classifier_output_loads_through_real_ultralytics_dataset(
         assert strongest_channel == {0: 0, 1: 2}[class_index]
         labels.append(class_index)
     assert sorted(labels) == ([0, 0, 1] if split == "train" else [0, 1])
+
+
+def test_from_config_loads_selected_classes_and_lazy_model(
+    creator_type, creator_input, tmp_path, monkeypatch
+):
+    """Both configurable creators retain class order and defer model loading."""
+    constructor = Mock(
+        side_effect=AssertionError("Config loading must not load weights")
+    )
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    output = tmp_path / "stage8_yolo_dataset"
+    config_path = tmp_path / "creator.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    creator_type.__name__: {
+                        "path_to_image_data": str(creator_input),
+                        "dataset_output_path": str(output),
+                        "class_names": ["shrew", "mouse"],
+                        "model_name": "custom-speciesnet",
+                    }
+                }
+            }
+        )
+    )
+
+    creator = creator_type.from_config(config_path)
+
+    assert type(creator) is creator_type
+    assert isinstance(creator, Configurable)
+    assert creator.class_names == ["shrew", "mouse"]
+    assert creator.classes == {0: "shrew", 1: "mouse"}
+    assert list(creator.records_by_species) == ["shrew", "mouse"]
+    assert creator.path_to_image_data == creator_input
+    assert creator.dataset_output_path == output
+    assert creator.speciesnet_model is None
+    assert creator.speciesnet_model_name == "custom-speciesnet"
+    constructor.assert_not_called()
+    assert not output.exists()
+
+
+def test_from_config_uses_working_directory_paths_and_optional_defaults(
+    creator_type, creator_input, tmp_path, monkeypatch
+):
+    """Relative paths follow the working directory, not the YAML file's directory."""
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_path = config_dir / "creator.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    creator_type.__name__: {
+                        "path_to_image_data": "input",
+                        "dataset_output_path": "stage8_yolo_dataset",
+                    }
+                }
+            }
+        )
+    )
+
+    creator = creator_type.from_config(config_path)
+
+    assert isinstance(creator, Configurable)
+    assert creator.path_to_image_data == creator_input
+    assert creator.dataset_output_path == tmp_path / "stage8_yolo_dataset"
+    assert creator.class_names == ["mouse", "shrew"]
+    assert creator.speciesnet_model is None
+    assert creator.speciesnet_model_name is None
+    assert not creator.dataset_output_path.exists()
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        "null",
+        "[]",
+        "invalid",
+        "data: null",
+        "data: []",
+        "data: {}",
+        "data:\n  CREATOR: null",
+        "data:\n  CREATOR: []",
+    ],
+)
+def test_from_config_requires_mapping_sections(creator_type, tmp_path, configuration):
+    """Malformed YAML structure has explicit errors, not guessed defaults."""
+    config_path = tmp_path / "creator.yaml"
+    config_path.write_text(configuration.replace("CREATOR", creator_type.__name__))
+
+    with pytest.raises(TypeError, match="mapping"):
+        creator_type.from_config(config_path)
+
+
+@pytest.mark.parametrize("missing", ["path_to_image_data", "dataset_output_path"])
+def test_from_config_requires_source_and_destination(
+    creator_type, creator_input, tmp_path, missing
+):
+    """Missing required paths are reported by their configuration key."""
+    settings = {
+        "path_to_image_data": str(creator_input),
+        "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
+    }
+    del settings[missing]
+    config_path = tmp_path / "creator.yaml"
+    config_path.write_text(yaml.safe_dump({"data": {creator_type.__name__: settings}}))
+
+    with pytest.raises(ValueError, match=missing):
+        creator_type.from_config(config_path)
+
+
+@pytest.mark.parametrize("extra_setting", ["model", "train_val_test_split", "typo"])
+def test_from_config_rejects_unknown_or_python_only_settings(
+    creator_type, creator_input, tmp_path, extra_setting
+):
+    """Model injection is Python-only, and obsolete/unknown options cannot be ignored."""
+    settings = {
+        "path_to_image_data": str(creator_input),
+        "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
+        extra_setting: None,
+    }
+    config_path = tmp_path / "creator.yaml"
+    config_path.write_text(yaml.safe_dump({"data": {creator_type.__name__: settings}}))
+
+    with pytest.raises(ValueError, match=extra_setting):
+        creator_type.from_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "setting, value, error",
+    [
+        ("path_to_image_data", None, TypeError),
+        ("path_to_image_data", True, TypeError),
+        ("dataset_output_path", 123, TypeError),
+        ("dataset_output_path", "", ValueError),
+        ("path_to_image_data", "   ", ValueError),
+        ("class_names", "mouse", TypeError),
+        ("class_names", {"mouse": True}, TypeError),
+        ("class_names", [123], TypeError),
+        ("model_name", 123, TypeError),
+        ("model_name", "", ValueError),
+    ],
+)
+def test_from_config_rejects_invalid_setting_types(
+    creator_type, creator_input, tmp_path, setting, value, error
+):
+    """Configuration values cannot silently reinterpret paths, class lists, or models."""
+    settings = {
+        "path_to_image_data": str(creator_input),
+        "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
+        setting: value,
+    }
+    config_path = tmp_path / "creator.yaml"
+    config_path.write_text(yaml.safe_dump({"data": {creator_type.__name__: settings}}))
+
+    with pytest.raises(error, match=setting):
+        creator_type.from_config(config_path)
+
+
+def test_from_config_reports_missing_config_file(creator_type, tmp_path):
+    """A missing configuration file does not produce a partially configured creator."""
+    with pytest.raises(FileNotFoundError):
+        creator_type.from_config(tmp_path / "missing.yaml")
+
+
+def test_from_config_requires_its_own_class_named_section(creator_type, tmp_path):
+    """Creators cannot accidentally consume another creator's configuration."""
+    other_type = (
+        YoloClassifierDatasetCreatorFromSpeciesnet
+        if creator_type is YoloDetectorDatasetCreatorFromSpeciesnet
+        else YoloDetectorDatasetCreatorFromSpeciesnet
+    )
+    config_path = tmp_path / "creator.yaml"
+    config_path.write_text(yaml.safe_dump({"data": {other_type.__name__: {}}}))
+
+    with pytest.raises(TypeError, match=creator_type.__name__):
+        creator_type.from_config(config_path)

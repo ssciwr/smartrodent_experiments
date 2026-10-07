@@ -6,7 +6,7 @@ from copy import deepcopy
 from hashlib import sha256
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from PIL import Image
 import pandas as pd
@@ -275,6 +275,83 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         self.initialize_speciesnet(model=model, model_name=model_name)
         super().__init__(path_to_image_data, dataset_output_path, class_names)
         self.metadata_records: list[dict] = []
+
+    @classmethod
+    def from_config(cls, config_path: str | Path) -> Self:
+        """Build a creator from the ``data.yolo_dataset_creator`` YAML mapping.
+
+        Args:
+            config_path: YAML configuration file. Source/output paths are relative
+                to the working directory, not the configuration file's directory.
+                Required settings are ``path_to_image_data`` and
+                ``dataset_output_path``. Optional settings are ``class_names`` and
+                ``model_name``; omitted values retain the constructor defaults.
+
+        Returns:
+            A creator of the requested type, with source records loaded and model
+            weights still unloaded.
+
+        Raises:
+            FileNotFoundError: The configuration or required source files are missing.
+            TypeError: YAML sections or setting values have incorrect types.
+            ValueError: Required paths are missing, unsupported settings are supplied,
+                or class selection, metadata, or model configuration is invalid.
+        """
+        settings = cls._load_creator_settings(config_path)
+        cls._validate_creator_settings(settings)
+        return cls(**settings)
+
+    @staticmethod
+    def _load_creator_settings(config_path: str | Path) -> dict:
+        """Read the required creator mapping without borrowing unrelated pipeline code."""
+        path = Path(config_path).expanduser()
+        configuration = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(configuration, dict):
+            raise TypeError("The configuration must be a mapping")
+        data = configuration.get("data")
+        if not isinstance(data, dict):
+            raise TypeError("The 'data' configuration must be a mapping")
+        settings = data.get("yolo_dataset_creator")
+        if not isinstance(settings, dict):
+            raise TypeError(
+                "The 'data.yolo_dataset_creator' configuration must be a mapping"
+            )
+        return settings
+
+    @staticmethod
+    def _validate_creator_settings(settings: dict) -> None:
+        """Reject ambiguous YAML values and Python-only model injection before setup."""
+        required = {"path_to_image_data", "dataset_output_path"}
+        allowed = required | {"class_names", "model_name"}
+        unknown = set(settings) - allowed
+        if unknown:
+            raise ValueError(
+                f"Unsupported yolo_dataset_creator settings: {sorted(map(str, unknown))}"
+            )
+        missing = required - set(settings)
+        if missing:
+            raise ValueError(
+                f"Missing required yolo_dataset_creator settings: {sorted(missing)}"
+            )
+        for name in sorted(required):
+            value = settings[name]
+            if not isinstance(value, str):
+                raise TypeError(f"{name} must be a path string")
+            if not value.strip():
+                raise ValueError(f"{name} must be a nonempty path string")
+
+        class_names = settings.get("class_names")
+        if class_names is not None:
+            if not isinstance(class_names, list) or any(
+                not isinstance(name, str) for name in class_names
+            ):
+                raise TypeError("class_names must be a list of strings or null")
+        model_name = settings.get("model_name")
+        if model_name is not None:
+            if not isinstance(model_name, str):
+                raise TypeError("model_name must be a string or null")
+            if not model_name.strip():
+                raise ValueError("model_name must be a nonempty string or null")
 
     def create(self) -> Path:
         """Infer source records and write the configured YOLO dataset.

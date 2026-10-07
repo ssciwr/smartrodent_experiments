@@ -57,7 +57,7 @@ class DatasetLoader(Configurable, Protocol):
         ...
 
 
-class YoloDatasetCreatorBase(ABC):
+class YoloDatasetCreatorBase(Configurable, ABC):
     """Load per-class records with existing split assignments, without sampling.
 
     Constructors only read metadata. They neither run inference nor create output
