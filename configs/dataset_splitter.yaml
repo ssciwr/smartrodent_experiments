@@ -3,12 +3,19 @@
 # afterward with configs/training_dataset_sampler.yaml; sampling first distorts
 # evaluation.
 paths:
-  # Root produced by an iNaturalist or GBIF downloader. It should contain the
-  # per-species records.csv files that the splitter will read.
-  dataset_splitter_input: "<path-to-downloaded-records-root>"
+  # Root containing the corrected metadata. Relative paths are interpreted
+  # from the working directory (normally the project root).
+  dataset_splitter_input: datasets/stage5_materialized_filtered_data_corrected
+  # Required glob relative to the input root: '*' matches any single species
+  # directory here, including names with spaces. This selects only corrected
+  # CSVs under kept/, excluding rejected/ and the original records.csv files.
+  # Each CSV's immediate parent directory must name its species, with exactly
+  # one matching CSV per species. No matches or duplicate species are errors.
+  # For downloader metadata, use "*/records.csv" with its root as input instead.
+  records_glob: "kept/*/records_corrected.csv"
   # Root where the splitter will write annotated per-species records. Set the
   # sampler's training_dataset_sampler_input to this same path when sampling.
-  dataset_splitter_output: "<path-to-split-records-root>"
+  dataset_splitter_output: datasets/stage6_filtered_data_split
 
 data:
   dataset_splitter:
