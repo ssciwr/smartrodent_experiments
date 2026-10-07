@@ -2,9 +2,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-import numpy as np
 import pandas as pd
-import torch
 
 
 @runtime_checkable
@@ -60,67 +58,126 @@ class DatasetLoader(Configurable, Protocol):
 
 
 class YoloDatasetCreatorBase(ABC):
-    """Shared setup and interface for YOLO dataset creators."""
+    """Load per-class records with existing split assignments, without sampling.
+
+    Constructors only read metadata. They neither run inference nor create output
+    directories. Source row order, additional columns, and oversampled rows remain
+    available in ``records_by_species`` for the future format conversion workflow.
+    """
 
     def __init__(
         self,
-        path_to_image_data: str,
-        path_to_labels: str,
-        dataset_output_path: str,
-        class_names: list[str],
-        train_val_test_split: tuple[float, float, float] = (0.7, 0.2, 0.1),
-        img_types=(".jpg", ".jpeg", ".png"),
-        rng_seed: int = 42,
-        confidence_threshold: float = 0.1,
-        IoU_threshold: float = 0.45,
-        create_detection_dirs: bool = True,
+        path_to_image_data: str | Path,
+        dataset_output_path: str | Path,
+        class_names: list[str] | None = None,
     ):
-        """Store common YOLO dataset creation settings.
+        """Load the selected species directories' ``records.csv`` files.
 
         Args:
-            path_to_image_data: Root directory for source images or source crops.
-            path_to_labels: Root directory for label metadata.
-            dataset_output_path: Destination root for the generated YOLO dataset.
-            class_names: Class names in the order they should appear in YOLO metadata.
-            train_val_test_split: Fractions for train, validation, and test splits.
-            img_types: Image suffixes accepted when scanning source folders.
-            rng_seed: Seed used for reproducible train/val/test splits.
-            confidence_threshold: Minimum detector confidence to keep a label.
-            IoU_threshold: NMS overlap threshold for duplicate detections.
-            create_detection_dirs: Whether to create YOLO detection image/label dirs.
+            path_to_image_data: Input root containing per-species directories.
+            dataset_output_path: Destination for future dataset creation.
+            class_names: Optional species-directory selection in class-index order.
+                None discovers all species directories in sorted order. Relative
+                image paths are resolved against their species records.csv directory.
+
+        Raises:
+            ValueError: The input root or selected metadata is invalid.
+            FileNotFoundError: Required records or source files are missing.
         """
-        self.path_to_image_data = path_to_image_data
-        if not Path(self.path_to_image_data).exists():
+        self.path_to_image_data = Path(path_to_image_data).resolve()
+        self.dataset_output_path = Path(dataset_output_path).resolve()
+        if not self.path_to_image_data.is_dir():
             raise ValueError(
-                f"Path to image data {self.path_to_image_data} does not exist"
+                f"Input directory {self.path_to_image_data} does not exist"
             )
 
-        self.path_to_labels = path_to_labels
-        self.confidence_threshold = confidence_threshold
-        self.IoU_threshold = IoU_threshold
-        self.dataset_output_path = dataset_output_path
-        self.class_names = class_names
-        self.train_frac, self.val_frac, self.test_frac = train_val_test_split
-        self.labels = None
+        self.class_names = self._select_classes(class_names)
+        self.classes = {index: name for index, name in enumerate(self.class_names)}
+        self.records_by_species = {
+            species: self._load_records(species) for species in self.class_names
+        }
+        self._validate_split_assignments()
 
-        if not np.isclose(self.train_frac + self.val_frac + self.test_frac, 1.0):
+    def _select_classes(self, class_names: list[str] | None) -> list[str]:
+        """Discover classes or validate an explicit ordered directory selection."""
+        available = {
+            path.name for path in self.path_to_image_data.iterdir() if path.is_dir()
+        }
+        selected = sorted(available) if class_names is None else list(class_names)
+        if not selected:
+            raise ValueError("At least one class directory must be selected")
+        if len(set(selected)) != len(selected):
+            raise ValueError("class_names must not contain duplicates")
+        unknown = set(selected) - available
+        if unknown:
+            raise ValueError(f"Unknown class directories: {sorted(unknown)}")
+        return selected
+
+    def _load_records(self, species: str) -> pd.DataFrame:
+        """Read a species frame, keeping row order, multiplicity, and extra columns."""
+        records_path = self.path_to_image_data / species / "records.csv"
+        if not records_path.is_file():
+            raise FileNotFoundError(f"Missing species records: {records_path}")
+        try:
+            records = pd.read_csv(records_path)
+        except pd.errors.EmptyDataError as error:
+            raise ValueError(f"{species}: records.csv has no column header") from error
+
+        missing = {"image_path", "dataset_split"} - set(records.columns)
+        if missing:
+            raise ValueError(f"{species}: missing required columns {sorted(missing)}")
+        records["dataset_split"] = records["dataset_split"].replace(
+            {"validation": "val"}
+        )
+        if not records["dataset_split"].isin(["train", "val", "test"]).all():
             raise ValueError(
-                "train_val_test_split fractions must sum to 1.0, but got "
-                f"{self.train_frac + self.val_frac + self.test_frac}"
+                f"{species}: dataset_split must be train, validation/val, or test"
+            )
+        if (
+            not records["image_path"]
+            .map(lambda path: isinstance(path, str) and bool(path.strip()))
+            .all()
+        ):
+            raise ValueError(
+                f"{species}: image_path must contain nonempty path strings"
+            )
+        records["image_path"] = records["image_path"].map(
+            lambda path: self._resolve_image_path(path, records_path.parent)
+        )
+        return records
+
+    def _validate_split_assignments(self) -> None:
+        """Reject images assigned across splits while preserving oversampled rows."""
+        assignments = pd.concat(
+            [
+                records[["image_path", "dataset_split"]]
+                for records in self.records_by_species.values()
+            ],
+            ignore_index=True,
+        )
+        splits_per_image = assignments.groupby("image_path")["dataset_split"].nunique()
+        conflicting = splits_per_image[splits_per_image > 1]
+        if not conflicting.empty:
+            raise ValueError(
+                f"Images assigned to multiple splits: {conflicting.index.tolist()}"
             )
 
-        self.img_types = img_types
-        self.rng_seed = rng_seed
-        self.rng = np.random.default_rng(self.rng_seed)
-        self.classes = {i: name for i, name in enumerate(class_names)}
-
-        output_path = Path(self.dataset_output_path)
-        output_path.mkdir(parents=True, exist_ok=True)
-        if create_detection_dirs:
-            (output_path / "labels").mkdir(parents=True, exist_ok=True)
-            (output_path / "images").mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _resolve_image_path(image_path: str, records_directory: Path) -> str:
+        """Resolve source paths explicitly and reject missing images."""
+        path = Path(image_path)
+        if not path.is_absolute():
+            path = records_directory / path
+        path = path.resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"image_path does not refer to a file: {path}")
+        return str(path)
 
     @abstractmethod
     def create(self) -> Path:
-        """Create the configured dataset and return its output directory."""
-        pass
+        """Create the dataset once inference and output integration is implemented.
+
+        Raises:
+            NotImplementedError: Inference/output integration is pending.
+        """
+        raise NotImplementedError("Dataset inference/output integration pending")

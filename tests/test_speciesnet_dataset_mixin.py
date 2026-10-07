@@ -1,32 +1,64 @@
 """Behavioral contract for direct SpeciesNet batch inference.
 
-Only the external SpeciesNet model is replaced. Images and crop operations use
-real PIL images, and all input files live in pytest temporary directories.
+Unit tests replace only the external SpeciesNet model. The opt-in integration
+test uses the installed SDK and real weights. All source images are temporary.
 """
 
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
-import sys
+from unittest.mock import Mock
+import os
+import shutil
 
 import pytest
 from hypothesis import given, strategies as st
 from PIL import Image
 
+from smartrodent import yolo_dataset_creation
 from smartrodent.yolo_dataset_creation import _SpeciesNetDatasetMixin
+
+
+class SpeciesNetDetectorStub:
+    """Mirror the SDK's class-level cutoff, used during detector prediction."""
+
+    DETECTION_THRESHOLD = 0.1
 
 
 class SpeciesNetStub:
     """Provide native SpeciesNet predictions without model downloads or a GPU."""
 
-    def __init__(self, predictions):
-        """Store the externally supplied model response."""
-        self.predictions = predictions
-        self.detector = SimpleNamespace(DETECTION_THRESHOLD=0.1)
+    def __init__(self, predictions, *, max_batch_size=None, fail=False):
+        """Configure model responses, batch capacity, and inference failure.
 
-    def predict(self, *, filepaths, batch_size, **kwargs):
-        """Return predictions for the requested input batch."""
+        Args:
+            predictions: Native SpeciesNet prediction records to return.
+            max_batch_size: Optional maximum number of images per invocation.
+            fail: Whether inference raises a model failure.
+        """
+        self.predictions = predictions
+        self.max_batch_size = max_batch_size
+        self.fail = fail
+        self.detector = SpeciesNetDetectorStub()
+
+    def detect(self, *, filepaths):
+        """Return predictions through the SDK's detector-only API.
+
+        Args:
+            filepaths: Source image paths for this invocation.
+
+        Returns:
+            Native SpeciesNet prediction dictionary for the requested images.
+
+        Raises:
+            ValueError: The requested batch exceeds the configured capacity.
+            RuntimeError: An inference failure was configured.
+        """
+        if self.max_batch_size is not None and len(filepaths) > self.max_batch_size:
+            raise ValueError("Detector batch exceeds capacity")
+        if self.fail:
+            raise RuntimeError("Model failed")
+
         requested = {str(path) for path in filepaths}
         return {
             "predictions": [
@@ -35,7 +67,7 @@ class SpeciesNetStub:
                     "detections": [
                         deepcopy(box)
                         for box in item["detections"]
-                        if box["conf"] >= self.detector.DETECTION_THRESHOLD
+                        if box["conf"] >= SpeciesNetDetectorStub.DETECTION_THRESHOLD
                     ],
                 }
                 for item in self.predictions
@@ -64,11 +96,17 @@ def detection(confidence, *, label="animal", bbox=(0.25, 0.2, 0.5, 0.6)):
     return {"conf": confidence, "label": label, "bbox": list(bbox)}
 
 
+def configured_mixin(*, model=None, model_name=None):
+    """Explicitly initialize the mixin without involving dataset creators."""
+    mixin = _SpeciesNetDatasetMixin()
+    mixin.initialize_speciesnet(model=model, model_name=model_name)
+    return mixin
+
+
 def infer(paths, predictions, *, threshold=0.5):
-    """Exercise the proposed public interface with an external model substitute."""
-    return _SpeciesNetDatasetMixin().infer_batch(
+    """Exercise the public interface with an external model substitute."""
+    return configured_mixin(model=SpeciesNetStub(predictions)).infer_batch(
         paths,
-        model=SpeciesNetStub(predictions),
         batch_size=2,
         confidence_threshold=threshold,
         allowed_classes=("animal",),
@@ -171,34 +209,61 @@ def test_confidence_filter_matches_inclusive_threshold(confidence, threshold):
         assert len(result[str(path)]["detections"]) == int(confidence >= threshold)
 
 
-def test_default_model_is_constructed_for_detection_only(monkeypatch, images):
-    """Live inference can construct its detector without an injected model."""
-
-    class DetectorOnlyModel(SpeciesNetStub):
-        """Stand in for the external SDK constructor."""
-
-        def __init__(self, model_name, *, components):
-            """Accept only the expected default detector configuration."""
-            if model_name != "test-default" or components != "detector":
-                raise ValueError("Unexpected model configuration")
-            super().__init__(
-                [{"filepath": str(images[0]), "detections": [detection(0.9)]}]
-            )
-
-    monkeypatch.setitem(
-        sys.modules,
-        "speciesnet",
-        SimpleNamespace(DEFAULT_MODEL="test-default", SpeciesNet=DetectorOnlyModel),
+@pytest.mark.parametrize("model_name", [None, "custom-model"])
+def test_model_is_loaded_lazily_once_and_reused(monkeypatch, images, model_name):
+    """Successive batches reuse one detector loaded with the configured identifier."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
     )
+    constructor = Mock(return_value=model)
+    # Patch the external SDK symbols where the library imports them.
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    monkeypatch.setattr(yolo_dataset_creation, "DEFAULT_MODEL", "test-default")
 
-    result = _SpeciesNetDatasetMixin().infer_batch(images[:1])
+    mixin = configured_mixin(model_name=model_name)
+    constructor.assert_not_called()
+    assert mixin.speciesnet_model is None
+    assert mixin.infer_batch([]) == {}
+    constructor.assert_not_called()
 
-    assert result[str(images[0])]["detections"][0]["confidence"] == 0.9
+    for path in images:
+        result = mixin.infer_batch([path])
+        assert result[str(path)]["detections"][0]["confidence"] == 0.9
+        assert mixin.speciesnet_model is model
+
+    constructor.assert_called_once_with(
+        "test-default" if model_name is None else model_name,
+        components="detector",
+    )
 
 
 def test_empty_batch_returns_empty_mapping_without_loading_model():
     """An empty batch needs neither an SDK installation nor an inference call."""
-    assert _SpeciesNetDatasetMixin().infer_batch([]) == {}
+    assert configured_mixin().infer_batch([]) == {}
+
+
+def test_inference_requires_explicit_initialization(images):
+    """Missing lifecycle setup is reported explicitly instead of silently configured."""
+    with pytest.raises(RuntimeError, match="initialize_speciesnet"):
+        _SpeciesNetDatasetMixin().infer_batch(images)
+
+
+def test_injected_model_is_stored_and_reused(images):
+    """An injected detector remains available across successive batches."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
+    )
+    mixin = configured_mixin(model=model)
+
+    for path in images:
+        assert mixin.infer_batch([path])[str(path)]["detections"]
+        assert mixin.speciesnet_model is model
+
+
+def test_initialization_rejects_conflicting_model_settings():
+    """A supplied model and a model identifier cannot silently override each other."""
+    with pytest.raises(ValueError):
+        configured_mixin(model=SpeciesNetStub([]), model_name="other-model")
 
 
 @pytest.mark.parametrize(
@@ -214,12 +279,98 @@ def test_empty_batch_returns_empty_mapping_without_loading_model():
 def test_invalid_inference_settings_raise_explicit_error(images, settings):
     """Invalid thresholds and batch sizes are rejected before inference."""
     with pytest.raises(ValueError):
-        _SpeciesNetDatasetMixin().infer_batch(
-            images, model=SpeciesNetStub([]), **settings
-        )
+        configured_mixin(model=SpeciesNetStub([])).infer_batch(images, **settings)
 
 
 def test_missing_model_result_is_not_silently_dropped(images):
     """A missing prediction is an inference failure, not a negative detection."""
     with pytest.raises(ValueError, match="prediction"):
         infer(images, [])
+
+
+def test_source_images_are_processed_in_bounded_batches(images):
+    """A size-one model can process multiple inputs through the batch interface."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images],
+        max_batch_size=1,
+    )
+
+    result = configured_mixin(model=model).infer_batch(images, batch_size=1)
+
+    assert set(result) == {str(path) for path in images}
+    assert all(len(metadata["detections"]) == 1 for metadata in result.values())
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_external_detector_cutoff_is_restored_after_inference(images, fail):
+    """The caller's detector setting survives successful and failed inference."""
+    model = SpeciesNetStub(
+        [{"filepath": str(images[0]), "detections": [detection(0.9)]}],
+        fail=fail,
+    )
+    previous_threshold = SpeciesNetDetectorStub.DETECTION_THRESHOLD
+    mixin = configured_mixin(model=model)
+
+    if fail:
+        with pytest.raises(RuntimeError, match="Model failed"):
+            mixin.infer_batch(images[:1])
+    else:
+        mixin.infer_batch(images[:1])
+
+    assert SpeciesNetDetectorStub.DETECTION_THRESHOLD == previous_threshold
+
+
+@pytest.mark.speciesnet_integration
+def test_real_speciesnet_api_returns_detection_metadata_and_crops(tmp_path):
+    """Infer real boxes/crops on a bundled photograph, without an SDK substitute.
+
+    Run with RUN_SPECIESNET_INTEGRATION=1. SPECIESNET_MODEL may point to a local
+    weights directory to avoid downloads; otherwise the SDK uses its default
+    model and may download weights into its normal cache.
+    """
+    if os.environ.get("RUN_SPECIESNET_INTEGRATION") != "1":
+        pytest.skip("Set RUN_SPECIESNET_INTEGRATION=1 to run real model inference")
+
+    from ultralytics.utils import ASSETS
+
+    # This installed sample has people and a bus, so use those detector labels
+    # rather than asserting animal detection on an artificial test image.
+    paths = [tmp_path / "first.jpg", tmp_path / "second.jpg"]
+    for path in paths:
+        shutil.copy2(ASSETS / "bus.jpg", path)
+
+    mixin = configured_mixin(model_name=os.environ.get("SPECIESNET_MODEL"))
+    result = mixin.infer_batch(
+        paths,
+        batch_size=2,
+        confidence_threshold=0.5,
+        allowed_classes=("human", "vehicle"),
+        iou_threshold=0.45,
+    )
+
+    assert set(result) == {str(path) for path in paths}
+    for path in paths:
+        records = result[str(path)]["detections"]
+        assert records, "Real inference must produce at least one accepted box"
+        with Image.open(path) as source:
+            source = source.convert("RGB")
+            for record in records:
+                assert 0.5 <= record["confidence"] <= 1.0
+                assert record["label"] in {"human", "vehicle"}
+                assert len(record["bbox"]) == 4
+                assert record["detection_index"] >= 0
+                crop = record["crop"]
+                assert crop.mode == "RGB"
+                assert 0 < crop.width <= source.width
+                assert 0 < crop.height <= source.height
+                x, y, width, height = record["bbox"]
+                expected = source.crop(
+                    (
+                        x * source.width,
+                        y * source.height,
+                        (x + width) * source.width,
+                        (y + height) * source.height,
+                    )
+                )
+                assert crop.size == expected.size
+                assert crop.tobytes() == expected.tobytes()

@@ -12,6 +12,7 @@ dependencies = [
     "PyYAML>=6.0",
     "tqdm>=4.69.0",
     "ultralytics>=8.4.68",
+    "speciesnet>=1.0",
     "requests>=2.0",
     "pyinaturalist>=0.21.1",
     "pygbif>=0.6.6",
@@ -43,6 +44,7 @@ pythonpath = ["."]
 markers = [
     "network: test hits the live iNaturalist API (deselect with -m 'not network')",
     "vlm_integration: test requires a real Ollama server or vLLM-capable GPU",
+    "speciesnet_integration: opt-in test using real SpeciesNet inference and model weights",
 ]
 
 [tool.coverage.run]
