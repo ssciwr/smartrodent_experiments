@@ -7,13 +7,13 @@ stages:
       - configs/data_config_full.yaml:
           - data.inaturalist
     outs:
-      - datasets/inaturalist
+      - datasets/stage0_inaturalist_raw
   filter_animal:
     cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_animal.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_animal.yaml
-      - datasets/inaturalist
+      - datasets/stage0_inaturalist_raw
     outs:
       - datasets/filtered_stage1_animal
 
