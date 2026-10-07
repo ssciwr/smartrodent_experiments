@@ -91,6 +91,20 @@ To run the downloader without DVC:
 uv run python scripts/download_inaturalist_data.py config/dataset_full.yaml
 ```
 
+## YOLO classification: class-index ordering
+
+`YoloClassificationTrainer` passes the classification dataset directory to
+Ultralytics, which derives class indices from **alphabetically sorted species
+folder names under `train/`**. It does not use the `names` ordering in `data.yaml`.
+Even when a YAML file is passed to the trainer, only its `path` is used to locate
+the classification dataset.
+
+An explicit dataset-creator `class_names` order can therefore differ from the
+trained classifier's index order. **Use the trained model's `names` mapping to
+interpret prediction indices**, rather than the creator's class list or YAML.
+This differs from detection training, which uses the class-index mapping in
+`data.yaml`.
+
 ## Tests
 
 Install the development extra, then run the test suite from the repository

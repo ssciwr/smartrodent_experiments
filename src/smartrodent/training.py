@@ -282,6 +282,13 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
     example ``train/mouse/*.jpg`` and ``val/rat/*.jpg``. This subclass keeps the
     detection trainer's simple train/tune/export wrapper but changes the dataset
     resolver and metrics collector for classification.
+
+    Note:
+        Ultralytics derives classification class indices from alphabetically sorted
+        species directories under ``train/``, not the ``names`` order in data.yaml.
+        An explicit dataset-creator ``class_names`` order therefore need not match
+        the trained classifier's indices. Always interpret prediction indices using
+        the trained model's ``names`` mapping.
     """
 
     def __init__(
