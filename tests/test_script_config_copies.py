@@ -54,6 +54,8 @@ def test_processing_scripts_copy_supplied_yaml(
         "taskname": "animal",
         "labels": ["kept", "rejected"],
     }
+    if module_name == "scripts.split_dataset":
+        config["paths"]["records_glob"] = "*/records.csv"
     config_path.write_text(
         "# supplied configuration\n" + yaml.safe_dump(config), encoding="utf-8"
     )

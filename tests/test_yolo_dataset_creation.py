@@ -762,3 +762,119 @@ def test_create_filenames_are_deterministic_and_preserve_oversampling(
             assert all((output / name).is_file() for name in names)
             output_names.append(names)
         assert output_names[0] == output_names[1]
+
+
+@pytest.fixture
+def ultralytics_input(tmp_path):
+    """Provide valid, nonempty splits for testing real Ultralytics dataset loading."""
+    root = tmp_path / "input"
+    predictions = []
+    for species, color in [("mouse", "red"), ("shrew", "blue")]:
+        directory = root / species
+        directory.mkdir(parents=True)
+        rows = []
+        for split in ["train", "validation", "test"]:
+            image_path = directory / f"{split}.png"
+            # Training loaders validate dimensions. Use realistic sizes rather
+            # than the small crop fixtures used to test pixel-exact extraction.
+            Image.new("RGB", (64, 64), color).save(image_path)
+            row = {"image_path": str(image_path), "dataset_split": split}
+            rows.append(row)
+            if species == "mouse" and split == "train":
+                rows.append(dict(row))
+            predictions.append(
+                {"filepath": str(image_path), "detections": [detection(0.9)]}
+            )
+        pd.DataFrame(rows).to_csv(directory / "records.csv", index=False)
+    return root, SpeciesNetStub(predictions)
+
+
+@pytest.mark.parametrize(
+    "split, expected_length", [("train", 3), ("val", 2), ("test", 2)]
+)
+def test_detector_output_loads_through_real_ultralytics_dataset(
+    ultralytics_input, tmp_path, monkeypatch, split, expected_length
+):
+    """Ultralytics decodes symlinked images and their labels without losing duplicates."""
+    from ultralytics.cfg import get_cfg
+    from ultralytics.data import utils as data_utils
+    from ultralytics.data.dataset import YOLODataset
+
+    # Font downloading belongs to plot rendering, not dataset validation. Disable
+    # only that network side effect; YAML checks and image/label loading stay real.
+    monkeypatch.setattr(data_utils, "check_font", lambda font: None)
+    root, model = ultralytics_input
+    output = tmp_path / "detector"
+    creator = YoloDetectorDatasetCreatorFromSpeciesnet(
+        root, output, class_names=["shrew", "mouse"], model=model
+    )
+    creator.create()
+
+    data = data_utils.check_det_dataset(output / "data.yaml", autodownload=False)
+    dataset = YOLODataset(
+        img_path=data[split],
+        data=data,
+        imgsz=64,
+        batch_size=2,
+        augment=False,
+        cache=False,
+        hyp=get_cfg(),
+    )
+
+    assert data["names"] == {0: "shrew", 1: "mouse"}
+    assert len(dataset) == expected_length
+    labels = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        assert tuple(sample["img"].shape) == (3, 64, 64)
+        source = Path(sample["im_file"])
+        assert source.is_symlink()
+        species = source.resolve().parent.name
+        class_index = int(sample["cls"].item())
+        assert class_index == {"mouse": 1, "shrew": 0}[species]
+        assert sample["bboxes"].flatten().tolist() == pytest.approx(
+            [0.5, 0.5, 0.5, 0.6]
+        )
+        labels.append(class_index)
+    assert sorted(labels) == ([0, 1, 1] if split == "train" else [0, 1])
+
+
+@pytest.mark.parametrize(
+    "split, expected_length", [("train", 3), ("val", 2), ("test", 2)]
+)
+def test_classifier_output_loads_through_real_ultralytics_dataset(
+    ultralytics_input, tmp_path, split, expected_length
+):
+    """Ultralytics reads saved crops and derives class ids from species folders."""
+    from ultralytics.cfg import get_cfg
+    from ultralytics.data.dataset import ClassificationDataset
+    from ultralytics.data.utils import check_cls_dataset
+
+    root, model = ultralytics_input
+    output = tmp_path / "classifier"
+    creator = YoloClassifierDatasetCreatorFromSpeciesnet(
+        root, output, class_names=["shrew", "mouse"], model=model
+    )
+    creator.create()
+
+    data = check_cls_dataset(output, split=split)
+    dataset = ClassificationDataset(
+        root=data[split],
+        args=get_cfg(overrides={"imgsz": 64, "cache": False}),
+        augment=False,
+        names=data["names"],
+    )
+
+    # Unlike detection, classification's library checker obtains its class order
+    # from the folders, not data.yaml. Exercise that actual training contract.
+    assert data["names"] == {0: "mouse", 1: "shrew"}
+    assert len(dataset) == expected_length
+    labels = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        assert tuple(sample["img"].shape) == (3, 64, 64)
+        class_index = int(sample["cls"])
+        strongest_channel = int(sample["img"].mean(dim=(1, 2)).argmax())
+        assert strongest_channel == {0: 0, 1: 2}[class_index]
+        labels.append(class_index)
+    assert sorted(labels) == ([0, 0, 1] if split == "train" else [0, 1])
