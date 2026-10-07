@@ -1,16 +1,22 @@
 """Prepare record-based YOLO datasets and provide SpeciesNet batch inference."""
 
 from collections.abc import Sequence
+from abc import abstractmethod
 from copy import deepcopy
+from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
+import pandas as pd
 import torch
+import yaml
 from ultralytics.utils.metrics import box_iou
 from speciesnet import DEFAULT_MODEL, SpeciesNet
 
 from .base import YoloDatasetCreatorBase
+from .utils import path_component
 
 
 class _SpeciesNetDatasetMixin:
@@ -253,7 +259,7 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
 
         Args:
             path_to_image_data: Input root containing per-species records.csv files.
-            dataset_output_path: Destination for future dataset creation.
+            dataset_output_path: Destination for the generated dataset.
             class_names: Optional species selection in class-index order. None
                 discovers all species directories in sorted order.
             model: Optional existing SpeciesNet-compatible detector instance.
@@ -268,35 +274,194 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         # in the mixin and occurs only on the first nonempty inference request.
         self.initialize_speciesnet(model=model, model_name=model_name)
         super().__init__(path_to_image_data, dataset_output_path, class_names)
+        self.metadata_records: list[dict] = []
+
+    def create(self) -> Path:
+        """Infer source records and write the configured YOLO dataset.
+
+        Existing split assignments and row multiplicity are preserved. Images with
+        no accepted detections are skipped, with the reason in ``metadata.json``.
+        The metadata retains source columns, detection details, and output paths
+        relative to the dataset root. Crops are never included in serialized data.
+        Creation uses the mixin defaults: animal labels, confidence >= 0.1, and
+        IoU threshold 0.45, with at most 32 source rows held per inference batch.
+
+        Returns:
+            The generated dataset's root directory.
+
+        Raises:
+            FileExistsError: The destination already exists.
+            OSError: Source images cannot be read or output files cannot be written.
+            ValueError: The model returns invalid predictions or the output directory
+                overlaps the input.
+        """
+        if self.dataset_output_path.is_relative_to(
+            self.path_to_image_data
+        ) or self.path_to_image_data.is_relative_to(self.dataset_output_path):
+            raise ValueError("Dataset output must not overlap the input directory")
+        self.dataset_output_path.mkdir(parents=True, exist_ok=False)
+        self._create_directories()
+        self.metadata_records = []
+        for species, records in self.records_by_species.items():
+            self._create_species_records(species, records)
+        self._write_dataset_metadata()
+        return self.dataset_output_path
+
+    def _create_species_records(self, species: str, records: pd.DataFrame) -> None:
+        """Infer bounded row batches and write each occurrence in source-row order."""
+        # Bound the number of live crops, not just SDK calls. Inferring the whole
+        # dataset first would retain every crop in memory. Duplicate sources within
+        # a batch share inference, but each oversampled row still produces an output.
+        batch_size = 32
+        for start in range(0, len(records), batch_size):
+            frame = records.iloc[start : start + batch_size]
+            predictions = self.infer_batch(
+                frame["image_path"].drop_duplicates().tolist()
+            )
+            # Convert missing values to JSON null without a pandas JSON round-trip,
+            # which would round high-precision metadata. Keep the source frame intact.
+            rows = (
+                frame.astype(object)
+                .where(frame.notna(), None)
+                .to_dict(orient="records")
+            )
+            for offset, row in enumerate(rows):
+                source_row = start + offset
+                detections = predictions[row["image_path"]]["detections"]
+                metadata = self._write_source_record(
+                    species, source_row, row, detections
+                )
+                self.metadata_records.append(metadata)
+
+    def _write_source_record(
+        self, species: str, source_row: int, row: dict, detections: list[dict]
+    ) -> dict:
+        """Write one input occurrence and record its outputs or explicit skip reason."""
+        metadata = {
+            **row,
+            "species": species,
+            "source_row": source_row,
+            "detections": [
+                {key: value for key, value in detection.items() if key != "crop"}
+                for detection in detections
+            ],
+        }
+        if not detections:
+            metadata.update(
+                status="skipped", skip_reason="no_accepted_detections", outputs=[]
+            )
+        else:
+            stem = self._output_stem(species, row["image_path"], source_row)
+            outputs = self._write_outputs(species, row, stem, detections)
+            metadata.update(status="written", skip_reason=None, outputs=outputs)
+        return metadata
+
+    @staticmethod
+    def _output_stem(species: str, image_path: str, source_row: int) -> str:
+        """Name sources independently of output root, without basename collisions."""
+        # Full path plus class distinguishes same-named sources, and row position
+        # preserves intentional oversampling. Limit the readable stem so long
+        # source filenames still fit normal filesystem component-length limits.
+        identity = sha256(json.dumps([species, image_path]).encode()).hexdigest()
+        readable_stem = path_component(Path(image_path).stem)[:80]
+        return f"{readable_stem}_{identity}_row{source_row:08d}"
+
+    def _write_dataset_metadata(self) -> None:
+        """Persist training configuration and JSON-safe source/output provenance."""
+        data = {
+            "path": str(self.dataset_output_path),
+            **self._training_paths(),
+            "names": self.classes,
+        }
+        (self.dataset_output_path / "data.yaml").write_text(yaml.safe_dump(data))
+        (self.dataset_output_path / "metadata.json").write_text(
+            json.dumps({"records": self.metadata_records}, allow_nan=False, indent=2)
+        )
+
+    @abstractmethod
+    def _create_directories(self) -> None:
+        """Create the format-specific split directory layout."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _write_outputs(
+        self, species: str, row: dict, stem: str, detections: list[dict]
+    ) -> list[dict]:
+        """Write one source occurrence and return relative output-path metadata."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _training_paths(self) -> dict[str, str]:
+        """Return the format's training, validation, and test directory paths."""
+        raise NotImplementedError
 
 
 class YoloDetectorDatasetCreatorFromSpeciesnet(_SpeciesNetDatasetCreatorBase):
-    """Prepare species records for future YOLO detector dataset conversion.
+    """Create a YOLO detector dataset using source-image symlinks and inferred boxes.
 
     Uses the shared input-root/output-root constructor and optional ``class_names``
     selection. Input records already determine all split assignments.
     """
 
-    def create(self) -> Path:
-        """Report that detector inference/output integration is not yet available.
+    def _create_directories(self) -> None:
+        """Create parallel images and labels directories for every existing split."""
+        for split in ["train", "val", "test"]:
+            for directory in ["images", "labels"]:
+                (self.dataset_output_path / directory / split).mkdir(parents=True)
 
-        Raises:
-            NotImplementedError: Inference/output integration is pending.
-        """
-        return super().create()
+    def _write_outputs(
+        self, species: str, row: dict, stem: str, detections: list[dict]
+    ) -> list[dict]:
+        """Symlink a full source image and write its normalized YOLO box labels."""
+        source = Path(row["image_path"])
+        split = row["dataset_split"]
+        image_path = Path("images") / split / f"{stem}{source.suffix}"
+        label_path = Path("labels") / split / f"{stem}.txt"
+        (self.dataset_output_path / image_path).symlink_to(source)
+        class_index = self.class_names.index(species)
+        labels = []
+        for detection in detections:
+            x, y, width, height = detection["bbox"]
+            # SpeciesNet uses normalized top-left xywh; YOLO expects center xywh.
+            labels.append([class_index, x + width / 2, y + height / 2, width, height])
+        (self.dataset_output_path / label_path).write_text(
+            "".join(" ".join(map(str, label)) + "\n" for label in labels)
+        )
+        return [{"image_path": str(image_path), "label_path": str(label_path)}]
+
+    def _training_paths(self) -> dict[str, str]:
+        """Return the detector image directories used by Ultralytics."""
+        return {split: f"images/{split}" for split in ["train", "val", "test"]}
 
 
 class YoloClassifierDatasetCreatorFromSpeciesnet(_SpeciesNetDatasetCreatorBase):
-    """Prepare species records for future YOLO classifier dataset conversion.
+    """Create a YOLO classifier dataset by saving each accepted detection crop.
 
     Uses the shared input-root/output-root constructor and optional ``class_names``
-    selection. Oversampled rows remain intact for later crop output generation.
+    selection. Oversampled rows remain intact during crop output generation.
     """
 
-    def create(self) -> Path:
-        """Report that classifier inference/output integration is not yet available.
+    def _create_directories(self) -> None:
+        """Create each class directory in each existing split, including empty ones."""
+        for split in ["train", "val", "test"]:
+            for species in self.class_names:
+                (self.dataset_output_path / split / species).mkdir(parents=True)
 
-        Raises:
-            NotImplementedError: Inference/output integration is pending.
-        """
-        return super().create()
+    def _write_outputs(
+        self, species: str, row: dict, stem: str, detections: list[dict]
+    ) -> list[dict]:
+        """Save independent, lossless crops and retain their detection provenance."""
+        outputs = []
+        for detection in detections:
+            index = detection["detection_index"]
+            image_path = (
+                Path(row["dataset_split"]) / species / f"{stem}_det{index:03d}.png"
+            )
+            # PNG avoids introducing another lossy compression pass into crops.
+            detection["crop"].save(self.dataset_output_path / image_path)
+            outputs.append({"image_path": str(image_path), "detection_index": index})
+        return outputs
+
+    def _training_paths(self) -> dict[str, str]:
+        """Return the classifier split directories used by Ultralytics."""
+        return {split: split for split in ["train", "val", "test"]}

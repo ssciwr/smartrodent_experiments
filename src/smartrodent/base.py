@@ -62,7 +62,7 @@ class YoloDatasetCreatorBase(ABC):
 
     Constructors only read metadata. They neither run inference nor create output
     directories. Source row order, additional columns, and oversampled rows remain
-    available in ``records_by_species`` for the future format conversion workflow.
+    available in ``records_by_species`` for the format conversion workflow.
     """
 
     def __init__(
@@ -75,7 +75,7 @@ class YoloDatasetCreatorBase(ABC):
 
         Args:
             path_to_image_data: Input root containing per-species directories.
-            dataset_output_path: Destination for future dataset creation.
+            dataset_output_path: Destination for the generated dataset.
             class_names: Optional species-directory selection in class-index order.
                 None discovers all species directories in sorted order. Relative
                 image paths are resolved against their species records.csv directory.
@@ -175,9 +175,9 @@ class YoloDatasetCreatorBase(ABC):
 
     @abstractmethod
     def create(self) -> Path:
-        """Create the dataset once inference and output integration is implemented.
+        """Create the configured dataset.
 
-        Raises:
-            NotImplementedError: Inference/output integration is pending.
+        Returns:
+            The generated dataset's root directory.
         """
-        raise NotImplementedError("Dataset inference/output integration pending")
+        raise NotImplementedError

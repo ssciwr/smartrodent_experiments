@@ -514,3 +514,251 @@ def test_detector_filenames_do_not_collide_for_same_named_sources_in_one_split(
     assert sum(link.resolve() == images[0] for link in links) == 2
     assert sum(link.resolve() == images[1] for link in links) == 1
     assert len(list((output / "labels" / "train").glob("*.txt"))) == 3
+
+
+@pytest.mark.parametrize("destination", ["input", "inside_input", "parent"])
+def test_create_rejects_destinations_overlapping_input(
+    creator_type, creator_input, tmp_path, destination
+):
+    """A dataset output must not overwrite or contaminate the source input tree."""
+    if destination == "input":
+        output = creator_input
+    elif destination == "inside_input":
+        output = creator_input / "generated"
+    else:
+        output = creator_input.parent
+    creator = creator_type(creator_input, output, model=SpeciesNetStub([], fail=True))
+
+    with pytest.raises(ValueError, match="overlap"):
+        creator.create()
+
+    assert not (output / "metadata.json").exists()
+    assert not (creator_input / "generated").exists()
+
+
+def test_create_rejects_existing_output_without_overwriting(
+    creator_type, creator_input, tmp_path
+):
+    """Recreating a dataset requires an explicit new destination, not silent overwrite."""
+    output = tmp_path / "output"
+    output.mkdir()
+    marker = output / "existing.txt"
+    marker.write_text("keep me")
+    creator = creator_type(creator_input, output, model=SpeciesNetStub([], fail=True))
+
+    with pytest.raises(FileExistsError):
+        creator.create()
+
+    assert marker.read_text() == "keep me"
+    assert list(output.iterdir()) == [marker]
+
+
+def test_empty_classes_create_layout_without_loading_model(creator_type, tmp_path):
+    """An empty but valid input produces configuration and empty provenance."""
+    root = tmp_path / "input"
+    (root / "mouse").mkdir(parents=True)
+    (root / "mouse" / "records.csv").write_text("image_path,dataset_split\n")
+    output = tmp_path / "output"
+    creator = creator_type(root, output, model=SpeciesNetStub([], fail=True))
+
+    assert creator.create() == output
+
+    assert json.loads((output / "metadata.json").read_text()) == {"records": []}
+    assert yaml.safe_load((output / "data.yaml").read_text())["names"] == {0: "mouse"}
+    assert creator.metadata_records == []
+
+
+def test_create_persists_successful_detection_and_output_provenance(
+    creator_type, creator_input, images, tmp_path
+):
+    """Written examples retain source metadata and JSON-safe detection/output records."""
+    records_path = images[0].parent / "records.csv"
+    frame = pd.read_csv(records_path)
+    frame["extra_value"] = [None, 1.25]
+    frame.to_csv(records_path, index=False)
+    model = SpeciesNetStub(
+        [
+            {"filepath": str(images[0]), "detections": [detection(0.9)]},
+            {"filepath": str(images[1]), "detections": []},
+        ]
+    )
+    output = tmp_path / "output"
+    creator = creator_type(creator_input, output, model=model)
+    original = {
+        species: records.copy(deep=True)
+        for species, records in creator.records_by_species.items()
+    }
+
+    creator.create()
+
+    metadata = json.loads((output / "metadata.json").read_text())["records"]
+    assert metadata == creator.metadata_records
+    assert [record["status"] for record in metadata] == [
+        "written",
+        "written",
+        "skipped",
+    ]
+    assert [record["source_row"] for record in metadata] == [0, 1, 0]
+    assert metadata[0]["extra_value"] is None
+    assert metadata[1]["extra_value"] == 1.25
+    for record in metadata[:2]:
+        assert record["image_path"] == str(images[0])
+        assert record["species"] == "mouse"
+        assert record["dataset_split"] == "train"
+        assert record["photo_id"] == 42
+        assert record["skip_reason"] is None
+        assert record["detections"] == [
+            {
+                "bbox": [0.25, 0.2, 0.5, 0.6],
+                "confidence": 0.9,
+                "label": "animal",
+                "detection_index": 0,
+            }
+        ]
+        assert len(record["outputs"]) == 1
+        for item in record["outputs"]:
+            relative_path = Path(item["image_path"])
+            assert not relative_path.is_absolute()
+            assert (output / relative_path).is_file()
+    assert metadata[0]["outputs"] != metadata[1]["outputs"]
+    for species, records in creator.records_by_species.items():
+        pd.testing.assert_frame_equal(records, original[species])
+
+
+def test_create_preserves_loaded_numeric_metadata_precision(
+    creator_type, creator_input, images, tmp_path
+):
+    """Serializing provenance must not further round the metadata loaded from CSV."""
+    records_path = images[0].parent / "records.csv"
+    frame = pd.read_csv(records_path)
+    frame["measurement"] = [0.12345678901234567, 1.2345678901234567]
+    frame.to_csv(records_path, index=False)
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": []} for path in images]
+    )
+    output = tmp_path / "output"
+    creator = creator_type(creator_input, output, model=model)
+    expected = creator.records_by_species["mouse"]["measurement"].tolist()
+
+    creator.create()
+
+    metadata = json.loads((output / "metadata.json").read_text())["records"]
+    assert [row["measurement"] for row in metadata[:2]] == expected
+
+
+def test_create_writes_every_accepted_detection(
+    creator_type, creator_input, images, tmp_path
+):
+    """Multiple boxes become multiple labels or crops, not a single selected animal."""
+    model = SpeciesNetStub(
+        [
+            {
+                "filepath": str(images[0]),
+                "detections": [
+                    detection(0.9),
+                    detection(0.8, bbox=(0.0, 0.0, 0.1, 0.1)),
+                ],
+            },
+            {"filepath": str(images[1]), "detections": []},
+        ]
+    )
+    output = tmp_path / "output"
+    creator = creator_type(creator_input, output, model=model)
+
+    creator.create()
+
+    if creator_type is YoloDetectorDatasetCreatorFromSpeciesnet:
+        labels = list((output / "labels" / "train").glob("*.txt"))
+        assert len(labels) == 2
+        for label in labels:
+            assert label.read_text().splitlines() == [
+                "0 0.5 0.5 0.5 0.6",
+                "0 0.05 0.05 0.1 0.1",
+            ]
+    elif creator_type is YoloClassifierDatasetCreatorFromSpeciesnet:
+        paths = list((output / "train" / "mouse").iterdir())
+        assert len(paths) == 4
+        sizes = []
+        for path in paths:
+            with Image.open(path) as crop:
+                sizes.append(crop.size)
+        assert sizes.count((10, 6)) == 2
+        assert sizes.count((2, 1)) == 2
+    else:
+        pytest.fail("Unexpected creator type")
+
+
+def test_create_handles_more_than_one_inference_batch(creator_type, tmp_path):
+    """A capacity-limited detector processes a dataset larger than one batch."""
+    root = tmp_path / "input"
+    species = root / "mouse"
+    species.mkdir(parents=True)
+    paths = [species / f"photo_{index}.png" for index in range(65)]
+    for path in paths:
+        Image.new("RGB", (20, 10), "red").save(path)
+    pd.DataFrame(
+        [{"image_path": str(path), "dataset_split": "train"} for path in paths]
+    ).to_csv(species / "records.csv", index=False)
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in paths],
+        max_batch_size=32,
+    )
+    output = tmp_path / "output"
+    creator = creator_type(root, output, model=model)
+
+    creator.create()
+
+    metadata = json.loads((output / "metadata.json").read_text())["records"]
+    assert [row["source_row"] for row in metadata] == list(range(65))
+    assert all(row["status"] == "written" for row in metadata)
+    assert len({row["outputs"][0]["image_path"] for row in metadata}) == 65
+
+
+@pytest.mark.parametrize(
+    "creator_type",
+    [
+        YoloDetectorDatasetCreatorFromSpeciesnet,
+        YoloClassifierDatasetCreatorFromSpeciesnet,
+    ],
+)
+@given(indices=st.lists(st.integers(min_value=0, max_value=2), min_size=1, max_size=8))
+def test_create_filenames_are_deterministic_and_preserve_oversampling(
+    creator_type, indices
+):
+    """Repeated rows and same-named sources remain distinct in every output root."""
+    with TemporaryDirectory() as directory:
+        root = Path(directory) / "input"
+        species = root / "mouse"
+        species.mkdir(parents=True)
+        paths = []
+        for index in range(3):
+            source_dir = species / f"source_{index}"
+            source_dir.mkdir()
+            # Non-first observations must not be filtered by this format transformer.
+            path = source_dir / "observation_1.png"
+            Image.new("RGB", (20, 10), "red").save(path)
+            paths.append(path)
+        pd.DataFrame(
+            [
+                {
+                    "image_path": str(paths[index]),
+                    "dataset_split": "train",
+                    "photo_id": index,
+                }
+                for index in indices
+            ]
+        ).to_csv(species / "records.csv", index=False)
+        model = SpeciesNetStub(
+            [{"filepath": str(path), "detections": [detection(0.9)]} for path in paths]
+        )
+        output_names = []
+        for output in [Path(directory) / "first", Path(directory) / "second"]:
+            creator = creator_type(root, output, model=model)
+            creator.create()
+            metadata = json.loads((output / "metadata.json").read_text())["records"]
+            assert [row["photo_id"] for row in metadata] == indices
+            names = [row["outputs"][0]["image_path"] for row in metadata]
+            assert len(names) == len(set(names)) == len(indices)
+            assert all((output / name).is_file() for name in names)
+            output_names.append(names)
+        assert output_names[0] == output_names[1]

@@ -9,8 +9,8 @@ def images(tmp_path):
     """Create two differently colored images with identical base filenames."""
     paths = []
     for species, color in [("mouse", "red"), ("shrew", "blue")]:
-        directory = tmp_path / species
-        directory.mkdir()
+        directory = tmp_path / "input" / species
+        directory.mkdir(parents=True)
         path = directory / "observation.png"
         image = Image.new("RGB", (20, 10), "black")
         image.paste(color, (5, 2, 15, 8))
