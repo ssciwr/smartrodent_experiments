@@ -1,12 +1,18 @@
-"""Constructor contract for YOLO creators consuming already-split records."""
+"""Input, inference wiring, and output contracts for record-based YOLO creators."""
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import Mock
+import json
 
 from hypothesis import given, strategies as st
 import pandas as pd
 import pytest
+import yaml
+from PIL import Image
 
+from smartrodent import yolo_dataset_creation
+from speciesnet_test_support import SpeciesNetStub, detection
 from smartrodent.yolo_dataset_creation import (
     YoloClassifierDatasetCreatorFromSpeciesnet,
     YoloDetectorDatasetCreatorFromSpeciesnet,
@@ -267,14 +273,244 @@ def test_constructor_does_not_load_speciesnet(creator_type, tmp_path, monkeypatc
     assert creator.class_names == ["mouse"]
 
 
-def test_create_explicitly_reports_pending_integration(creator_type, tmp_path):
-    """The setup-only creator cannot silently run the obsolete sampling workflow."""
-    root = tmp_path / "input"
-    write_species(root, "mouse", ["train"])
+@pytest.fixture
+def creator_input(images):
+    """Attach split metadata, including oversampling, to real temporary images."""
+    for path, split, repeats in zip(images, ["train", "test"], [2, 1], strict=True):
+        pd.DataFrame(
+            [
+                {"image_path": str(path), "dataset_split": split, "photo_id": 42}
+                for _ in range(repeats)
+            ]
+        ).to_csv(path.parent / "records.csv", index=False)
+    return images[0].parent.parent
+
+
+@pytest.mark.parametrize("model_name", [None, "custom-model"])
+def test_creators_initialize_and_reuse_a_lazy_detector(
+    creator_type, creator_input, images, tmp_path, monkeypatch, model_name
+):
+    """Creator setup configures inherited inference without loading model weights."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
+    )
+    constructor = Mock(return_value=model)
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    monkeypatch.setattr(yolo_dataset_creation, "DEFAULT_MODEL", "test-default")
     output = tmp_path / "output"
-    creator = creator_type(root, output)
+    settings = {} if model_name is None else {"model_name": model_name}
 
-    with pytest.raises(NotImplementedError, match="integration pending"):
-        creator.create()
+    creator = creator_type(creator_input, output, **settings)
 
+    constructor.assert_not_called()
+    assert creator.speciesnet_model is None
+    assert creator.infer_batch([]) == {}
+    constructor.assert_not_called()
+    for records in creator.records_by_species.values():
+        source_path = records.iloc[0]["image_path"]
+        result = creator.infer_batch([source_path])
+        assert result[source_path]["detections"][0]["confidence"] == 0.9
+        assert creator.speciesnet_model is model
+    constructor.assert_called_once_with(
+        "test-default" if model_name is None else model_name,
+        components="detector",
+    )
     assert not output.exists()
+
+
+def test_creators_use_injected_detector_without_changing_source_records(
+    creator_type, creator_input, images, tmp_path, monkeypatch
+):
+    """Inference reuses the supplied model without altering splits or duplicate rows."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images],
+        max_batch_size=1,
+    )
+    constructor = Mock(side_effect=AssertionError("Injected model must be reused"))
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    output = tmp_path / "output"
+    creator = creator_type(creator_input, output, model=model)
+    original = {
+        species: records.copy(deep=True)
+        for species, records in creator.records_by_species.items()
+    }
+
+    assert creator.speciesnet_model is model
+    for _ in range(2):
+        result = creator.infer_batch(images, batch_size=1)
+        assert set(result) == {str(path) for path in images}
+        assert all(len(item["detections"]) == 1 for item in result.values())
+    assert creator.speciesnet_model is model
+    constructor.assert_not_called()
+    for species, records in creator.records_by_species.items():
+        pd.testing.assert_frame_equal(records, original[species])
+    assert len(creator.records_by_species["mouse"]) == 2
+    assert not output.exists()
+
+
+def test_creators_reject_conflicting_model_configuration(
+    creator_type, creator_input, tmp_path
+):
+    """An existing detector and a weights identifier cannot override each other."""
+    with pytest.raises(ValueError, match="model"):
+        creator_type(
+            creator_input,
+            tmp_path / "output",
+            model=SpeciesNetStub([]),
+            model_name="other-model",
+        )
+
+
+def test_detector_create_symlinks_sources_and_writes_yolo_labels(
+    creator_input, images, tmp_path
+):
+    """Detector output preserves supplied splits and each oversampled occurrence."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
+    )
+    output = tmp_path / "detector"
+    creator = YoloDetectorDatasetCreatorFromSpeciesnet(
+        creator_input, output, class_names=["shrew", "mouse"], model=model
+    )
+
+    assert creator.create() == output
+
+    for split in ["train", "val", "test"]:
+        assert (output / "images" / split).is_dir()
+        assert (output / "labels" / split).is_dir()
+    for split, source, count, class_index in [
+        ("train", images[0], 2, "1"),
+        ("test", images[1], 1, "0"),
+    ]:
+        links = list((output / "images" / split).iterdir())
+        assert len(links) == count
+        assert len({path.name for path in links}) == count
+        for link in links:
+            assert link.is_symlink()
+            assert link.resolve() == source
+            label = output / "labels" / split / f"{link.stem}.txt"
+            assert label.read_text().split() == [
+                class_index,
+                "0.5",
+                "0.5",
+                "0.5",
+                "0.6",
+            ]
+    assert not list((output / "images" / "val").iterdir())
+    data = yaml.safe_load((output / "data.yaml").read_text())
+    assert data == {
+        "path": str(output),
+        "train": "images/train",
+        "val": "images/val",
+        "test": "images/test",
+        "names": {0: "shrew", 1: "mouse"},
+    }
+
+
+def test_classifier_create_saves_crops_in_assigned_class_and_split(
+    creator_input, images, tmp_path
+):
+    """Classifier outputs are actual crops, with duplicates retained in one split."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
+    )
+    output = tmp_path / "classifier"
+    creator = YoloClassifierDatasetCreatorFromSpeciesnet(
+        creator_input, output, model=model
+    )
+
+    assert creator.create() == output
+
+    for split in ["train", "val", "test"]:
+        for species in ["mouse", "shrew"]:
+            assert (output / split / species).is_dir()
+    for split, species, count, color in [
+        ("train", "mouse", 2, (255, 0, 0)),
+        ("test", "shrew", 1, (0, 0, 255)),
+    ]:
+        crops = list((output / split / species).iterdir())
+        assert len(crops) == count
+        assert len({path.name for path in crops}) == count
+        for path in crops:
+            assert not path.is_symlink()
+            with Image.open(path) as crop:
+                assert crop.size == (10, 6)
+                assert all(
+                    abs(actual - expected) <= 2
+                    for actual, expected in zip(
+                        crop.getpixel((5, 3)), color, strict=True
+                    )
+                )
+    assert not list((output / "val").rglob("*.jpg"))
+    data = yaml.safe_load((output / "data.yaml").read_text())
+    assert data == {
+        "path": str(output),
+        "train": "train",
+        "val": "val",
+        "test": "test",
+        "names": {0: "mouse", 1: "shrew"},
+    }
+
+
+def test_create_skips_images_without_accepted_boxes_and_records_why(
+    creator_type, creator_input, images, tmp_path
+):
+    """Empty/filtered detections produce no examples but retain every metadata row."""
+    model = SpeciesNetStub(
+        [
+            {"filepath": str(images[0]), "detections": []},
+            {"filepath": str(images[1]), "detections": [detection(0.01)]},
+        ]
+    )
+    output = tmp_path / "output"
+    creator = creator_type(creator_input, output, model=model)
+
+    assert creator.create() == output
+
+    metadata = json.loads((output / "metadata.json").read_text())["records"]
+    assert len(metadata) == 3
+    assert [record["image_path"] for record in metadata] == [
+        str(images[0]),
+        str(images[0]),
+        str(images[1]),
+    ]
+    assert [record["species"] for record in metadata] == ["mouse", "mouse", "shrew"]
+    assert [record["dataset_split"] for record in metadata] == [
+        "train",
+        "train",
+        "test",
+    ]
+    for record in metadata:
+        assert record["photo_id"] == 42
+        assert record["status"] == "skipped"
+        assert record["skip_reason"] == "no_accepted_detections"
+        assert record["outputs"] == []
+    assert not list(output.rglob("*.txt"))
+    assert not list(output.rglob("*.png"))
+    assert not list(output.rglob("*.jpg"))
+
+
+def test_detector_filenames_do_not_collide_for_same_named_sources_in_one_split(
+    creator_input, images, tmp_path
+):
+    """Distinct sources sharing a basename and split cannot overwrite each other."""
+    records_path = images[1].parent / "records.csv"
+    records = pd.read_csv(records_path)
+    records["dataset_split"] = "train"
+    records.to_csv(records_path, index=False)
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
+    )
+    output = tmp_path / "output"
+    creator = YoloDetectorDatasetCreatorFromSpeciesnet(
+        creator_input, output, model=model
+    )
+
+    creator.create()
+
+    links = list((output / "images" / "train").iterdir())
+    assert len(links) == 3
+    assert len({link.name for link in links}) == 3
+    assert sum(link.resolve() == images[0] for link in links) == 2
+    assert sum(link.resolve() == images[1] for link in links) == 1
+    assert len(list((output / "labels" / "train").glob("*.txt"))) == 3
