@@ -237,9 +237,40 @@ class _SpeciesNetDatasetMixin:
         return keep
 
 
-class YoloDetectorDatasetCreatorFromSpeciesnet(
-    _SpeciesNetDatasetMixin, YoloDatasetCreatorBase
-):
+class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorBase):
+    """Combine record loading with explicit, lazy SpeciesNet configuration."""
+
+    def __init__(
+        self,
+        path_to_image_data: str | Path,
+        dataset_output_path: str | Path,
+        class_names: list[str] | None = None,
+        *,
+        model: Any | None = None,
+        model_name: str | None = None,
+    ):
+        """Load source records and configure the reusable baseline detector.
+
+        Args:
+            path_to_image_data: Input root containing per-species records.csv files.
+            dataset_output_path: Destination for future dataset creation.
+            class_names: Optional species selection in class-index order. None
+                discovers all species directories in sorted order.
+            model: Optional existing SpeciesNet-compatible detector instance.
+            model_name: Identifier or local weights directory for lazy model loading.
+                None selects SpeciesNet's default model when no model is injected.
+
+        Raises:
+            ValueError: Model configuration, class selection, or metadata is invalid.
+            FileNotFoundError: Required records or source files are missing.
+        """
+        # Validate model configuration before reading records. Weight loading stays
+        # in the mixin and occurs only on the first nonempty inference request.
+        self.initialize_speciesnet(model=model, model_name=model_name)
+        super().__init__(path_to_image_data, dataset_output_path, class_names)
+
+
+class YoloDetectorDatasetCreatorFromSpeciesnet(_SpeciesNetDatasetCreatorBase):
     """Prepare species records for future YOLO detector dataset conversion.
 
     Uses the shared input-root/output-root constructor and optional ``class_names``
@@ -255,9 +286,7 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(
         return super().create()
 
 
-class YoloClassifierDatasetCreatorFromSpeciesnet(
-    _SpeciesNetDatasetMixin, YoloDatasetCreatorBase
-):
+class YoloClassifierDatasetCreatorFromSpeciesnet(_SpeciesNetDatasetCreatorBase):
     """Prepare species records for future YOLO classifier dataset conversion.
 
     Uses the shared input-root/output-root constructor and optional ``class_names``

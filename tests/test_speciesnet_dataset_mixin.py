@@ -11,12 +11,17 @@ from unittest.mock import Mock
 import os
 import shutil
 
+import pandas as pd
 import pytest
 from hypothesis import given, strategies as st
 from PIL import Image
 
 from smartrodent import yolo_dataset_creation
-from smartrodent.yolo_dataset_creation import _SpeciesNetDatasetMixin
+from smartrodent.yolo_dataset_creation import (
+    _SpeciesNetDatasetMixin,
+    YoloClassifierDatasetCreatorFromSpeciesnet,
+    YoloDetectorDatasetCreatorFromSpeciesnet,
+)
 
 
 class SpeciesNetDetectorStub:
@@ -318,6 +323,105 @@ def test_external_detector_cutoff_is_restored_after_inference(images, fail):
         mixin.infer_batch(images[:1])
 
     assert SpeciesNetDetectorStub.DETECTION_THRESHOLD == previous_threshold
+
+
+@pytest.fixture(
+    params=[
+        YoloDetectorDatasetCreatorFromSpeciesnet,
+        YoloClassifierDatasetCreatorFromSpeciesnet,
+    ]
+)
+def creator_type(request):
+    """Exercise model configuration through both public dataset creators."""
+    return request.param
+
+
+@pytest.fixture
+def creator_input(images):
+    """Attach split metadata, including oversampling, to real temporary images."""
+    for path, split, repeats in zip(images, ["train", "test"], [2, 1], strict=True):
+        pd.DataFrame(
+            [
+                {"image_path": str(path), "dataset_split": split, "photo_id": 42}
+                for _ in range(repeats)
+            ]
+        ).to_csv(path.parent / "records.csv", index=False)
+    return images[0].parent.parent
+
+
+@pytest.mark.parametrize("model_name", [None, "custom-model"])
+def test_creators_initialize_and_reuse_a_lazy_detector(
+    creator_type, creator_input, images, tmp_path, monkeypatch, model_name
+):
+    """Creator setup configures inherited inference without loading model weights."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
+    )
+    constructor = Mock(return_value=model)
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    monkeypatch.setattr(yolo_dataset_creation, "DEFAULT_MODEL", "test-default")
+    output = tmp_path / "output"
+    settings = {} if model_name is None else {"model_name": model_name}
+
+    creator = creator_type(creator_input, output, **settings)
+
+    constructor.assert_not_called()
+    assert creator.speciesnet_model is None
+    assert creator.infer_batch([]) == {}
+    constructor.assert_not_called()
+    for records in creator.records_by_species.values():
+        source_path = records.iloc[0]["image_path"]
+        result = creator.infer_batch([source_path])
+        assert result[source_path]["detections"][0]["confidence"] == 0.9
+        assert creator.speciesnet_model is model
+    constructor.assert_called_once_with(
+        "test-default" if model_name is None else model_name,
+        components="detector",
+    )
+    assert not output.exists()
+
+
+def test_creators_use_injected_detector_without_changing_source_records(
+    creator_type, creator_input, images, tmp_path, monkeypatch
+):
+    """Inference reuses the supplied model without altering splits or duplicate rows."""
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images],
+        max_batch_size=1,
+    )
+    constructor = Mock(side_effect=AssertionError("Injected model must be reused"))
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    output = tmp_path / "output"
+    creator = creator_type(creator_input, output, model=model)
+    original = {
+        species: records.copy(deep=True)
+        for species, records in creator.records_by_species.items()
+    }
+
+    assert creator.speciesnet_model is model
+    for _ in range(2):
+        result = creator.infer_batch(images, batch_size=1)
+        assert set(result) == {str(path) for path in images}
+        assert all(len(item["detections"]) == 1 for item in result.values())
+    assert creator.speciesnet_model is model
+    constructor.assert_not_called()
+    for species, records in creator.records_by_species.items():
+        pd.testing.assert_frame_equal(records, original[species])
+    assert len(creator.records_by_species["mouse"]) == 2
+    assert not output.exists()
+
+
+def test_creators_reject_conflicting_model_configuration(
+    creator_type, creator_input, tmp_path
+):
+    """An existing detector and a weights identifier cannot override each other."""
+    with pytest.raises(ValueError, match="model"):
+        creator_type(
+            creator_input,
+            tmp_path / "output",
+            model=SpeciesNetStub([]),
+            model_name="other-model",
+        )
 
 
 @pytest.mark.speciesnet_integration
