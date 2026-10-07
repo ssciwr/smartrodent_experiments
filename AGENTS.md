@@ -67,3 +67,4 @@ except Exception as e:  # unknown exception branch for unexpected stuff
 - all public methods and classes should have google style docstrings
 - all private methods or classes should have at least freeform docstrings
 - code should have explanatory comments that explains decisions taken where multiple alternatives would be possible or where a certain algorithm to solve a problem is first introduced
+- adhere to clean code principles with practical application of the principles of "Clean Code" by Robert C. Martin, and "Refactoring" by Martin Fowler, but with relaxed rules on naming conventions and function length. The code should be readable and understandable, but not necessarily follow strict naming conventions or have very short functions. The focus is on clarity and maintainability rather than strict adherence to style guides.
