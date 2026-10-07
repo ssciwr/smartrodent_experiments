@@ -1,0 +1,3 @@
+input_dir: datasets/stage3_filtered_snakes
+output_directory: datasets/stage4_materialized_filtered_data
+deciding_column_name_start: rejected

@@ -7,7 +7,7 @@ columns:
 
 paths:
   input_root: datasets/inaturalist
-  output_root:datasets/filtered_stage1_animal
+  output_root: datasets/stage1_filtered_animal
 
 ollama:
   model: qwen3.6:35b-a3b

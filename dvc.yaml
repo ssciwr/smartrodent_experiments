@@ -8,31 +8,29 @@ stages:
           - data.inaturalist
     outs:
       - datasets/inaturalist
-
   filter_animal:
-    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_animal.yaml
+    cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_animal.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_animal.yaml
       - datasets/inaturalist
     outs:
-      -datasets/filtered_stage1_animal
+      - datasets/filtered_stage1_animal
 
   filter_flying_bird:
-    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_birds.yaml
+    cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_birds.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_birds.yaml
-      -datasets/filtered_stage1_animal
+      - datasets/filtered_stage1_animal
     outs:
-      -datasets/filtered_stage2_birds
+      - datasets/filtered_stage2_birds
 
   filter_snake:
-    cmd: uv run python scripts/filter_data_vlm.py -c configs/filter_data_vlm_config_snakes.yaml
+    cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_snakes.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_snakes.yaml
-      -datasets/filtered_stage1_animal
+      - datasets/filtered_stage1_animal
     outs:
-      -datasets/filtered_stage3_snakes
-
+      - datasets/filtered_stage3_snakes

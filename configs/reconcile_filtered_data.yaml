@@ -1,0 +1,6 @@
+# Human-sorted images and the copied materialization configuration.
+input_directory: datasets/stage4_materialized_filtered_data
+output_directory: datasets/stage5_materialized_filtered_data_corrected
+allowed_suffixes:
+  - ".jpg"
+  - ".jpeg"

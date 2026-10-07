@@ -1,3 +1,4 @@
-image_root: datasets/inaturalist
-old_root: /mnt/dataLinux/machinelearning_data/smartrodent/datasets/inaturalist/
-new_root: ./projects/smartrodent_experiments/datasets/inaturalist/
+image_root: datasets/filtered_stage3_snakes
+old_root: /home/hmack/projects/smartrodent_experiments
+new_root: /mnt/dataLinux/machinelearning_data/smartrodent/
+backup_name: records_original

@@ -6,8 +6,8 @@ columns:
   image_path: image_path
 
 paths:
-  input_root: datasets/filtered_stage2_birds
-  output_root: datasets/filtered_stage3_snakes
+  input_root: datasets/stage2_filtered_birds
+  output_root: datasets/stage3_filtered_snakes
 
 ollama:
   model: qwen3.6:35b-a3b
