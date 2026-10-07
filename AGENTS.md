@@ -34,6 +34,7 @@ This project uses DVC as its core driver.
 - never commit secrets into git, e.g., API keys
 - never edit code without asking first and giving a clear step-by-step plan first
 - never modify the data in the ./datasets directory unless explicitly told to do so. It contains the data of the project in various stages or. processing and must hence be held sacred! If told to modify it, raise the concern that this is normally forbidden first, plan out a step-by-step workflow and ask for explicit permission to execute it first.
+- config files are treated as ephemeral and do not need tests
 
 ## Coding guidelines
 - Adhere to SOLID principles
