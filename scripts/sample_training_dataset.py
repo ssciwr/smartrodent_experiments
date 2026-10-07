@@ -10,8 +10,29 @@ import yaml
 from smartrodent.dataset_splitting import TrainingDatasetSampler
 
 
+def compute_oversampling(
+    species_name: str, frame: pd.DataFrame, all_frames: dict[str, pd.DataFrame]
+) -> float:
+
+    full_size = sum(len(df) for df in all_frames.values())
+    all_sizes = {k: len(df) / full_size for k, df in all_frames.items()}
+    max_size = max(all_sizes.values())
+    current_size = all_sizes[species_name]
+    target_size = 0.1 * max_size
+
+    if current_size >= target_size:
+        print("sampling to 1.0")
+        return 1.0
+    else:
+        print("sampling to: ", target_size / current_size)
+        return target_size / current_size
+
+
 def main(config_path: Path) -> None:
-    """Oversample configured training records and write per-species CSV files.
+    """Oversample training records and save metadata, config, and script source.
+
+    Copy this script, including its custom oversampling rule, into the output
+    root before sampling. Reruns replace the config and source snapshots.
 
     Args:
         config_path: YAML file containing sampler paths and settings.
@@ -21,6 +42,8 @@ def main(config_path: Path) -> None:
     output_root = Path(config["paths"]["training_dataset_sampler_output"])
     output_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(config_path, output_root / config_path.name)
+    source_path = Path(__file__).resolve()
+    shutil.copy2(source_path, output_root / source_path.name)
     records_by_species = {
         records_path.parent.name: pd.read_csv(records_path)
         for records_path in input_root.glob("*/records.csv")
