@@ -91,6 +91,50 @@ To run the downloader without DVC:
 uv run python scripts/download_inaturalist_data.py config/dataset_full.yaml
 ```
 
+## YOLO dataset creation
+
+Both dataset creators implement the `Configurable` protocol and provide
+`from_config(config_path)`. See
+[`configs/create_yolo_detector_dataset.yaml`](configs/create_yolo_detector_dataset.yaml)
+and
+[`configs/create_yolo_classifier_dataset.yaml`](configs/create_yolo_classifier_dataset.yaml).
+Under `data`, the configuration key is the exact creator class name:
+`YoloDetectorDatasetCreatorFromSpeciesnet` or
+`YoloClassifierDatasetCreatorFromSpeciesnet`. Input/output paths are interpreted
+relative to the working directory, not the YAML file's directory.
+
+`path_to_image_data` and `dataset_output_path` are required. Optional `class_names`
+selects species directories; omit it or use `null` to discover all species.
+Optional `model_name` selects SpeciesNet weights; omit it or use `null` for the
+default model. Injected model objects are supported through the Python constructor,
+not YAML. Loading a configuration reads metadata but does not load model weights
+or create output files.
+
+```python
+from smartrodent.yolo_dataset_creation import YoloDetectorDatasetCreatorFromSpeciesnet
+
+creator = YoloDetectorDatasetCreatorFromSpeciesnet.from_config(
+    "configs/create_yolo_detector_dataset.yaml"
+)
+# Explicitly writes the configured dataset; only run after checking its paths.
+creator.create()
+```
+
+Alternatively, run the shared script with a **positional configuration path**.
+It selects the creator from the class-named key; exactly one creator is allowed.
+Check the configured paths before running: these commands write dataset outputs.
+
+```bash
+uv run python scripts/create_yolo_dataset.py configs/create_yolo_detector_dataset.yaml
+uv run python scripts/create_yolo_dataset.py configs/create_yolo_classifier_dataset.yaml
+```
+
+Use `YoloClassifierDatasetCreatorFromSpeciesnet` with the classifier configuration
+for crop-based classification output. The example destinations are
+`datasets/stage8_yolo_detector` and `datasets/stage8_yolo_classifier`; stage numbering
+is a convention, not an enforced restriction. Creation preserves existing splits
+and oversampled rows and requires a new destination directory.
+
 ## YOLO classification: class-index ordering
 
 `YoloClassificationTrainer` passes the classification dataset directory to

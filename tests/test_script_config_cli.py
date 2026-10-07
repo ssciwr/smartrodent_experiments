@@ -15,6 +15,7 @@ import pytest
         ("scripts.migrate_records", "parse_args"),
         ("scripts.sample_training_dataset", "_parse_args"),
         ("scripts.split_dataset", "_parse_args"),
+        ("scripts.create_yolo_dataset", "_parse_args"),
     ],
 )
 @pytest.mark.parametrize(

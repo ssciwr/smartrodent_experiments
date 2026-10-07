@@ -278,11 +278,12 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> Self:
-        """Build a creator from the ``data.yolo_dataset_creator`` YAML mapping.
+        """Build a creator from its class-named mapping under ``data``.
 
         Args:
-            config_path: YAML configuration file. Source/output paths are relative
-                to the working directory, not the configuration file's directory.
+            config_path: YAML configuration with a ``data`` mapping keyed by this
+                creator's class name. Source/output paths are relative to the
+                working directory, not the configuration file's directory.
                 Required settings are ``path_to_image_data`` and
                 ``dataset_output_path``. Optional settings are ``class_names`` and
                 ``model_name``; omitted values retain the constructor defaults.
@@ -301,8 +302,8 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         cls._validate_creator_settings(settings)
         return cls(**settings)
 
-    @staticmethod
-    def _load_creator_settings(config_path: str | Path) -> dict:
+    @classmethod
+    def _load_creator_settings(cls, config_path: str | Path) -> dict:
         """Read the required creator mapping without borrowing unrelated pipeline code."""
         path = Path(config_path).expanduser()
         configuration = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -311,10 +312,10 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         data = configuration.get("data")
         if not isinstance(data, dict):
             raise TypeError("The 'data' configuration must be a mapping")
-        settings = data.get("yolo_dataset_creator")
+        settings = data.get(cls.__name__)
         if not isinstance(settings, dict):
             raise TypeError(
-                "The 'data.yolo_dataset_creator' configuration must be a mapping"
+                f"The 'data.{cls.__name__}' configuration must be a mapping"
             )
         return settings
 
@@ -326,12 +327,12 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         unknown = set(settings) - allowed
         if unknown:
             raise ValueError(
-                f"Unsupported yolo_dataset_creator settings: {sorted(map(str, unknown))}"
+                f"Unsupported dataset creator settings: {sorted(map(str, unknown))}"
             )
         missing = required - set(settings)
         if missing:
             raise ValueError(
-                f"Missing required yolo_dataset_creator settings: {sorted(missing)}"
+                f"Missing required dataset creator settings: {sorted(missing)}"
             )
         for name in sorted(required):
             value = settings[name]
