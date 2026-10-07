@@ -1,6 +1,8 @@
 # Human-sorted images and the copied materialization configuration.
 input_directory: datasets/stage4_materialized_filtered_data
 output_directory: datasets/stage5_materialized_filtered_data_corrected
+relevant_subdirs: ["kept", "rejected"]
+output_columns: ["kept_human", "rejected_human"]
 allowed_suffixes:
   - ".jpg"
   - ".jpeg"
