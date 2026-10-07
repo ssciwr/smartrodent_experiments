@@ -1,6 +1,7 @@
 """Migrate image path prefixes in per-species records files."""
 
 import argparse
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,7 @@ def main(config_path: Path) -> None:
     # Use one local timestamp for all backups produced by this migration run.
     timestamp = datetime.now().strftime("%H%M%S_%d%m%Y")
     backup_name = f"{config.get('backup_name', 'records_original')}_{timestamp}"
+    shutil.copy2(config_path, image_root / config_path.name)
     for species_path in tqdm(
         sorted(image_root.iterdir()),
     ):

@@ -2,14 +2,15 @@ from smartrodent import YoloClassificationTrainer
 from smartrodent import config_utils
 import yaml
 import os
+import shutil
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-with open(
-    "./projects/smartrodent_experiments/configs/train_yolo_classifier_config.yaml",
-    "r",
-) as f:
+config_path = Path(
+    "./projects/smartrodent_experiments/configs/train_yolo_classifier_config.yaml"
+)
+with config_path.open("r") as f:
     cfg = yaml.load(f, config_utils.get_loader())
 
 configs = config_utils.ConfigHandler(cfg).run_configs
@@ -26,6 +27,9 @@ for config in configs:
 
     print(trainer.model.ckpt["train_args"])
 
+    output_dir = Path(config["train_kwargs"]["project"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_path, output_dir / config_path.name)
     trainer.train()
 
     output = trainer.export()

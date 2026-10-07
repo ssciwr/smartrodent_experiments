@@ -1,6 +1,7 @@
 """Annotate per-species metadata records using a configured VLM filter."""
 
 import argparse
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,8 @@ def main(config_path: Path) -> None:
     if not input_root.is_dir():
         raise FileNotFoundError(f"Input root does not exist: {input_root}")
 
+    output_root.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_path, output_root / config_path.name)
     selected_species = config.get("species")
     records_by_species = {
         records_path.parent.name: pd.read_csv(records_path)

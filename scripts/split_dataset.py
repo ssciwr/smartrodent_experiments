@@ -1,6 +1,7 @@
 """Split per-species downloader metadata into train, validation, and test rows."""
 
 import argparse
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,8 @@ def main(config_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text())
     input_root = Path(config["paths"]["dataset_splitter_input"])
     output_root = Path(config["paths"]["dataset_splitter_output"])
+    output_root.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_path, output_root / config_path.name)
     records_by_species = {
         records_path.parent.name: pd.read_csv(records_path)
         for records_path in input_root.glob("*/records.csv")

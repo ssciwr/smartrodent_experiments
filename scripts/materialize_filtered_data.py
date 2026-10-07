@@ -10,6 +10,8 @@ def main(config_path: Path) -> None:
 
     The original YAML is copied into output_directory for traceability. Only
     records.csv in each species directory is processed; other CSVs are ignored.
+    Each output partition stores records.csv under the species directory and
+    image symlinks in its imgs subdirectory.
 
     Args:
         config_path: YAML file containing input_dir and output_directory, with
@@ -68,17 +70,15 @@ def main(config_path: Path) -> None:
 
         for partition, mask in (("kept", ~rejected), ("rejected", rejected)):
             output_dir = output_root / partition / path.name
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # Separate image links from metadata, even for empty partitions.
+            image_dir = output_dir / "imgs"
+            image_dir.mkdir(parents=True, exist_ok=True)
             filtered = records.loc[mask]
             output_csv = output_dir / (path / "records.csv").name
             for image_path in filtered["image_path"]:
                 print(image_path)
                 source = Path(image_path).resolve(strict=True)
-                destination = output_dir / Path(image_path).name
-                if destination == output_csv:
-                    raise FileExistsError(
-                        f"Image conflicts with output CSV: {destination}"
-                    )
+                destination = image_dir / Path(image_path).name
                 _symlink_image(source, destination)
             filtered.to_csv(output_csv, index=False)
 
