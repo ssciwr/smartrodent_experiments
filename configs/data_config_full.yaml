@@ -1,7 +1,7 @@
 data:
 
   inaturalist:
-    output_path: datasets/stage0_inaturalist_raw
+    output_path: datasets/inaturalist
     years: []
     first_year: 2000
     last_year: 2026
@@ -53,8 +53,8 @@ data:
     seed: 42
     max_img_num: 2500
     max_observations: 5000
-    cache_file: datasets/stage0_inaturalist_raw/api_requests.db
-    ratelimit_path: datasets/stage0_inaturalist_raw/api_ratelimit.db
+    cache_file: datasets/inaturalist/api_requests.db
+    ratelimit_path: datasets/inaturalist/api_ratelimit.db
     backoff_factor: 0.5
     # Bounds request retries in both the API session and downloader retry loops.
     max_retries: 5
@@ -65,7 +65,7 @@ data:
       - cc-by-nc
       - cc-by-nc-sa
   gbif:
-    output_path: datasets/stage0_inaturalist_raw
+    output_path: datasets/inaturalist
     years: []
     first_year: 2000
     last_year: 2026
