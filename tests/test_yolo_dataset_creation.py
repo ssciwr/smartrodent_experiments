@@ -73,6 +73,14 @@ def test_creators_discover_classes_and_load_existing_split_records(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("batch_size", [0, -1, True, False, 1.5, "32", None])
+def test_constructor_rejects_invalid_batch_size(creator_type, tmp_path, batch_size):
+    """Invalid batch limits fail before loading records or creating output."""
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        creator_type(tmp_path / "missing", tmp_path / "output", batch_size=batch_size)
+    assert not (tmp_path / "output").exists()
+
+
 def test_explicit_classes_select_directories_and_define_index_order(
     creator_type, tmp_path
 ):
@@ -689,7 +697,10 @@ def test_create_writes_every_accepted_detection(
         pytest.fail("Unexpected creator type")
 
 
-def test_create_handles_more_than_one_inference_batch(creator_type, tmp_path):
+@pytest.mark.parametrize("batch_size", [1, 7, 32, 40])
+def test_create_handles_more_than_one_inference_batch(
+    creator_type, tmp_path, batch_size
+):
     """A capacity-limited detector processes a dataset larger than one batch."""
     root = tmp_path / "input"
     species = root / "mouse"
@@ -702,12 +713,17 @@ def test_create_handles_more_than_one_inference_batch(creator_type, tmp_path):
     ).to_csv(species / "records.csv", index=False)
     model = SpeciesNetStub(
         [{"filepath": str(path), "detections": [detection(0.9)]} for path in paths],
-        max_batch_size=32,
+        max_batch_size=batch_size,
     )
+    model.detect = Mock(wraps=model.detect)
     output = tmp_path / "output"
-    creator = creator_type(root, output, model=model)
+    creator = creator_type(root, output, model=model, batch_size=batch_size)
 
     creator.create()
+
+    assert [len(call.kwargs["filepaths"]) for call in model.detect.call_args_list] == [
+        min(batch_size, 65 - start) for start in range(0, 65, batch_size)
+    ]
 
     metadata = json.loads((output / "metadata.json").read_text())["records"]
     assert [row["source_row"] for row in metadata] == list(range(65))
@@ -900,6 +916,10 @@ def test_from_config_loads_selected_classes_and_lazy_model(
                         "dataset_output_path": str(output),
                         "class_names": ["shrew", "mouse"],
                         "model_name": "custom-speciesnet",
+                        "batch_size": 7,
+                        "confidence_threshold": 0.8,
+                        "allowed_classes": ["human", "vehicle"],
+                        "iou_threshold": 0.2,
                     }
                 }
             }
@@ -917,6 +937,10 @@ def test_from_config_loads_selected_classes_and_lazy_model(
     assert creator.dataset_output_path == output
     assert creator.speciesnet_model is None
     assert creator.speciesnet_model_name == "custom-speciesnet"
+    assert creator.batch_size == 7
+    assert creator.confidence_threshold == 0.8
+    assert creator.allowed_classes == ("human", "vehicle")
+    assert creator.iou_threshold == 0.2
     constructor.assert_not_called()
     assert not output.exists()
 
@@ -950,6 +974,10 @@ def test_from_config_uses_working_directory_paths_and_optional_defaults(
     assert creator.class_names == ["mouse", "shrew"]
     assert creator.speciesnet_model is None
     assert creator.speciesnet_model_name is None
+    assert creator.batch_size == 32
+    assert creator.confidence_threshold == 0.1
+    assert creator.allowed_classes == ("animal",)
+    assert creator.iou_threshold == 0.45
     assert not creator.dataset_output_path.exists()
 
 
@@ -1022,6 +1050,27 @@ def test_from_config_rejects_unknown_or_python_only_settings(
         ("class_names", [123], TypeError),
         ("model_name", 123, TypeError),
         ("model_name", "", ValueError),
+        ("batch_size", 0, ValueError),
+        ("batch_size", -1, ValueError),
+        ("batch_size", True, ValueError),
+        ("batch_size", 1.5, ValueError),
+        ("batch_size", "32", ValueError),
+        ("batch_size", None, ValueError),
+        ("confidence_threshold", -0.1, ValueError),
+        ("confidence_threshold", 1.1, ValueError),
+        ("confidence_threshold", True, TypeError),
+        ("confidence_threshold", "0.5", TypeError),
+        ("confidence_threshold", None, TypeError),
+        ("iou_threshold", -0.1, ValueError),
+        ("iou_threshold", 1.1, ValueError),
+        ("iou_threshold", True, TypeError),
+        ("iou_threshold", "0.5", TypeError),
+        ("iou_threshold", None, TypeError),
+        ("allowed_classes", "animal", TypeError),
+        ("allowed_classes", None, TypeError),
+        ("allowed_classes", {"animal": True}, TypeError),
+        ("allowed_classes", [123], TypeError),
+        ("allowed_classes", ["  "], ValueError),
     ],
 )
 def test_from_config_rejects_invalid_setting_types(
@@ -1058,3 +1107,85 @@ def test_from_config_requires_its_own_class_named_section(creator_type, tmp_path
 
     with pytest.raises(TypeError, match=creator_type.__name__):
         creator_type.from_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "confidence, labels, iou, indices",
+    [
+        (0.8, ["human"], 0.0, [0]),
+        (0.7, ["human"], 1.0, [0, 1]),
+        (0.8, ["animal"], 0.0, [2]),
+        (0.95, ["human"], 0.0, []),
+        (0.0, [], 1.0, []),
+    ],
+)
+def test_configured_filtering_controls_created_dataset(
+    creator_type, creator_input, images, tmp_path, confidence, labels, iou, indices
+):
+    """YAML filtering settings control retained boxes and actual dataset outputs."""
+    output = tmp_path / "configured_output"
+    config_path = tmp_path / "creator.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    creator_type.__name__: {
+                        "path_to_image_data": str(creator_input),
+                        "dataset_output_path": str(output),
+                        "confidence_threshold": confidence,
+                        "allowed_classes": labels,
+                        "iou_threshold": iou,
+                    }
+                }
+            }
+        )
+    )
+    creator = creator_type.from_config(config_path)
+    creator.initialize_speciesnet(
+        model=SpeciesNetStub(
+            [
+                {
+                    "filepath": str(path),
+                    "detections": [
+                        detection(0.9, label="human"),
+                        detection(0.7, label="human"),
+                        detection(0.95, label="animal"),
+                    ],
+                }
+                for path in images
+            ]
+        )
+    )
+
+    creator.create()
+
+    records = json.loads((output / "metadata.json").read_text())["records"]
+    assert records
+    for record in records:
+        assert [item["detection_index"] for item in record["detections"]] == indices
+        assert record["status"] == ("written" if indices else "skipped")
+        for item in record["outputs"]:
+            assert (output / item["image_path"]).is_file()
+
+
+@given(
+    confidence=st.floats(min_value=0, max_value=1),
+    iou=st.floats(min_value=0, max_value=1),
+)
+def test_constructor_preserves_valid_filter_thresholds(confidence, iou):
+    """Every finite threshold in the supported interval remains configurable."""
+    with TemporaryDirectory() as directory:
+        root = Path(directory) / "input"
+        write_species(root, "mouse", ["train"])
+        labels = ["animal"]
+        creator = YoloDetectorDatasetCreatorFromSpeciesnet(
+            root,
+            Path(directory) / "output",
+            confidence_threshold=confidence,
+            allowed_classes=labels,
+            iou_threshold=iou,
+        )
+        labels.append("human")
+        assert creator.confidence_threshold == confidence
+        assert creator.iou_threshold == iou
+        assert creator.allowed_classes == ("animal",)

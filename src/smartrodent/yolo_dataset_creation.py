@@ -1,22 +1,23 @@
 """Prepare record-based YOLO datasets and provide SpeciesNet batch inference."""
 
-from collections.abc import Sequence
+import json
 from abc import abstractmethod
+from collections.abc import Sequence
 from copy import deepcopy
 from hashlib import sha256
-import json
 from pathlib import Path
 from typing import Any, Self
 
-from PIL import Image
 import pandas as pd
 import torch
 import yaml
-from ultralytics.utils.metrics import box_iou
+from PIL import Image
 from speciesnet import DEFAULT_MODEL, SpeciesNet
+from ultralytics.utils.metrics import box_iou
 
 from .base import YoloDatasetCreatorBase
 from .utils import path_component
+from tqdm import tqdm
 
 
 class _SpeciesNetDatasetMixin:
@@ -97,10 +98,9 @@ class _SpeciesNetDatasetMixin:
             or batch_size < 1
         ):
             raise ValueError("batch_size must be a positive integer")
-        if not 0.0 <= confidence_threshold <= 1.0:
-            raise ValueError("confidence_threshold must be between 0 and 1")
-        if not 0.0 <= iou_threshold <= 1.0:
-            raise ValueError("iou_threshold must be between 0 and 1")
+        self._validate_detection_settings(
+            confidence_threshold, allowed_classes, iou_threshold
+        )
 
         filepaths = [str(Path(path).resolve()) for path in image_paths]
         if not filepaths:
@@ -120,6 +120,31 @@ class _SpeciesNetDatasetMixin:
                 "detections": self._extract_crop_records(source_path, accepted)
             }
         return results
+
+    @staticmethod
+    def _validate_detection_settings(
+        confidence_threshold: float,
+        allowed_classes: Sequence[str],
+        iou_threshold: float,
+    ) -> None:
+        """Reject ambiguous labels and nonnumeric or out-of-range thresholds."""
+        for name, value in (
+            ("confidence_threshold", confidence_threshold),
+            ("iou_threshold", iou_threshold),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
+        if isinstance(allowed_classes, (str, bytes)) or not isinstance(
+            allowed_classes, Sequence
+        ):
+            raise TypeError("allowed_classes must be a sequence of strings")
+        for label in allowed_classes:
+            if not isinstance(label, str):
+                raise TypeError("allowed_classes must contain strings")
+            if not label.strip():
+                raise ValueError("allowed_classes must contain nonempty labels")
 
     def _run_speciesnet_batches(
         self, filepaths: list[str], batch_size: int
@@ -252,6 +277,10 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         dataset_output_path: str | Path,
         class_names: list[str] | None = None,
         *,
+        batch_size: int = 32,
+        confidence_threshold: float = 0.1,
+        allowed_classes: Sequence[str] = ("animal",),
+        iou_threshold: float = 0.45,
         model: Any | None = None,
         model_name: str | None = None,
     ):
@@ -262,14 +291,34 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
             dataset_output_path: Destination for the generated dataset.
             class_names: Optional species selection in class-index order. None
                 discovers all species directories in sorted order.
+            batch_size: Positive maximum source rows per creation batch and source
+                images per detector invocation. Defaults to 32.
+            confidence_threshold: Inclusive minimum detection confidence, from 0 to 1.
+            allowed_classes: Detector labels to retain; an empty sequence rejects all.
+            iou_threshold: Maximum overlap before suppression, from 0 to 1.
             model: Optional existing SpeciesNet-compatible detector instance.
             model_name: Identifier or local weights directory for lazy model loading.
                 None selects SpeciesNet's default model when no model is injected.
 
         Raises:
-            ValueError: Model configuration, class selection, or metadata is invalid.
+            ValueError: Batch size, model configuration, class selection, or metadata
+                is invalid.
             FileNotFoundError: Required records or source files are missing.
         """
+        if (
+            not isinstance(batch_size, int)
+            or isinstance(batch_size, bool)
+            or batch_size < 1
+        ):
+            raise ValueError("batch_size must be a positive integer")
+        self._validate_detection_settings(
+            confidence_threshold, allowed_classes, iou_threshold
+        )
+        self.batch_size = batch_size
+        self.confidence_threshold = confidence_threshold
+        # Snapshot caller-owned sequences so later mutations cannot change filtering.
+        self.allowed_classes = tuple(allowed_classes)
+        self.iou_threshold = iou_threshold
         # Validate model configuration before reading records. Weight loading stays
         # in the mixin and occurs only on the first nonempty inference request.
         self.initialize_speciesnet(model=model, model_name=model_name)
@@ -285,8 +334,10 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
                 creator's class name. Source/output paths are relative to the
                 working directory, not the configuration file's directory.
                 Required settings are ``path_to_image_data`` and
-                ``dataset_output_path``. Optional settings are ``class_names`` and
-                ``model_name``; omitted values retain the constructor defaults.
+                ``dataset_output_path``. Optional settings are ``class_names``,
+                ``model_name``, ``batch_size``, ``confidence_threshold``,
+                ``allowed_classes``, and ``iou_threshold``; omitted values retain the
+                constructor defaults.
 
         Returns:
             A creator of the requested type, with source records loaded and model
@@ -323,7 +374,14 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
     def _validate_creator_settings(settings: dict) -> None:
         """Reject ambiguous YAML values and Python-only model injection before setup."""
         required = {"path_to_image_data", "dataset_output_path"}
-        allowed = required | {"class_names", "model_name"}
+        allowed = required | {
+            "class_names",
+            "model_name",
+            "batch_size",
+            "confidence_threshold",
+            "allowed_classes",
+            "iou_threshold",
+        }
         unknown = set(settings) - allowed
         if unknown:
             raise ValueError(
@@ -361,8 +419,9 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         no accepted detections are skipped, with the reason in ``metadata.json``.
         The metadata retains source columns, detection details, and output paths
         relative to the dataset root. Crops are never included in serialized data.
-        Creation uses the mixin defaults: animal labels, confidence >= 0.1, and
-        IoU threshold 0.45, with at most 32 source rows held per inference batch.
+        Creation uses the configured allowed labels, confidence threshold, and
+        IoU threshold, with at most ``batch_size`` source rows held per inference
+        batch.
 
         Returns:
             The generated dataset's root directory.
@@ -390,11 +449,17 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         # Bound the number of live crops, not just SDK calls. Inferring the whole
         # dataset first would retain every crop in memory. Duplicate sources within
         # a batch share inference, but each oversampled row still produces an output.
-        batch_size = 32
-        for start in range(0, len(records), batch_size):
-            frame = records.iloc[start : start + batch_size]
+        for start in tqdm(
+            range(0, len(records), self.batch_size),
+            desc=f"Create species records for {species}",
+        ):
+            frame = records.iloc[start : start + self.batch_size]
             predictions = self.infer_batch(
-                frame["image_path"].drop_duplicates().tolist()
+                frame["image_path"].drop_duplicates().tolist(),
+                batch_size=self.batch_size,
+                confidence_threshold=self.confidence_threshold,
+                allowed_classes=self.allowed_classes,
+                iou_threshold=self.iou_threshold,
             )
             # Convert missing values to JSON null without a pandas JSON round-trip,
             # which would round high-precision metadata. Keep the source frame intact.
