@@ -135,7 +135,7 @@ def test_reconciliation_preserves_original_associations(rows):
         for image_name in {row[2] for row in rows}:
             image = image_root / image_name
             image.write_bytes(b"image")
-            image_paths[image_name] = str(image)
+            image_paths[image_name] = str(image.resolve())
 
         original = pd.DataFrame(
             [(row[0], row[1], image_paths[row[2]]) for row in rows],

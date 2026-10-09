@@ -1,6 +1,7 @@
 """Shared external-model substitutes for SpeciesNet-related tests."""
 
 from copy import deepcopy
+from pathlib import Path
 
 
 class SpeciesNetDetectorStub:
@@ -43,7 +44,7 @@ class SpeciesNetStub:
         if self.fail:
             raise RuntimeError("Model failed")
 
-        requested = {str(path) for path in filepaths}
+        requested = {str(Path(path).resolve()) for path in filepaths}
         return {
             "predictions": [
                 {
@@ -55,7 +56,7 @@ class SpeciesNetStub:
                     ],
                 }
                 for item in self.predictions
-                if item["filepath"] in requested
+                if str(Path(item["filepath"]).resolve()) in requested
             ]
         }
 

@@ -41,7 +41,7 @@ def write_species(root, species, splits):
         image.touch()
         rows.append(
             {
-                "image_path": str(image),
+                "image_path": str(image.resolve()),
                 "dataset_split": split,
                 "photo_id": index,
             }
@@ -68,7 +68,7 @@ def test_creators_discover_classes_and_load_existing_split_records(
     assert records["dataset_split"].tolist() == ["train", "val", "test"]
     assert records["photo_id"].tolist() == [0, 1, 2]
     assert records["image_path"].tolist() == [
-        str(root / "mouse" / f"photo_{index}.jpg") for index in range(3)
+        str((root / "mouse" / f"photo_{index}.jpg").resolve()) for index in range(3)
     ]
     assert not output.exists()
 
@@ -758,7 +758,7 @@ def test_create_filenames_are_deterministic_and_preserve_oversampling(
         pd.DataFrame(
             [
                 {
-                    "image_path": str(paths[index]),
+                    "image_path": str(paths[index].resolve()),
                     "dataset_split": "train",
                     "photo_id": index,
                 }
@@ -766,7 +766,10 @@ def test_create_filenames_are_deterministic_and_preserve_oversampling(
             ]
         ).to_csv(species / "records.csv", index=False)
         model = SpeciesNetStub(
-            [{"filepath": str(path), "detections": [detection(0.9)]} for path in paths]
+            [
+                {"filepath": str(path.resolve()), "detections": [detection(0.9)]}
+                for path in paths
+            ]
         )
         output_names = []
         for output in [Path(directory) / "first", Path(directory) / "second"]:

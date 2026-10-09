@@ -123,7 +123,7 @@ def test_confidence_filter_matches_inclusive_threshold(confidence, threshold):
     # Each generated example owns its files; no function-scoped fixture state leaks
     # between Hypothesis examples.
     with TemporaryDirectory() as directory:
-        path = Path(directory) / "source.png"
+        path = (Path(directory) / "source.png").resolve()
         Image.new("RGB", (20, 10), "red").save(path)
         predictions = [{"filepath": str(path), "detections": [detection(confidence)]}]
 

@@ -168,7 +168,7 @@ def test_training_scripts_copy_original_config_to_project_base(
         if uses_cli
         else tmp_path / "projects" / "smartrodent_experiments" / "configs"
     )
-    config_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / config_name
     output_root = tmp_path / "training_outputs"
     config_path.write_text(
