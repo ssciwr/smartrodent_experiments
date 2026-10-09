@@ -1,4 +1,4 @@
-train_dataset: ./projects/smartrodent_experiments/datasets/full_dataset/yolo_classifier_training_dataset
+train_dataset: datasets/stage8_yolo_classifier
 model_name: yolo26m-cls.pt
 include_macro_f1: true
 return_format: dataframe

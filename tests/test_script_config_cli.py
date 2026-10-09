@@ -16,6 +16,8 @@ import pytest
         ("scripts.sample_training_dataset", "_parse_args"),
         ("scripts.split_dataset", "_parse_args"),
         ("scripts.create_yolo_dataset", "_parse_args"),
+        ("scripts.train_yolo_detector", "_parse_args"),
+        ("scripts.train_yolo_classfier", "_parse_args"),
     ],
 )
 @pytest.mark.parametrize(

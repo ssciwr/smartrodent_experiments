@@ -4,6 +4,7 @@ import builtins
 import importlib
 from io import StringIO
 import runpy
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -125,36 +126,48 @@ def test_download_entry_points_copy_config_before_download(
 
 
 @pytest.mark.parametrize(
-    ("module_name", "trainer_name", "config_name", "operation"),
+    ("module_name", "trainer_name", "config_name", "operation", "uses_cli"),
     [
         (
             "scripts.train_yolo_detector",
             "YoloDetectionTrainer",
             "train_yolo_detector_config.yaml",
             "train",
+            True,
         ),
         (
             "scripts.train_yolo_classfier",
             "YoloClassificationTrainer",
             "train_yolo_classifier_config.yaml",
             "train",
+            True,
         ),
         (
             "scripts.tune_yolo_classifier",
             "YoloClassificationTrainer",
             "train_yolo_classifier_config.yaml",
             "tune",
+            False,
         ),
     ],
 )
 def test_training_scripts_copy_original_config_to_project_base(
-    tmp_path, monkeypatch, module_name, trainer_name, config_name, operation
+    tmp_path,
+    monkeypatch,
+    module_name,
+    trainer_name,
+    config_name,
+    operation,
+    uses_cli,
 ):
     import smartrodent
 
     monkeypatch.chdir(tmp_path)
-    # Preserve the current hard-coded script inputs without changing their CLI.
-    config_dir = tmp_path / "projects" / "smartrodent_experiments" / "configs"
+    config_dir = (
+        tmp_path
+        if uses_cli
+        else tmp_path / "projects" / "smartrodent_experiments" / "configs"
+    )
     config_dir.mkdir(parents=True)
     config_path = config_dir / config_name
     output_root = tmp_path / "training_outputs"
@@ -190,6 +203,8 @@ def test_training_scripts_copy_original_config_to_project_base(
     factory = Mock()
     factory.from_config.return_value = trainer
     monkeypatch.setattr(smartrodent, trainer_name, factory)
+    if uses_cli:
+        monkeypatch.setattr(sys, "argv", [module_name, str(config_path)])
     runpy.run_module(module_name, run_name="__main__")
     getattr(trainer, operation).assert_called_once()
     trainer.export.assert_called_once()
