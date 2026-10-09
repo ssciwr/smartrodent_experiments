@@ -8,6 +8,7 @@ stages:
           - data.inaturalist
     outs:
       - datasets/inaturalist
+
   filter_animal:
     cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_animal.yaml
     deps:
@@ -15,22 +16,110 @@ stages:
       - configs/filter_data_vlm_config_animal.yaml
       - datasets/inaturalist
     outs:
-      - datasets/filtered_stage1_animal
+      - datasets/stage1_filtered_animal
 
   filter_flying_bird:
     cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_birds.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_birds.yaml
-      - datasets/filtered_stage1_animal
+      - datasets/stage1_filtered_animal
     outs:
-      - datasets/filtered_stage2_birds
+      - datasets/stage2_filtered_birds
 
   filter_snake:
     cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_snakes.yaml
     deps:
       - scripts/filter_data_vlm.py
       - configs/filter_data_vlm_config_snakes.yaml
-      - datasets/filtered_stage1_animal
+      - datasets/stage2_filtered_birds
     outs:
-      - datasets/filtered_stage3_snakes
+      - datasets/stage3_filtered_snakes
+
+  materialize_filtered_data:
+    cmd: uv run python scripts/materialize_filtered_data.py configs/materialize_filtered_data.yaml
+    deps:
+      - scripts/materialize_filtered_data.py
+      - configs/materialize_filtered_data.yaml
+      - datasets/stage3_filtered_snakes
+    outs:
+      - datasets/stage4_materialized_filtered_data
+
+  reconcile_filtered_data:
+    cmd: uv run python scripts/reconcile_filtered_data.py configs/reconcile_filtered_data.yaml
+    deps:
+      - scripts/reconcile_filtered_data.py
+      - configs/reconcile_filtered_data.yaml
+      - datasets/stage4_materialized_filtered_data
+    outs:
+      - datasets/stage5_materialized_filtered_data_corrected
+
+  split_dataset:
+    cmd: uv run python scripts/split_dataset.py configs/dataset_splitter.yaml
+    deps:
+      - scripts/split_dataset.py
+      - configs/dataset_splitter.yaml
+      - datasets/stage5_materialized_filtered_data_corrected
+    outs:
+      - datasets/stage6_filtered_data_split
+
+  sample_training_dataset:
+    cmd: uv run python scripts/sample_training_dataset.py configs/training_dataset_sampler.yaml
+    deps:
+      - scripts/sample_training_dataset.py
+      - configs/training_dataset_sampler.yaml
+      - datasets/stage6_filtered_data_split
+    outs:
+      - datasets/stage7_filtered_data_sampled_oversampled
+
+  create_yolo_detector_dataset:
+    cmd: uv run python scripts/create_yolo_dataset.py configs/create_yolo_detector_dataset.yaml
+    deps:
+      - scripts/create_yolo_dataset.py
+      - src/smartrodent/yolo_dataset_creation.py
+      - configs/create_yolo_detector_dataset.yaml
+      - datasets/stage7_filtered_data_sampled_oversampled
+    outs:
+      - datasets/stage8_yolo_detector
+
+  create_yolo_classifier_dataset:
+    cmd: uv run python scripts/create_yolo_dataset.py configs/create_yolo_classifier_dataset.yaml
+    deps:
+      - scripts/create_yolo_dataset.py
+      - src/smartrodent/yolo_dataset_creation.py
+      - configs/create_yolo_classifier_dataset.yaml
+      - datasets/stage7_filtered_data_sampled_oversampled
+    outs:
+      - datasets/stage8_yolo_classifier
+
+  train_yolo_detector:
+    cmd: uv run python scripts/train_yolo_detector.py configs/train_yolo_detector_config.yaml
+    deps:
+      - scripts/train_yolo_detector.py
+      - src/smartrodent/training.py
+      - configs/train_yolo_detector_config.yaml
+      - datasets/stage8_yolo_detector
+    outs:
+      - projects/smartrodent_experiments/training/yolo_detect
+
+  train_yolo_classifier:
+    cmd: uv run python scripts/train_yolo_classfier.py configs/train_yolo_classifier_config.yaml
+    deps:
+      - scripts/train_yolo_classfier.py
+      - src/smartrodent/config_utils.py
+      - src/smartrodent/training.py
+      - configs/train_yolo_classifier_config.yaml
+      - datasets/stage8_yolo_classifier
+    outs:
+      - projects/smartrodent_experiments/tuning/yolo_classify_speciesnames
+
+  tune_yolo_classifier:
+    cmd: uv run python scripts/tune_yolo_classifier.py configs/train_yolo_classifier_config.yaml
+    deps:
+      - scripts/tune_yolo_classifier.py
+      - src/smartrodent/config_utils.py
+      - src/smartrodent/training.py
+      - configs/train_yolo_classifier_config.yaml
+      - datasets/stage8_yolo_classifier
+    outs:
+      - projects/smartrodent_experiments/tuning/yolo_classify_speciesnames_tune
