@@ -41,3 +41,6 @@ outputs
 
 # env files
 .env
+
+# tests
+.coverage
