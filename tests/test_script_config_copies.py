@@ -147,7 +147,7 @@ def test_download_entry_points_copy_config_before_download(
             "YoloClassificationTrainer",
             "train_yolo_classifier_config.yaml",
             "tune",
-            False,
+            True,
         ),
     ],
 )

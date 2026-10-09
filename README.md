@@ -63,32 +63,32 @@ directory for provenance. Downloaded data stays local and is not committed.
 
 ## DVC usage
 
-The `download_inaturalist` DVC stage runs the downloader with
-`config/dataset_full.yaml`. The `inaturalist` configuration mapping is tracked
-as DVC parameters, while the downloader script and implementation are tracked
-as code dependencies.
+[`dvc.yaml`](dvc.yaml) declares the complete RGB pipeline: iNaturalist download,
+three VLM filtering steps, materialization, human-decision reconciliation,
+train/validation/test splitting, oversampling, YOLO detector and classifier
+dataset creation, detector/classifier training, and classifier tuning. The
+detector and classifier branches share the stage-7 sampled records, then run
+independently from their respective stage-8 datasets.
 
-Check whether the stage is up to date:
+Inspect the graph or status without running any stage:
 
 ```bash
+uv run dvc dag
 uv run dvc status
 ```
 
-Run or reproduce the configured download:
+`dvc repro` executes the requested stage and its missing dependencies; it can
+download data, run VLM/SpeciesNet inference, and train models. Use it only when
+those writes and compute costs are intended, for example:
 
 ```bash
-uv run dvc repro download_inaturalist
+uv run dvc repro train_yolo_detector
 ```
 
-The stage deliberately has no declared DVC outputs. This lets `output_path`
-refer to an external or large local dataset without DVC attempting to cache or
-version the images. Edit the YAML to change the destination or dataset
-parameters, then rerun the stage.
-
-To run the downloader without DVC:
+To run only the downloader without DVC:
 
 ```bash
-uv run python scripts/download_inaturalist_data.py config/dataset_full.yaml
+uv run python scripts/download_inaturalist_data.py configs/data_config_full.yaml
 ```
 
 ## YOLO dataset creation
