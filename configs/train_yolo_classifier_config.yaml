@@ -2,6 +2,10 @@ train_dataset: datasets/stage8_yolo_classifier
 model_name: yolo26m-cls.pt
 include_macro_f1: true
 return_format: dataframe
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  train_experiment_name: smartrodent-yolo-classifier-training
+  tune_experiment_name: smartrodent-yolo-classifier-tuning
 train_kwargs:
   epochs: 50
   imgsz: 640

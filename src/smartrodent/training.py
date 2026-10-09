@@ -1,11 +1,89 @@
 """Training helpers for SmartRodent YOLO experiments."""
 
+import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
+import mlflow
 import pandas as pd
 import yaml
-from ultralytics import YOLO
+from ultralytics import YOLO, settings
+
+
+@dataclass(frozen=True)
+class MlflowTrackingConfiguration:
+    """Configure local MLflow tracking for training and tuning operations."""
+
+    tracking_uri: str
+    train_experiment_name: str
+    tune_experiment_name: str
+
+    @classmethod
+    def from_mapping(
+        cls, configuration: Mapping[str, str] | None
+    ) -> "MlflowTrackingConfiguration | None":
+        """Build a validated tracking configuration from YAML-compatible values.
+
+        Args:
+            configuration: The optional ``mlflow`` mapping from a trainer config.
+
+        Returns:
+            A tracking configuration, or ``None`` when MLflow is not configured.
+
+        Raises:
+            TypeError: The configuration is not a mapping of string values.
+            ValueError: Required keys are missing, unexpected, or blank.
+        """
+        if configuration is None:
+            return None
+        if not isinstance(configuration, Mapping):
+            raise TypeError("The 'mlflow' configuration must be a mapping")
+
+        required = {
+            "tracking_uri",
+            "train_experiment_name",
+            "tune_experiment_name",
+        }
+        supplied = set(configuration)
+        if supplied != required:
+            missing = sorted(required.difference(supplied))
+            unexpected = sorted(supplied.difference(required))
+            details = []
+            if missing:
+                details.append(f"missing keys: {', '.join(missing)}")
+            if unexpected:
+                details.append(f"unexpected keys: {', '.join(unexpected)}")
+            raise ValueError("Invalid 'mlflow' configuration; " + "; ".join(details))
+
+        values = {}
+        for key in required:
+            value = configuration[key]
+            if not isinstance(value, str):
+                raise TypeError(f"The 'mlflow.{key}' value must be a string")
+            if not value.strip():
+                raise ValueError(f"The 'mlflow.{key}' value must not be blank")
+            values[key] = value
+        return cls(**values)
+
+    def configure(self, operation: Literal["train", "tune"]) -> None:
+        """Configure MLflow and Ultralytics for one tracked operation.
+
+        Args:
+            operation: Whether the imminent operation is training or tuning.
+        """
+        experiment_name = (
+            self.train_experiment_name
+            if operation == "train"
+            else self.tune_experiment_name
+        )
+        # Ultralytics' MLflow callback reads these process settings when it starts
+        # its run, while the direct calls create/select the configured experiment.
+        os.environ["MLFLOW_TRACKING_URI"] = self.tracking_uri
+        os.environ["MLFLOW_EXPERIMENT_NAME"] = experiment_name
+        mlflow.set_tracking_uri(self.tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        settings.update({"mlflow": True})
 
 
 class YoloDetectionTrainer:
@@ -24,6 +102,7 @@ class YoloDetectionTrainer:
         return_format: Literal["dict", "dataframe"] = "dict",
         tune_kwargs: dict[str, Any] | None = None,
         export_kwargs: dict[str, Any] | None = None,
+        mlflow_config: Mapping[str, str] | None = None,
         event_callback: list[tuple[str, Callable]] | None = None,
         trainer=None,
         **train_kwargs,
@@ -41,6 +120,7 @@ class YoloDetectionTrainer:
             tune_kwargs: Arguments forwarded to ``YOLO.tune``. Keep tuner-specific
                 options here, such as ``iterations`` and ``space``.
             export_kwargs: Kwargs forwarded to ``YOLO.model.export``. Check out the ultralytics export documentation for more.
+            mlflow_config: Optional tracking URI and experiment names loaded from YAML.
             event_callback: Optional extra Ultralytics callback as ``(event, fn)``.
                 This is registered in addition to the built-in metric recorder.
             trainer: Optional Ultralytics trainer passed through to ``YOLO.train``.
@@ -56,6 +136,7 @@ class YoloDetectionTrainer:
         self.train_kwargs = train_kwargs
         self.history: dict[int, dict[str, Any]] = {}
         self.export_kwargs = export_kwargs
+        self.mlflow_config = MlflowTrackingConfiguration.from_mapping(mlflow_config)
         self.model = YOLO(str(self.model_name))
 
     @classmethod
@@ -80,10 +161,12 @@ class YoloDetectionTrainer:
         train_kwargs = config.pop("train_kwargs", {})
         tune_kwargs = config.pop("tune_kwargs", {})
         export_kwargs = config.pop("export_kwargs", {})
+        mlflow_config = config.pop("mlflow", None)
         return cls(
             **config,
             tune_kwargs=tune_kwargs,
             export_kwargs=export_kwargs,
+            mlflow_config=mlflow_config,
             **train_kwargs,
         )
 
@@ -194,6 +277,8 @@ class YoloDetectionTrainer:
             ValueError: If ``return_format`` is not ``"dict"`` or ``"dataframe"``.
         """
         return_format = return_format or self.return_format
+        if self.mlflow_config is not None:
+            self.mlflow_config.configure("train")
         self.model.add_callback("on_fit_epoch_end", self.collect_metrics)
         if self.event_callback is not None:
             for event, callback in self.event_callback:
@@ -235,6 +320,8 @@ class YoloDetectionTrainer:
             ``train_kwargs`` provide the normal training defaults, while
             ``tune_kwargs`` can override them for shorter or cheaper tuning runs.
         """
+        if self.mlflow_config is not None:
+            self.mlflow_config.configure("tune")
         tune_kwargs = self.tune_kwargs.copy()
         if "space" in tune_kwargs:
             tune_kwargs["space"] = self.tune_space()
@@ -299,6 +386,7 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
         return_format: Literal["dict", "dataframe"] = "dict",
         tune_kwargs: dict[str, Any] | None = None,
         export_kwargs: dict[str, Any] | None = None,
+        mlflow_config: Mapping[str, str] | None = None,
         event_callback: list[tuple[str, Callable]] | None = None,
         trainer=None,
         **train_kwargs,
@@ -318,6 +406,7 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
                 format is passed there.
             tune_kwargs: Arguments forwarded to ``YOLO.tune``.
             export_kwargs: Kwargs forwarded to ``YOLO.export``.
+            mlflow_config: Optional tracking URI and experiment names loaded from YAML.
             event_callback: Optional extra Ultralytics callbacks as ``(event, fn)``.
             trainer: Optional Ultralytics trainer passed through to ``YOLO.train``.
             **train_kwargs: Additional keyword arguments forwarded to ``YOLO.train``.
@@ -329,6 +418,7 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
             return_format=return_format,
             tune_kwargs=tune_kwargs,
             export_kwargs=export_kwargs,
+            mlflow_config=mlflow_config,
             event_callback=event_callback,
             trainer=trainer,
             **train_kwargs,
@@ -353,7 +443,13 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
         config = yaml.safe_load(config_path.read_text())
         train_kwargs = config.pop("train_kwargs", {})
         tune_kwargs = config.pop("tune_kwargs", {})
-        return cls(**config, tune_kwargs=tune_kwargs, **train_kwargs)
+        mlflow_config = config.pop("mlflow", None)
+        return cls(
+            **config,
+            tune_kwargs=tune_kwargs,
+            mlflow_config=mlflow_config,
+            **train_kwargs,
+        )
 
     def data_yaml(self) -> Path:
         """Resolve the configured classification dataset root.
