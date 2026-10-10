@@ -3,20 +3,20 @@ name = "rodent-experiments"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "dvc>=3.67.1",
-    "numpy>=2.4.6",
-    "ollama>=0.6.2",
-    "pandas>=3.0.3",
-    "PyYAML>=6.0",
-    "tqdm>=4.69.0",
-    "ultralytics>=8.4.68",
-    "vllm>=0.8",
-    "requests>=2.0",
+    "mlflow>=3.17.0",
+    "ollama>=0.6.3",
+    "pandas>=3.0.6",
+    "pygbif>=0.7.0",
     "pyinaturalist>=0.21.1",
-    "pygbif>=0.6.6",
-    "python-dotenv>=1.0",
+    "python-dotenv>=1.2.4",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+    "speciesnet>=1.0",
+    "tqdm>=4.70.1",
+    "ultralytics>=8.4.174",
 ]
 
 [build-system]
@@ -25,13 +25,16 @@ build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pytest-cov",
-    "coverage",
-    "pre-commit",
-    "pytest-mock",
-    "hypothesis",
+    "coverage>=7.16.2",
+    "hypothesis>=6.168.5",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-mock>=3.16.0",
 ]
+
+vllm = [
+    "vllm==0.28.0",
+] # needs uv pip install "vllm==0.28.0" --torch-backend=auto to resolve bug: https://github.com/vllm-project/vllm/issues/58236
 
 [tool.pytest]
 # Script entry points live outside the installed src package.
@@ -39,6 +42,7 @@ pythonpath = ["."]
 markers = [
     "network: test hits the live iNaturalist API (deselect with -m 'not network')",
     "vlm_integration: test requires a real Ollama server or vLLM-capable GPU",
+    "speciesnet_integration: opt-in test using real SpeciesNet inference and model weights",
 ]
 
 [tool.coverage.run]

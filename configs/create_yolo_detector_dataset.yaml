@@ -1,0 +1,16 @@
+# Run: python scripts/create_yolo_dataset.py configs/create_yolo_detector_dataset.yaml
+# Reads already-split per-species records.csv files and symlinks source images.
+# Paths are relative to the working directory (normally the project root).
+data:
+  YoloDetectorDatasetCreatorFromSpeciesnet:
+    path_to_image_data: datasets/stage7_filtered_data_sampled_oversampled
+    dataset_output_path: datasets/stage8_yolo_detector
+    # null discovers all species; a list selects directories in class-index order.
+    class_names: null
+    # Explicitly use the SpeciesNet version configured on the development branch.
+    # Weights load lazily on the first nonempty inference request.
+    model_name: kaggle:google/speciesnet/pyTorch/v4.0.3b/1
+    batch_size: 64
+    confidence_threshold: 0.25
+    allowed_classes: [animal]
+    iou_threshold: 0.45

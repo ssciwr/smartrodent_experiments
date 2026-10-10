@@ -32,6 +32,7 @@ uv.lock
 
 # dataset stuff
 datasets
+datasets_backup
 
 # training
 training
@@ -40,3 +41,12 @@ outputs
 
 # env files
 .env
+
+# tests
+.coverage
+
+# local MLflow tracking
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
+mlartifacts/

@@ -61,35 +61,112 @@ The downloader creates one directory per species, containing `records.csv` and
 an `imgs/` directory. It copies the YAML configuration into the output
 directory for provenance. Downloaded data stays local and is not committed.
 
+## Portable dataset paths
+
+Keep the original `inaturalist/` directory and every stage directory as direct
+children of one shared dataset root, such as `datasets/`. CSV `image_path` values
+are relative to that root, for example `inaturalist/Mus musculus/imgs/123_0.jpg`.
+They are not relative to the CSV or the working directory, and keep the same
+meaning across stages.
+
+Materialized review images and YOLO detector images use symlinks whose targets
+are relative to each link's directory. Moving or copying the entire dataset tree
+while preserving symlinks keeps these links and CSV references valid. Moving an
+individual stage or rearranging the internal tree is not supported. Configuration
+input/output directory settings still need to point at the relocated stages.
+
+Legacy absolute image paths remain readable, but newly written CSVs use relative
+paths. Existing data is not automatically converted; old absolute CSV references
+and symlinks are not portable until their outputs are regenerated. No path-prefix
+migration utility is needed for datasets produced with this convention.
+
 ## DVC usage
 
-The `download_inaturalist` DVC stage runs the downloader with
-`config/dataset_full.yaml`. The `inaturalist` configuration mapping is tracked
-as DVC parameters, while the downloader script and implementation are tracked
-as code dependencies.
+[`dvc.yaml`](dvc.yaml) declares the complete RGB pipeline: iNaturalist download,
+three VLM filtering steps, materialization, human-decision reconciliation,
+train/validation/test splitting, oversampling, YOLO detector and classifier
+dataset creation, detector/classifier training, and classifier tuning. The
+detector and classifier branches share the stage-7 sampled records, then run
+independently from their respective stage-8 datasets.
 
-Check whether the stage is up to date:
+Inspect the graph or status without running any stage:
 
 ```bash
+uv run dvc dag
 uv run dvc status
 ```
 
-Run or reproduce the configured download:
+`dvc repro` executes the requested stage and its missing dependencies; it can
+download data, run VLM/SpeciesNet inference, and train models. Use it only when
+those writes and compute costs are intended, for example:
 
 ```bash
-uv run dvc repro download_inaturalist
+uv run dvc repro train_yolo_detector
 ```
 
-The stage deliberately has no declared DVC outputs. This lets `output_path`
-refer to an external or large local dataset without DVC attempting to cache or
-version the images. Edit the YAML to change the destination or dataset
-parameters, then rerun the stage.
-
-To run the downloader without DVC:
+To run only the downloader without DVC:
 
 ```bash
-uv run python scripts/download_inaturalist_data.py config/dataset_full.yaml
+uv run python scripts/download_inaturalist_data.py configs/data_config_full.yaml
 ```
+
+## YOLO dataset creation
+
+Both dataset creators implement the `Configurable` protocol and provide
+`from_config(config_path)`. See
+[`configs/create_yolo_detector_dataset.yaml`](configs/create_yolo_detector_dataset.yaml)
+and
+[`configs/create_yolo_classifier_dataset.yaml`](configs/create_yolo_classifier_dataset.yaml).
+Under `data`, the configuration key is the exact creator class name:
+`YoloDetectorDatasetCreatorFromSpeciesnet` or
+`YoloClassifierDatasetCreatorFromSpeciesnet`. Input/output paths are interpreted
+relative to the working directory, not the YAML file's directory.
+
+`path_to_image_data` and `dataset_output_path` are required. Optional `class_names`
+selects species directories; omit it or use `null` to discover all species.
+Optional `model_name` selects SpeciesNet weights; omit it or use `null` for the
+default model. Injected model objects are supported through the Python constructor,
+not YAML. Loading a configuration reads metadata but does not load model weights
+or create output files.
+
+```python
+from smartrodent.yolo_dataset_creation import YoloDetectorDatasetCreatorFromSpeciesnet
+
+creator = YoloDetectorDatasetCreatorFromSpeciesnet.from_config(
+    "configs/create_yolo_detector_dataset.yaml"
+)
+# Explicitly writes the configured dataset; only run after checking its paths.
+creator.create()
+```
+
+Alternatively, run the shared script with a **positional configuration path**.
+It selects the creator from the class-named key; exactly one creator is allowed.
+Check the configured paths before running: these commands write dataset outputs.
+
+```bash
+uv run python scripts/create_yolo_dataset.py configs/create_yolo_detector_dataset.yaml
+uv run python scripts/create_yolo_dataset.py configs/create_yolo_classifier_dataset.yaml
+```
+
+Use `YoloClassifierDatasetCreatorFromSpeciesnet` with the classifier configuration
+for crop-based classification output. The example destinations are
+`datasets/stage8_yolo_detector` and `datasets/stage8_yolo_classifier`; stage numbering
+is a convention, not an enforced restriction. Creation preserves existing splits
+and oversampled rows and requires a new destination directory.
+
+## YOLO classification: class-index ordering
+
+`YoloClassificationTrainer` passes the classification dataset directory to
+Ultralytics, which derives class indices from **alphabetically sorted species
+folder names under `train/`**. It does not use the `names` ordering in `data.yaml`.
+Even when a YAML file is passed to the trainer, only its `path` is used to locate
+the classification dataset.
+
+An explicit dataset-creator `class_names` order can therefore differ from the
+trained classifier's index order. **Use the trained model's `names` mapping to
+interpret prediction indices**, rather than the creator's class list or YAML.
+This differs from detection training, which uses the class-index mapping in
+`data.yaml`.
 
 ## Tests
 

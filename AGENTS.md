@@ -3,7 +3,7 @@ The "rodent-experiments" project is a python-based data science project dealing 
 object-detection and classification of camera trap images of small animals: rodents, snakes, some birds, both for RGB only and RGB-T.
 
 ## Tech stack
-- python >= 3.13
+- python >= 3.12
 - DVC for data management and pipeline definition
 - pandas and matplotlib for data analysis
 - ultralytics with yolo26 for general object detection and image classification, and model fine tuning
@@ -34,6 +34,7 @@ This project uses DVC as its core driver.
 - never commit secrets into git, e.g., API keys
 - never edit code without asking first and giving a clear step-by-step plan first
 - never modify the data in the ./datasets directory unless explicitly told to do so. It contains the data of the project in various stages or. processing and must hence be held sacred! If told to modify it, raise the concern that this is normally forbidden first, plan out a step-by-step workflow and ask for explicit permission to execute it first.
+- config files are treated as ephemeral and do not need tests
 
 ## Coding guidelines
 - Adhere to SOLID principles
@@ -67,3 +68,4 @@ except Exception as e:  # unknown exception branch for unexpected stuff
 - all public methods and classes should have google style docstrings
 - all private methods or classes should have at least freeform docstrings
 - code should have explanatory comments that explains decisions taken where multiple alternatives would be possible or where a certain algorithm to solve a problem is first introduced
+- adhere to clean code principles with practical application of the principles of "Clean Code" by Robert C. Martin, and "Refactoring" by Martin Fowler, but with relaxed rules on naming conventions and function length. The code should be readable and understandable, but not necessarily follow strict naming conventions or have very short functions. The focus is on clarity and maintainability rather than strict adherence to style guides.

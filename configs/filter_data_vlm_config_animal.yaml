@@ -1,28 +1,35 @@
 backend: vllm # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
+taskname: animal
+labels: [kept, rejected]
+columns:
+  photo_id: photo.id
+  image_path: image_path
 
 paths:
-  imgs_root: smartrodent_experiments/datasets/full_dataset/raw
-  image_suffixes: [.jpg, .jpeg, .png]
+  input_root: datasets/inaturalist
+  output_root: datasets/stage1_filtered_animal
 
 ollama:
   model: qwen3.6:35b-a3b
   # model: qwen3-vl:8b
 
 vllm:
-  # model: Qwen/Qwen2.5-VL-3B-Instruct
+  # model: Qwen/Qwen3.6-35B-A3B
   model: Qwen/Qwen3.8-27B
   gpu_memory_utilization: 0.97
-  max_new_tokens: 500
-  batch_size: 24
-  tensor-parallel-size: 8
+  # max_new_tokens: 500
+  batch_size: 8
+  # tensor-parallel-size: 8
   max-model-len: 262144
-mode: symlink
-
 system_prompt: |
   You are a meticulous wildlife biologist and expert camera-trap image analyst. You
   have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
   grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
-  report evidence you can actually see in the image and never guess.
+  report evidence you can actually see in the image and never guess. Check the
+  entire image for visible humans or human body parts and for animals being held,
+  restrained, trapped, or confined in human-made containers. Distinguish freely
+  roaming wildlife in human-made surroundings from captive or staged animals.
+  Camera traps record animals without capturing them and are allowed.
 
 prompt: |
   You are classifying wildlife images.
@@ -43,8 +50,26 @@ prompt: |
   - Use "rejected" only for clear evidence of:
     - dead animal: carcass, roadkill, skull, bones, preserved specimen, visibly rejected body.
     - non-terrestrial animal, non-bird or no animal at all: fish, plant, landscape without animal in it
-  - Use "kept" only if a live animal is visible and can be identified as such.
-  - needs_human_review should be true for poor/unusable images, or conflicting
-    evidence.
+    - any visible human or human body part anywhere in the image, including hands,
+      fingers, arms, legs, feet, faces, or partial figures, even if a live animal
+      is also visible.
+    - an animal outside a natural, freely roaming setting: visibly held, handled,
+      restrained, captive, or staged for photography; inside a capture trap or
+      cage; or contained in a human-made vessel such as a bucket, jar, glass,
+      bottle, tank, box, or similar container.
+  - Human-made surroundings alone are NOT a reason to reject an image. Allow
+    freely roaming animals in house gardens, yards, streets, around buildings,
+    or similar places, provided no rejection rule applies.
+  - Camera-trap images and visible camera-trap equipment are allowed. A camera
+    trap photographs animals; a capture trap catches or confines them. Reject
+    animals visibly caught or confined in capture traps, not camera-trap images.
+  - Use "kept" only if a live animal is visible and can be identified as such,
+    and none of the rejection rules applies. Clear rejection evidence takes
+    precedence over the presence of a live animal.
+  - Do not infer humans, captivity, confinement, or staging from the image source
+    or human-made surroundings alone. If the evidence is ambiguous, do not guess;
+    set needs_human_review to true.
+  - needs_human_review should be true for poor/unusable images, ambiguous context,
+    or conflicting evidence.
   - Do not include markdown.
   - Do not include text outside the JSON object.

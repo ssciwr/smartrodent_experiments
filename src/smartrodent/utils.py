@@ -1,6 +1,13 @@
 from collections.abc import Sequence
 from pathlib import Path
+import re
 from typing import Any
+
+
+def path_component(value: str) -> str:
+    """Return a readable value that is safe to use as a directory or file name."""
+    value = re.sub(r"[^A-Za-z0-9._ -]+", "_", value).strip(" ._")
+    return value or "unknown"
 
 
 def assign_at_path(cfg: dict, path: Sequence[Any], value: Any) -> None:
