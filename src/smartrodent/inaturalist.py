@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import shutil
 import time
 from collections.abc import Sequence
@@ -595,7 +596,8 @@ class InaturalistDataset(DatasetLoader):
     def download_images(self) -> None:
         """Download allowed photos from saved records, skipping existing images.
 
-        No species records are retrieved during this phase.
+        No species records are retrieved during this phase. Saved image paths
+        are relative to the shared dataset root (the parent of ``output_path``).
 
         Raises:
             FileNotFoundError: If a species has no saved records. Run
@@ -622,5 +624,16 @@ class InaturalistDataset(DatasetLoader):
             downloaded, records_df = self._download_species_images(
                 records_df, images_path
             )
+            if "image_path" in records_df.columns:
+                # Skipped or undownloaded photos can lack a path. na_action="ignore"
+                # retains those missing values and rows without warning or filling
+                # in an image path that was never established.
+                records_df["image_path"] = records_df["image_path"].map(
+                    lambda path: os.path.relpath(
+                        (self.output_path.parent / path).resolve(),
+                        self.output_path.parent,
+                    ),
+                    na_action="ignore",
+                )
             records_df.to_csv(records_path, index=False)
             self.logger.info("Downloaded %s images for %s", downloaded, species)
