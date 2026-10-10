@@ -406,7 +406,11 @@ class TrainingDatasetSampler(Configurable):
         multiplier ``m``, each training stratum receives
         ``ceil(m * original_stratum_rows)`` total rows. The sampling sequence is
         seeded: it chooses an observation uniformly, then an image uniformly
-        from that observation.
+        from that observation. Validation, rule resolution, and sampling process
+        species in sorted order, and rules receive a species-sorted population
+        mapping. Results are independent of input species-key order, while the
+        returned mapping retains that order. Input row order is preserved, not
+        normalized: row-order independence is not guaranteed.
 
         This method must follow :class:`DatasetSplitter`; it relies on its
         ``dataset_split`` column to isolate training rows. Applying it first can
@@ -428,6 +432,10 @@ class TrainingDatasetSampler(Configurable):
         # Materialize the mapping once: rules receive the complete, original
         # population and none of their inputs are modified by this sampler.
         frames = dict(records_by_species)
+        species_order = tuple(frames)
+        # Canonicalize both rule context and RNG consumption, independently of
+        # caller insertion order. Keep the original keys for output presentation.
+        frames = {species: frames[species] for species in sorted(frames)}
         # Validate all frames before calling a rule or sampling. A malformed
         # later species must not leave callers with a partially built result.
         for species, frame in frames.items():
@@ -441,13 +449,14 @@ class TrainingDatasetSampler(Configurable):
             )
             for species, frame in frames.items()
         }
-        # One seeded generator makes the full mapping reproducible. Iterating
-        # the supplied mapping also preserves its species-key order in output.
+        # A shared seeded generator consumes randomness in canonical species
+        # order; output key order must not influence which copies are selected.
         rng = np.random.default_rng(self.rng_seed)
-        return {
+        sampled = {
             species: self._sample_species(frame, multipliers[species], rng)
             for species, frame in frames.items()
         }
+        return {species: sampled[species] for species in species_order}
 
     def _validate_frame(self, species: str, frame: pd.DataFrame) -> None:
         """Validate fields needed to select coherent training observations."""

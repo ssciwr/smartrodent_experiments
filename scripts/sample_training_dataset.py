@@ -13,19 +13,35 @@ from smartrodent.dataset_splitting import TrainingDatasetSampler
 def compute_oversampling(
     species_name: str, frame: pd.DataFrame, all_frames: dict[str, pd.DataFrame]
 ) -> float:
+    """Scale nonempty species toward ten percent of the largest population.
 
-    full_size = sum(len(df) for df in all_frames.values())
-    all_sizes = {k: len(df) / full_size for k, df in all_frames.items()}
-    max_size = max(all_sizes.values())
-    current_size = all_sizes[species_name]
-    target_size = 0.1 * max_size
+    Counts use full split frames, while the sampler applies the multiplier only
+    to training rows. Empty species receive one: sampling cannot invent source
+    rows, and this also makes an entirely empty population safe.
 
+    Args:
+        species_name: Species identifier supplied by the sampler's rule interface.
+        frame: Full split metadata for this species.
+        all_frames: Complete species population, including this species' frame.
+
+    Returns:
+        A multiplier of at least one; one leaves existing rows unchanged.
+    """
+    current_size = len(frame)
+    if current_size == 0:
+        print("sampling to 1.0")
+        return 1.0
+
+    # Population normalization cancels in the target/current ratio. Using counts
+    # directly avoids division by the total population, including an empty one.
+    target_size = 0.1 * max(len(records) for records in all_frames.values())
     if current_size >= target_size:
         print("sampling to 1.0")
         return 1.0
     else:
-        print("sampling to: ", target_size / current_size)
-        return target_size / current_size
+        multiplier = target_size / current_size
+        print("sampling to: ", multiplier)
+        return multiplier
 
 
 def main(config_path: Path) -> None:
