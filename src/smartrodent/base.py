@@ -78,7 +78,8 @@ class YoloDatasetCreatorBase(Configurable, ABC):
             dataset_output_path: Destination for the generated dataset.
             class_names: Optional species-directory selection in class-index order.
                 None discovers all species directories in sorted order. Relative
-                image paths are resolved against their species records.csv directory.
+                image paths are resolved against the shared dataset root, the parent
+                of ``path_to_image_data``.
 
         Raises:
             ValueError: The input root or selected metadata is invalid.
@@ -142,7 +143,7 @@ class YoloDatasetCreatorBase(Configurable, ABC):
                 f"{species}: image_path must contain nonempty path strings"
             )
         records["image_path"] = records["image_path"].map(
-            lambda path: self._resolve_image_path(path, records_path.parent)
+            lambda path: self._resolve_image_path(path, self.path_to_image_data.parent)
         )
         return records
 
@@ -163,11 +164,11 @@ class YoloDatasetCreatorBase(Configurable, ABC):
             )
 
     @staticmethod
-    def _resolve_image_path(image_path: str, records_directory: Path) -> str:
-        """Resolve source paths explicitly and reject missing images."""
+    def _resolve_image_path(image_path: str, dataset_root: Path) -> str:
+        """Resolve shared-root source paths explicitly and reject missing images."""
         path = Path(image_path)
         if not path.is_absolute():
-            path = records_directory / path
+            path = dataset_root / path
         path = path.resolve()
         if not path.is_file():
             raise FileNotFoundError(f"image_path does not refer to a file: {path}")

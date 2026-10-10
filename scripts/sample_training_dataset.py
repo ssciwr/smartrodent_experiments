@@ -1,6 +1,7 @@
 """Oversample training rows in already split per-species metadata."""
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -48,13 +49,15 @@ def main(config_path: Path) -> None:
     """Oversample training records and save metadata, config, and script source.
 
     Copy this script, including its custom oversampling rule, into the output
-    root before sampling. Reruns replace the config and source snapshots.
+    root before sampling. Reruns replace the config and source snapshots. Saved
+    image references use the shared dataset root, the parent of the input stage.
 
     Args:
         config_path: YAML file containing sampler paths and settings.
     """
     config = yaml.safe_load(config_path.read_text())
     input_root = Path(config["paths"]["training_dataset_sampler_input"])
+    dataset_root = input_root.resolve().parent
     output_root = Path(config["paths"]["training_dataset_sampler_output"])
     output_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(config_path, output_root / config_path.name)
@@ -71,6 +74,15 @@ def main(config_path: Path) -> None:
     for species, records in sampled_records.items():
         output_path = output_root / species / "records.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        if "image_path" in records.columns:
+            # na_action="ignore" preserves missing paths without warnings;
+            # metadata sampling does not validate image availability.
+            records["image_path"] = records["image_path"].map(
+                lambda path: os.path.relpath(
+                    (dataset_root / path).resolve(), dataset_root
+                ),
+                na_action="ignore",
+            )
         records.to_csv(output_path, index=False)
 
 

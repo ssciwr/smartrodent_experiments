@@ -122,14 +122,23 @@ def test_inaturalist_writes_shared_root_relative_paths_and_can_resume_after_move
     unexpected_download.assert_not_called()
 
 
+@pytest.mark.parametrize("absolute_input", [False, True])
 def test_filter_reads_from_shared_root_and_preserves_paths_for_all_species(
-    bundle, tmp_path, monkeypatch
+    bundle, tmp_path, monkeypatch, absolute_input
 ):
     """Inference can read originals without persisting machine-specific paths."""
     dataset_root, records_by_species = bundle
     input_root = dataset_root / "inaturalist"
     output_root = dataset_root / "stage1_filtered"
-    _write_records(input_root, records_by_species)
+    input_records = {
+        species: records.copy() for species, records in records_by_species.items()
+    }
+    if absolute_input:
+        for records in input_records.values():
+            records["image_path"] = records["image_path"].map(
+                lambda path: str(dataset_root / path)
+            )
+    _write_records(input_root, input_records)
     snapshots = {
         species: (input_root / species / "records.csv").read_bytes()
         for species in records_by_species
@@ -278,8 +287,9 @@ def test_reconciliation_preserves_shared_root_paths_after_bundle_move(bundle, tm
             )
 
 
+@pytest.mark.parametrize("absolute_input", [False, True])
 def test_splitting_and_sampling_preserve_shared_root_paths_without_rebasing(
-    bundle, tmp_path
+    bundle, tmp_path, absolute_input
 ):
     """Metadata-only stages keep the same original-image references verbatim."""
     dataset_root, records_by_species = bundle
@@ -287,7 +297,12 @@ def test_splitting_and_sampling_preserve_shared_root_paths_without_rebasing(
     for species, records in records_by_species.items():
         directory = corrected_root / "kept" / species
         directory.mkdir(parents=True)
-        records.to_csv(directory / "records_corrected.csv", index=False)
+        input_records = records.copy()
+        if absolute_input:
+            input_records["image_path"] = input_records["image_path"].map(
+                lambda path: str(dataset_root / path)
+            )
+        input_records.to_csv(directory / "records_corrected.csv", index=False)
     split_root = dataset_root / "stage6_split"
     split_config = _write_config(
         tmp_path / "split.yaml",
@@ -336,6 +351,50 @@ def test_splitting_and_sampling_preserve_shared_root_paths_without_rebasing(
             assert actual["image_path"].tolist() == original["image_path"].tolist()
             assert set(actual["dataset_split"]) == {"train", "validation", "test"}
             assert all((moved_root / path).is_file() for path in actual["image_path"])
+
+
+def test_sampling_writes_portable_paths_from_legacy_absolute_records(bundle, tmp_path):
+    """Sampling also normalizes absolute inputs without altering their source CSVs."""
+    dataset_root, records_by_species = bundle
+    split_root = dataset_root / "stage6_split"
+    input_records = {}
+    for species, records in records_by_species.items():
+        frame = records.copy()
+        frame["dataset_split"] = ["train", "validation", "test"] * 2
+        frame["image_path"] = frame["image_path"].map(
+            lambda path: str(dataset_root / path)
+        )
+        input_records[species] = frame
+    _write_records(split_root, input_records)
+    sampled_root = dataset_root / "stage7_sampled"
+    config = _write_config(
+        tmp_path / "sample_legacy.yaml",
+        {
+            "paths": {
+                "training_dataset_sampler_input": str(split_root),
+                "training_dataset_sampler_output": str(sampled_root),
+            },
+            "data": {
+                "training_dataset_sampler": {
+                    "group_columns": ["id"],
+                    "stratify_columns": [],
+                    "oversampling_rule": "scripts.sample_training_dataset:compute_oversampling",
+                }
+            },
+        },
+    )
+
+    sample_training_dataset.main(config)
+
+    moved_root = _move_bundle(dataset_root)
+    for species, original in records_by_species.items():
+        actual = pd.read_csv(moved_root / sampled_root.name / species / "records.csv")
+        assert actual["image_path"].tolist() == original["image_path"].tolist()
+        assert all((moved_root / path).is_file() for path in actual["image_path"])
+        pd.testing.assert_frame_equal(
+            pd.read_csv(moved_root / split_root.name / species / "records.csv"),
+            input_records[species],
+        )
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 """Annotate per-species metadata records using a configured VLM filter."""
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -11,7 +12,10 @@ from smartrodent import VLMFilter
 
 
 def main(config_path: Path) -> None:
-    """Filter input records and write annotated copies by species.
+    """Filter records using shared-root image paths and write portable CSVs.
+
+    Image paths are relative to the parent of input_root. Absolute paths are
+    used only while the backend reads originals, never in the output records.
 
     Args:
         config_path: YAML file containing VLM and input/output path settings.
@@ -19,6 +23,7 @@ def main(config_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     input_root = Path(config["paths"]["input_root"]).resolve()
     output_root = Path(config["paths"]["output_root"]).resolve()
+    dataset_root = input_root.parent
     if not input_root.is_dir():
         raise FileNotFoundError(f"Input root does not exist: {input_root}")
 
@@ -39,12 +44,25 @@ def main(config_path: Path) -> None:
         and records_path.parent.name not in selected_species
     }
 
+    # Resolve only at the inference boundary; the CSV anchor stays the same for
+    # every stage, including species that bypass this filtering task.
+    for records in records_by_species.values():
+        # na_action="ignore" keeps missing paths intact so VLMFilter can report
+        # invalid records, rather than path conversion raising a type error first.
+        records["image_path"] = records["image_path"].map(
+            lambda path: str((dataset_root / path).resolve()), na_action="ignore"
+        )
     filtered_records = VLMFilter.from_config(config_path).filter_data(
         records_by_species
     )
     for species, records in filtered_records.items():
         output_path = output_root / species / "records.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        # na_action="ignore" preserves missing values; conversion itself neither
+        # validates them nor emits warnings.
+        records["image_path"] = records["image_path"].map(
+            lambda path: os.path.relpath(path, dataset_root), na_action="ignore"
+        )
         records.to_csv(output_path, index=False)
 
     # Get the task name and labels from the config, and create a list of task-specific label names
@@ -58,6 +76,12 @@ def main(config_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         for label in task_labels:
             records[label] = False
+        # Bypassed species are not validated by VLMFilter. na_action="ignore"
+        # deliberately preserves missing paths without warnings or dropping rows.
+        records["image_path"] = records["image_path"].map(
+            lambda path: os.path.relpath((dataset_root / path).resolve(), dataset_root),
+            na_action="ignore",
+        )
         records.to_csv(output_path, index=False)
 
 

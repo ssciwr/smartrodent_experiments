@@ -1,6 +1,7 @@
 """Split configured per-species metadata into train, validation, and test rows."""
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -56,7 +57,8 @@ def main(config_path: Path) -> None:
 
     Each input CSV's parent directory names its species. Outputs remain
     ``<output>/<species>/records.csv``, independent of the input layout.
-    Relative paths are interpreted from the working directory.
+    Config directory paths use the working directory. Image references are saved
+    relative to the shared dataset root, the parent of the configured input stage.
 
     Args:
         config_path: YAML file containing splitter paths, the required
@@ -72,6 +74,7 @@ def main(config_path: Path) -> None:
     """
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     input_root = Path(config["paths"]["dataset_splitter_input"])
+    dataset_root = input_root.resolve().parent
     output_root = Path(config["paths"]["dataset_splitter_output"])
     paths_by_species = _discover_species_records(
         input_root, config["paths"]["records_glob"]
@@ -87,6 +90,15 @@ def main(config_path: Path) -> None:
     for species, records in split_records.items():
         output_path = output_root / species / "records.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        if "image_path" in records.columns:
+            # na_action="ignore" preserves missing paths without warnings;
+            # metadata splitting does not validate image availability.
+            records["image_path"] = records["image_path"].map(
+                lambda path: os.path.relpath(
+                    (dataset_root / path).resolve(), dataset_root
+                ),
+                na_action="ignore",
+            )
         records.to_csv(output_path, index=False)
 
 

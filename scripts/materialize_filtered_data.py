@@ -1,3 +1,4 @@
+import os
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
@@ -16,8 +17,9 @@ def main(config_path: Path) -> None:
     Args:
         config_path: YAML file containing input_dir and output_directory, with
             optional deciding_column_name_start (default: rejected). Records
-            must contain an image_path column. Relative directory and image
-            paths are interpreted from the working directory.
+            must contain an image_path column. Config directory paths use the
+            working directory; image paths use the shared dataset root, the parent
+            of input_dir. Outputs retain shared-root-relative image references.
 
     Raises:
         NotADirectoryError: The input directory does not exist or is not a directory.
@@ -29,6 +31,7 @@ def main(config_path: Path) -> None:
     config = yaml.safe_load(config_contents)
     input_dir = Path(config["input_dir"]).resolve()
     output_root = Path(config["output_directory"]).resolve()
+    dataset_root = input_dir.parent
     deciding_col_start: str = config.get("deciding_column_name_start", "rejected")
     if not input_dir.is_dir():
         raise NotADirectoryError(input_dir)
@@ -48,6 +51,13 @@ def main(config_path: Path) -> None:
                 f"{path / 'records.csv'}: image_path values must not be null"
             )
 
+        # All stages share this anchor: moving records between stages needs no
+        # rebasing. Absolute legacy inputs remain readable, but outputs are relative.
+        records["image_path"] = records["image_path"].map(
+            lambda image_path: os.path.relpath(
+                (dataset_root / image_path).resolve(strict=True), dataset_root
+            )
+        )
         deciding_cols = [
             column
             for column in records.columns
@@ -77,7 +87,7 @@ def main(config_path: Path) -> None:
             output_csv = output_dir / (path / "records.csv").name
             for image_path in filtered["image_path"]:
                 print(image_path)
-                source = Path(image_path).resolve(strict=True)
+                source = (dataset_root / image_path).resolve(strict=True)
                 destination = image_dir / Path(image_path).name
                 _symlink_image(source, destination)
             filtered.to_csv(output_csv, index=False)
@@ -108,7 +118,7 @@ def _symlink_image(source: Path, destination: Path) -> None:
     elif destination.exists() or destination.is_symlink():
         raise FileExistsError(f"Conflicting output image: {destination}")
     else:
-        destination.symlink_to(source)
+        destination.symlink_to(os.path.relpath(source, destination.parent))
 
 
 def parse_args() -> Namespace:

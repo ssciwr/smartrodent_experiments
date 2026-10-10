@@ -62,9 +62,11 @@ def test_partitions_preserve_records_and_link_targets(tmp_path):
     for partition, indices in (("kept", [0]), ("rejected", [1, 2, 3])):
         directory = tmp_path / partition / "mouse"
         actual = pd.read_csv(directory / csv_path.name)
-        pd.testing.assert_frame_equal(
-            actual, records.iloc[indices].reset_index(drop=True)
+        expected = records.iloc[indices].copy()
+        expected["image_path"] = expected["image_path"].map(
+            lambda path: str(Path(path).relative_to(tmp_path))
         )
+        pd.testing.assert_frame_equal(actual, expected.reset_index(drop=True))
         assert {path.name for path in directory.iterdir()} == {csv_path.name, "imgs"}
         assert {path.name for path in (directory / "imgs").iterdir()} == {
             paths[index].name for index in indices
@@ -107,7 +109,12 @@ def test_no_rejection_columns_keeps_all_rows(tmp_path):
     records.to_csv(csv_path, index=False)
     main(_write_config(csv_path.parent.parent))
     pd.testing.assert_frame_equal(
-        pd.read_csv(tmp_path / "kept" / "mouse" / "records.csv"), records
+        pd.read_csv(tmp_path / "kept" / "mouse" / "records.csv"),
+        records.assign(
+            image_path=records["image_path"].map(
+                lambda path: str(Path(path).relative_to(tmp_path))
+            )
+        ),
     )
     assert pd.read_csv(tmp_path / "rejected" / "mouse" / "records.csv").empty
 
@@ -208,7 +215,10 @@ def test_image_named_records_csv_is_separate_from_output_csv(tmp_path):
     assert image.read_bytes() == b"image"
     assert not (directory / "records.csv").is_symlink()
     pd.testing.assert_frame_equal(
-        pd.read_csv(directory / "records.csv"), records.iloc[[0]].reset_index(drop=True)
+        pd.read_csv(directory / "records.csv"),
+        records.iloc[[0]]
+        .assign(image_path=[str(image.relative_to(tmp_path))])
+        .reset_index(drop=True),
     )
 
 

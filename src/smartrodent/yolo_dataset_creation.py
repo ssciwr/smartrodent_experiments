@@ -1,6 +1,7 @@
 """Prepare record-based YOLO datasets and provide SpeciesNet batch inference."""
 
 import json
+import os
 from abc import abstractmethod
 from collections.abc import Sequence
 from copy import deepcopy
@@ -560,7 +561,9 @@ class YoloDetectorDatasetCreatorFromSpeciesnet(_SpeciesNetDatasetCreatorBase):
         split = row["dataset_split"]
         image_path = Path("images") / split / f"{stem}{source.suffix}"
         label_path = Path("labels") / split / f"{stem}.txt"
-        (self.dataset_output_path / image_path).symlink_to(source)
+        destination = self.dataset_output_path / image_path
+        # Filesystem links are relative to their own directory, unlike CSV paths.
+        destination.symlink_to(os.path.relpath(source, destination.parent))
         class_index = self.class_names.index(species)
         labels = []
         for detection in detections:

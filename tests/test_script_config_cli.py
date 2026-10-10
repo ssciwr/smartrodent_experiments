@@ -12,7 +12,6 @@ import pytest
         ("scripts.download_gbif_data", "_parse_args"),
         ("scripts.filter_data_vlm", "parse_args"),
         ("scripts.materialize_filtered_data", "parse_args"),
-        ("scripts.migrate_records", "parse_args"),
         ("scripts.sample_training_dataset", "_parse_args"),
         ("scripts.split_dataset", "_parse_args"),
         ("scripts.create_yolo_dataset", "_parse_args"),

@@ -69,6 +69,9 @@ def test_reconciliation_records_human_decisions_and_preserves_originals(
         output = tmp_path / "corrected" / subdir / "mouse"
         corrected = pd.read_csv(output / "records_corrected.csv", index_col=0)
         expected = original.iloc[[0]].copy()
+        expected["image_path"] = expected["image_path"].map(
+            lambda path: str(Path(path).relative_to(tmp_path))
+        )
         output_column = output_columns[subdir]
         expected[output_column] = True
         expected[f"not_{output_column}"] = False
@@ -168,8 +171,14 @@ def test_reconciliation_preserves_original_associations(rows):
         corrected_associations = set(
             corrected.loc[:, association_columns].itertuples(name=None, index=False)
         )
+        portable_original = original.copy()
+        portable_original["image_path"] = portable_original["image_path"].map(
+            lambda path: str(Path(path).relative_to(root.resolve()))
+        )
         original_associations = set(
-            original.loc[:, association_columns].itertuples(name=None, index=False)
+            portable_original.loc[:, association_columns].itertuples(
+                name=None, index=False
+            )
         )
         assert corrected_associations <= original_associations
 

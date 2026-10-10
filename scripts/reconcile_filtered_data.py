@@ -1,5 +1,6 @@
 """Record human corrections to materialized kept/rejected images."""
 
+import os
 import shutil
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
@@ -60,8 +61,9 @@ def main(config_path: Path) -> None:
     in more than one configured partition.
 
     Args:
-        config_path: Path to the reconciliation YAML file. Relative directory
-            and image paths are interpreted from the working directory.
+        config_path: Path to the reconciliation YAML file. Config directory paths
+            use the working directory. Image paths use the shared dataset root,
+            the parent of input_directory; corrected CSVs retain that convention.
 
     Raises:
         FileNotFoundError: A required configuration, CSV, image target, or
@@ -77,6 +79,7 @@ def main(config_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     original_dir = Path(config["input_directory"]).resolve()
     corrected_dir = Path(config["output_directory"]).resolve()
+    dataset_root = original_dir.parent
     relevant_subdirs = config["relevant_subdirs"]
     output_columns = config["output_columns"]
     if len(relevant_subdirs) != len(output_columns):
@@ -98,7 +101,7 @@ def main(config_path: Path) -> None:
                 )
             original_records = pd.read_csv(original_records_path)
             original_records["image_path"] = original_records["image_path"].apply(
-                lambda path: str(Path(path).resolve(strict=True))
+                lambda path: str((dataset_root / path).resolve(strict=True))
             )
 
             corrected_img_dir = (
@@ -134,6 +137,10 @@ def main(config_path: Path) -> None:
             )
 
     for corrected, output_path in pending_outputs:
+        # Absolute identities are used only for association validation, not storage.
+        corrected["image_path"] = corrected["image_path"].map(
+            lambda path: os.path.relpath(path, dataset_root)
+        )
         corrected.to_csv(output_path)
 
 
