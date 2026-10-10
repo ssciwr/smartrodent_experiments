@@ -61,6 +61,25 @@ The downloader creates one directory per species, containing `records.csv` and
 an `imgs/` directory. It copies the YAML configuration into the output
 directory for provenance. Downloaded data stays local and is not committed.
 
+## Portable dataset paths
+
+Keep the original `inaturalist/` directory and every stage directory as direct
+children of one shared dataset root, such as `datasets/`. CSV `image_path` values
+are relative to that root, for example `inaturalist/Mus musculus/imgs/123_0.jpg`.
+They are not relative to the CSV or the working directory, and keep the same
+meaning across stages.
+
+Materialized review images and YOLO detector images use symlinks whose targets
+are relative to each link's directory. Moving or copying the entire dataset tree
+while preserving symlinks keeps these links and CSV references valid. Moving an
+individual stage or rearranging the internal tree is not supported. Configuration
+input/output directory settings still need to point at the relocated stages.
+
+Legacy absolute image paths remain readable, but newly written CSVs use relative
+paths. Existing data is not automatically converted; old absolute CSV references
+and symlinks are not portable until their outputs are regenerated. No path-prefix
+migration utility is needed for datasets produced with this convention.
+
 ## DVC usage
 
 [`dvc.yaml`](dvc.yaml) declares the complete RGB pipeline: iNaturalist download,

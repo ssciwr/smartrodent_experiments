@@ -3,7 +3,7 @@ The "rodent-experiments" project is a python-based data science project dealing 
 object-detection and classification of camera trap images of small animals: rodents, snakes, some birds, both for RGB only and RGB-T.
 
 ## Tech stack
-- python >= 3.13
+- python >= 3.12
 - DVC for data management and pipeline definition
 - pandas and matplotlib for data analysis
 - ultralytics with yolo26 for general object detection and image classification, and model fine tuning
