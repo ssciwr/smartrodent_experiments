@@ -1,4 +1,0 @@
-image_root: datasets/filtered_stage3_snakes
-old_root: /home/hmack/projects/smartrodent_experiments
-new_root: /mnt/dataLinux/machinelearning_data/smartrodent/
-backup_name: records_original
