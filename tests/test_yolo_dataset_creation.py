@@ -133,14 +133,14 @@ def test_missing_required_columns_are_reported(creator_type, tmp_path, column):
         creator_type(root, tmp_path / "output")
 
 
-def test_relative_image_paths_resolve_against_species_records_directory(
+def test_relative_image_paths_resolve_against_shared_dataset_root(
     creator_type, tmp_path
 ):
-    """Relative paths are interpreted relative to their records.csv, not the cwd."""
+    """Relative paths use the stage's parent directory, not its species CSV."""
     root = tmp_path / "input"
     directory = write_species(root, "mouse", ["train"])
     records = pd.read_csv(directory / "records.csv")
-    records["image_path"] = ["photo_0.jpg"]
+    records["image_path"] = [str((directory / "photo_0.jpg").relative_to(root.parent))]
     records.to_csv(directory / "records.csv", index=False)
 
     creator = creator_type(root, tmp_path / "output")
