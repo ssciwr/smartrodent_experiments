@@ -9,6 +9,16 @@ stages:
     outs:
       - datasets/inaturalist
 
+  download_lila:
+    cmd: uv run python scripts/download_lila_data.py configs/data_config_lila.yaml
+    deps:
+      - scripts/download_lila_data.py
+    params:
+      - configs/data_config_lila.yaml:
+          - data.lila
+    outs:
+      - datasets/lila
+
   filter_animal:
     cmd: uv run python scripts/filter_data_vlm.py configs/filter_data_vlm_config_animal.yaml
     deps:

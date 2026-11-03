@@ -5,12 +5,16 @@ columns:
   photo_id: photo.id
   image_path: image_path
 
-paths:
-  input_root:datasets/filtered_stage1_animal
+paths: input_root:datasets/filtered_stage1_animal
   output_root:datasets/filtered_thermal
 
 ollama:
   model: qwen3.6:35b-a3b
+  options:
+    temperature: 0.1
+    repeat_penalty: 1.1
+    repeat_last_n: 64
+
   # model: qwen3-vl:8b
 
 vllm:

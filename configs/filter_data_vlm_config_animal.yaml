@@ -1,4 +1,4 @@
-backend: vllm # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
+backend: ollama # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
 taskname: animal
 labels: [kept, rejected]
 columns:
@@ -11,6 +11,12 @@ paths:
 
 ollama:
   model: qwen3.6:35b-a3b
+  num_workers: 1
+  options:
+    temperature: 0.1
+    repeat_penalty: 1.1
+    repeat_last_n: 64
+
   # model: qwen3-vl:8b
 
 vllm:

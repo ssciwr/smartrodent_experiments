@@ -86,7 +86,6 @@ def test_processing_scripts_copy_supplied_yaml(
     ("module_name", "dataset_name", "section"),
     [
         ("scripts.download_inaturalist_data", "InaturalistDataset", "inaturalist"),
-        ("scripts.download_gbif_data", "GbifDataset", "gbif"),
     ],
 )
 def test_download_entry_points_copy_config_before_download(
@@ -117,11 +116,8 @@ def test_download_entry_points_copy_config_before_download(
         downloads.append(dataset.output_path)
 
     monkeypatch.setattr(getattr(module, dataset_name), "download", download)
-    if section == "inaturalist":
-        monkeypatch.setattr("sys.argv", [module_name, str(config_path)])
-        runpy.run_path(module.__file__, run_name="__main__")
-    else:
-        module.main(config_path)
+    monkeypatch.setattr("sys.argv", [module_name, str(config_path)])
+    runpy.run_path(module.__file__, run_name="__main__")
     assert downloads == [output_root.resolve()]
 
 

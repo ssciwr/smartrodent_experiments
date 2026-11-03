@@ -430,6 +430,29 @@ def test_ollama_classify_uses_persistent_client(tmp_path):
     }
 
 
+def test_ollama_classify_uses_configured_generation_options(tmp_path):
+    image_path = tmp_path / "image.jpg"
+    image_path.write_bytes(b"abc")
+    configured_options = {
+        "temperature": 0.1,
+        "repeat_penalty": 1.1,
+        "repeat_last_n": 64,
+        "num_predict": 512,
+        "num_gpu": 0,
+    }
+    vlm_filter = make_ollama_filter(tmp_path, options=configured_options)
+
+    vlm_filter.classify(image_path)
+
+    assert vlm_filter.client.generate_calls[0]["options"] == configured_options
+
+
+@pytest.mark.parametrize("options", [[], {"": 1}, {1: 1}])
+def test_ollama_rejects_invalid_generation_options(tmp_path, options):
+    with pytest.raises(ValueError, match="Ollama options"):
+        make_ollama_filter(tmp_path, options=options)
+
+
 def test_ollama_closes_after_filtering(monkeypatch, tmp_path):
     records = make_records(tmp_path, [(55, None, "image.jpg")])
     vlm_filter = make_ollama_filter(tmp_path)
@@ -632,7 +655,16 @@ def test_from_config_passes_filter_settings(tmp_path):
                 "labels": ["kept", "rejected"],
                 "columns": {"photo_id": "photo.id", "image_path": "image_path"},
                 "paths": {},
-                "ollama": {"model": "llava", "pull_model": False},
+                "ollama": {
+                    "model": "llava",
+                    "pull_model": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "repeat_penalty": 1.1,
+                        "repeat_last_n": 64,
+                        "num_predict": 512,
+                    },
+                },
             }
         )
     )
@@ -644,6 +676,12 @@ def test_from_config_passes_filter_settings(tmp_path):
     assert vlm_filter.taskname == "animal"
     assert vlm_filter.photo_id_column == "photo.id"
     assert vlm_filter.image_path_column == "image_path"
+    assert vlm_filter.generation_options == {
+        "temperature": 0.1,
+        "repeat_penalty": 1.1,
+        "repeat_last_n": 64,
+        "num_predict": 512,
+    }
 
 
 def test_from_config_reads_vllm_settings_in_yaml(tmp_path):

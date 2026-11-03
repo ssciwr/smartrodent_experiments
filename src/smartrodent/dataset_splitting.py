@@ -56,7 +56,7 @@ class DatasetSplitter(Configurable):
 
         Args:
             group_columns: Composite observation key, e.g. ``("id",)`` for
-                iNaturalist or ``("source_group_id",)`` for GBIF.
+                iNaturalist and LILA records.
             stratify_columns: Columns defining strata within each species.
             train_val_test_split: Finite nonnegative train/validation/test row
                 fractions summing to one. Nonempty splits take precedence even

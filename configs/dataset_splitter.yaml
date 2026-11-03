@@ -20,7 +20,7 @@ paths:
 data:
   dataset_splitter:
     # Rows sharing all group-column values are an indivisible observation. Use
-    # [id] for iNaturalist records or [source_group_id] for GBIF records.
+    # [id] for iNaturalist and LILA records.
     group_columns: [id]
     # Columns whose joint distribution should be retained across splits. Add
     # e.g. country_code and year here when those strata are required.
