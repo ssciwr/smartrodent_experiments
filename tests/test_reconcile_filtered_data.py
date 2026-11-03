@@ -84,6 +84,22 @@ def test_reconciliation_records_human_decisions_and_preserves_originals(
     assert (tmp_path / "corrected" / config.name).read_bytes() == config.read_bytes()
 
 
+def test_image_moved_between_partitions_is_recorded(tmp_path, reconciliation):
+    """A human moving a rejected image into kept is the correction to record."""
+    config, originals = reconciliation
+    moved = Path(originals["rejected"].loc[1, "image_path"])
+    (tmp_path / "corrected" / "kept" / "mouse" / "imgs" / moved.name).symlink_to(moved)
+
+    main(config)
+
+    kept = pd.read_csv(
+        tmp_path / "corrected" / "kept" / "mouse" / "records_corrected.csv",
+        index_col=0,
+    )
+    assert str(moved.relative_to(tmp_path)) in set(kept["image_path"])
+    assert kept["kept_human"].all()
+
+
 @pytest.mark.parametrize("subdir", ["kept", "rejected"])
 def test_empty_partition_is_rejected(tmp_path, reconciliation, subdir):
     config, _ = reconciliation

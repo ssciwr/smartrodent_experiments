@@ -99,7 +99,24 @@ def main(config_path: Path) -> None:
                 raise ValueError(
                     f"Error, records not found for original path {original_species_dir}"
                 )
-            original_records = pd.read_csv(original_records_path)
+            # Humans move images between partitions, so an image sorted into
+            # this partition may come from any configured partition's records.
+            own_records = pd.read_csv(original_records_path)
+            original_records = pd.concat(
+                [own_records]
+                + [
+                    pd.read_csv(path)
+                    for source_subdir in relevant_subdirs
+                    if source_subdir != subdir
+                    and (
+                        path := original_dir
+                        / source_subdir
+                        / original_species_dir.name
+                        / "records.csv"
+                    ).is_file()
+                ],
+                ignore_index=True,
+            ).reindex(columns=own_records.columns)
             original_records["image_path"] = original_records["image_path"].apply(
                 lambda path: str((dataset_root / path).resolve(strict=True))
             )
