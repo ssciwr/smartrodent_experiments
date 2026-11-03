@@ -9,7 +9,7 @@ import pytest
 @pytest.mark.parametrize(
     ("module_name", "parser_name"),
     [
-        ("scripts.download_gbif_data", "_parse_args"),
+        ("scripts.download_lila_data", "_parse_args"),
         ("scripts.filter_data_vlm", "parse_args"),
         ("scripts.materialize_filtered_data", "parse_args"),
         ("scripts.sample_training_dataset", "_parse_args"),

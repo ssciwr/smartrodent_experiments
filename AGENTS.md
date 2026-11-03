@@ -11,7 +11,7 @@ object-detection and classification of camera trap images of small animals: rode
 - yaml for config files
 - jupyter for notebooks
 - speciesnet for camera-trap specific object detection
-- inaturalist and gbif for image acquisition
+- inaturalist and LILA for image acquisition
 - vllm and ollama for image filtering based on VLLM models
 - pytest as general testing framework and 'Hypothesis' for proprety-based testing
 

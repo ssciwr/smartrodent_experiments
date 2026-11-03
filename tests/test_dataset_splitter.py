@@ -43,7 +43,7 @@ def make_records(group_sizes, group_column="source_group_id"):
 
 
 def make_splitter(splitter_type, **kwargs):
-    """Configure the public interface with explicit GBIF grouping."""
+    """Configure the public interface with an explicit, non-default grouping column."""
     return splitter_type(group_columns=("source_group_id",), **kwargs)
 
 

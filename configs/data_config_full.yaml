@@ -5,7 +5,7 @@ data:
     first_year: 2000
     last_year: 2026
     quality_grade: research
-    species: &categories
+    species:
       - Rattus norvegicus # brown rat
       - Rattus rattus # black rat
       - Mus musculus # house mouse
@@ -65,19 +65,3 @@ data:
       - cc-by-sa
       - cc-by-nc
       - cc-by-nc-sa
-  gbif:
-    output_path: datasets/inaturalist
-    years: []
-    first_year: 2000
-    last_year: 2026
-    species: *categories
-    seed: 42
-    maxlen: 2500
-    allowed_licenses:
-      creative-commons:
-        - cc0
-        - cc-by
-        - cc-by-sa
-        - cc-by-nc
-        - cc-by-nc-sa
-    media_type: StillImage
