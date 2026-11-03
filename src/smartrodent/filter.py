@@ -10,6 +10,7 @@ import ollama
 import pandas as pd
 import yaml
 from tqdm.auto import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
 from .base import Filterable
 
@@ -115,6 +116,7 @@ class VLMFilter(Filterable):
                 **common,
                 model=config["ollama"]["model"],
                 pull_model=config["ollama"].get("pull_model", True),
+                num_workers=config["ollama"].get("num_workers", 1),
             )
         if backend == "vllm":
             settings = config["vllm"]
@@ -220,7 +222,7 @@ class VLMFilter(Filterable):
                     for configured_label, output_column in self.task_columns.items():
                         annotated.iloc[
                             positions, annotated.columns.get_loc(output_column)
-                        ] = (configured_label == label)
+                        ] = configured_label == label
                 results[species] = annotated
         finally:
             self.close()
@@ -281,17 +283,21 @@ class VLMFilter(Filterable):
 class FilterOllama(VLMFilter):
     """Classify dataframe image records using a persistent Ollama connection."""
 
-    def __init__(self, *, model: str, pull_model: bool = True, **kwargs):
+    def __init__(
+        self, *, model: str, pull_model: bool = True, num_workers: int = 4, **kwargs
+    ):
         """Initialize the Ollama-backed filter.
 
         Args:
             model: Ollama model name.
             pull_model: Whether to download the model if it is not local.
+            num_workers: Number of concurrent worker threads.
             **kwargs: Arguments forwarded to :class:`VLMFilter`.
         """
         super().__init__(**kwargs)
         self.client = ollama.Client()
         self.model = model
+        self.num_workers = num_workers
         self._closed = False
         if pull_model:
             self.logger.info("Download model")
@@ -328,10 +334,20 @@ class FilterOllama(VLMFilter):
 
     def _classify_paths(self, image_paths: list[Path]) -> list[dict]:
         """Classify each unique photo, preserving input order."""
-        return [
-            self.classify(path)
-            for path in tqdm(image_paths, desc="OLLAMA filtering images")
-        ]
+        if self.num_workers > 1:
+            with ThreadPoolExecutor(max_workers=self.num_workers) as pool:
+                return list(
+                    tqdm(
+                        pool.map(self.classify, image_paths),
+                        total=len(image_paths),
+                        desc="OLLAMA filtering images",
+                    )
+                )
+        else:
+            return [
+                self.classify(path)
+                for path in tqdm(image_paths, desc="OLLAMA filtering images")
+            ]
 
     def close(self) -> None:
         """Unload the model while leaving the externally managed daemon alive."""
