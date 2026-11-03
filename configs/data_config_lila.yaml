@@ -1,0 +1,91 @@
+data:
+  lila:
+    output_path: datasets/lila
+    index_url: https://lila.science/wp-content/uploads/2023/06/lila_camera_trap_datasets.csv
+    taxonomy_url: https://lila.science/public/lila-taxonomy-mapping_release.csv
+    # LILA dataset name (as in the LILA index) -> license. LILA publishes one
+    # license per dataset (on its web page), not per image. Values checked on
+    # lila.science on 2026-11-03.
+    datasets:
+      Caltech Camera Traps: cdla-permissive-1.0
+      Channel Islands Camera Traps: cdla-permissive-1.0
+      Island Conservation Camera Traps: cdla-permissive-1.0
+      Missouri Camera Traps: cdla-permissive-1.0
+      NACTI: cdla-permissive-1.0
+      Trail Camera Images of New Zealand Animals: cdla-permissive-1.0
+      Ohio Small Animals: cdla-permissive-1.0
+      SWG Camera Traps: cdla-permissive-1.0
+      WCS Camera Traps: cdla-permissive-1.0
+      Wellington Camera Traps: cdla-permissive-1.0
+      WSU Lynx: cdla-permissive-1.0
+      California Small Animals: cc-by-4.0
+      AMMonitor Camera Traps: public-domain
+      # Custom terms: images may not be sold, may be used for scientific publications.
+      Idaho Camera Traps: idfg-terms
+    # Datasets whose license is not listed here are skipped.
+    allowed_licenses:
+      - cdla-permissive-1.0
+      - cc-by-4.0
+      - public-domain
+    # Classes are Latin taxon names of any rank (species, genus, family, ...) or
+    # raw LILA labels such as empty, car, vehicle. Matching ignores case. A LILA
+    # label matching several classes goes to the most specific one, e.g. with
+    # both "Rattus" and "Rattus rattus", "ship rat" -> Rattus rattus and the
+    # genus-only "rat" -> Rattus. An image with several classes is put in each.
+    classes:
+      - Rattus norvegicus # brown rat
+      - Rattus rattus # black rat
+      - Mus musculus # house mouse
+      - Apodemus agrarius # striped field mouse
+      - Apodemus flavicollis # yellow-necked field mouse
+      - Apodemus sylvaticus # wood mouse
+      - Arvicola amphibius
+      - Microtus arvalis
+      - Clethrionomys glareolus
+      - Microtus agrestis
+      - Crocidura leucodon
+      - Sorex araneus
+      - Sorex minutus
+      - Sorex coronatus
+      # rodents in sri lanka
+      - Suncus murinus
+      - Bandicota indica # greater bandicoot rat
+      - Bandicota bengalensis # lesser bandicoot rat
+      - Mus booduga # little indian field mouse
+      - Vandeleuria oleraceus
+      # snakes
+      - Vipera berus # common european adder
+      - Coronella austriaca # smooth snake
+      - Natrix natrix # grass snake
+      - Natrix helvetica # barred grass snake
+      # snakes in sri lanka
+      - Ptyas mucosa
+      - Bungarus caeruleus
+      - Naja naja
+      - Daboia russelii
+      - Coelognathus helena
+      # predators from sri lanka
+      - Spilornis cheela
+      - Varanus bengalensis
+      - Centropus sinensis
+      - Pavo cristatus # peacock
+      # predators of snakes and rodents (birds, mammals)
+      - Vulpes vulpes # red fox
+      - Buteo buteo # common buzzard
+      - Meles meles # european badger
+      - Ciconia ciconia # white stork
+      - Ardea cinerea # grey heron
+      - Felis catus # house cat
+      - Canis familiaris # domestic dog
+      # non animal stuff
+      - empty
+      - car
+      - vehicle
+      - motorcycle
+    # Cap per class AND per dataset: each LILA dataset is treated like one
+    # iNaturalist download, so e.g. Rattus rattus gets up to max_img_num images
+    # from Wellington and, separately, up to max_img_num from WCS. Whole camera
+    # sequences are sampled (seeded) so near-identical frames stay together;
+    # only the last sequence taken may be cut to fit the cap.
+    max_img_num: 2500
+    seed: 42
