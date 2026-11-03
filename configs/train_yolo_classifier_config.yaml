@@ -1,7 +1,11 @@
-train_dataset: /home/hmack/projects/smartrodent_experiments/datasets/full_dataset/yolo_classifier_training_dataset
+train_dataset: datasets/stage8_yolo_classifier
 model_name: yolo26m-cls.pt
 include_macro_f1: true
 return_format: dataframe
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  train_experiment_name: smartrodent-yolo-classifier-training
+  tune_experiment_name: smartrodent-yolo-classifier-tuning
 train_kwargs:
   epochs: 50
   imgsz: 640
@@ -11,7 +15,7 @@ train_kwargs:
   patience: 20
   warmup_epochs: 3.0
   optimizer: 'auto'
-  project: /home/hmack/projects/smartrodent_experiments/tuning/yolo_classify_speciesnames
+  project: ./projects/smartrodent_experiments/tuning/yolo_classify_speciesnames
   name:  full_data_classifier_xl_640
   exist_ok: true
   plots: true
@@ -30,7 +34,7 @@ export_kwargs:
   format: "onnx"
 tune_kwargs:
   name:  full_data_classifier_m_640
-  project: /home/hmack/projects/smartrodent_experiments/tuning/yolo_classify_speciesnames_tune
+  project: ./projects/smartrodent_experiments/tuning/yolo_classify_speciesnames_tune
   epochs: 50
   imgsz: 640
   iterations: 300

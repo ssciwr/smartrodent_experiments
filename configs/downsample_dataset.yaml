@@ -1,0 +1,6 @@
+# Per-species downsampling, configured for scripts/downsample_dataset.py.
+input_dir: datasets/stage6_filtered_data_split
+output_directory: datasets/stage7_filtered_data_downsampled
+# Max images (records rows) per species; species with fewer keep all of them.
+max_images_per_class: 1000
+rng_seed: 42

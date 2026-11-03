@@ -1,7 +1,11 @@
-train_dataset: /home/hmack/projects/smartrodent_experiments/datasets/full_dataset/yolo_detector_training_dataset
+train_dataset: datasets/stage8_yolo_detector
 model_name: yolo26x.pt
 include_macro_f1: true
 return_format: dataframe
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  train_experiment_name: smartrodent-yolo-detector-training
+  tune_experiment_name: smartrodent-yolo-detector-tuning
 train_kwargs:
   epochs: 100
   imgsz: 640
@@ -9,7 +13,7 @@ train_kwargs:
   device: 0
   workers: 20
   patience: 25
-  project: /home/hmack/projects/smartrodent_experiments/training/yolo_detect
+  project: ./projects/smartrodent_experiments/training/yolo_detect
   name: full_data_detector_xl_with_recommended_defaults
   exist_ok: true
   plots: true

@@ -1,0 +1,29 @@
+# Metadata-only dataset partitioning, configured for scripts/split_dataset.py.
+# For optional train-only oversampling, run scripts/sample_training_dataset.py
+# afterward with configs/training_dataset_sampler.yaml; sampling first distorts
+# evaluation.
+paths:
+  # Root containing the corrected metadata. Relative paths are interpreted
+  # from the working directory (normally the project root).
+  dataset_splitter_input: datasets/stage5_materialized_filtered_data_corrected
+  # Required glob relative to the input root: '*' matches any single species
+  # directory here, including names with spaces. This selects only corrected
+  # CSVs under kept/, excluding rejected/ and the original records.csv files.
+  # Each CSV's immediate parent directory must name its species, with exactly
+  # one matching CSV per species. No matches or duplicate species are errors.
+  # For downloader metadata, use "*/records.csv" with its root as input instead.
+  records_glob: "kept/*/records_corrected.csv"
+  # Root where the splitter will write annotated per-species records. Set the
+  # sampler's training_dataset_sampler_input to this same path when sampling.
+  dataset_splitter_output: datasets/stage6_filtered_data_split
+
+data:
+  dataset_splitter:
+    # Rows sharing all group-column values are an indivisible observation. Use
+    # [id] for iNaturalist records or [source_group_id] for GBIF records.
+    group_columns: [id]
+    # Columns whose joint distribution should be retained across splits. Add
+    # e.g. country_code and year here when those strata are required.
+    stratify_columns: []
+    train_val_test_split: [0.7, 0.15, 0.15]
+    rng_seed: 42
