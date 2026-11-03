@@ -2,7 +2,7 @@ import base64
 import gc
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -112,11 +112,13 @@ class VLMFilter(Filterable):
 
         backend = config["backend"]
         if backend == "ollama":
+            settings = config["ollama"]
             return FilterOllama(
                 **common,
-                model=config["ollama"]["model"],
-                pull_model=config["ollama"].get("pull_model", True),
-                num_workers=config["ollama"].get("num_workers", 1),
+                model=settings["model"],
+                pull_model=settings.get("pull_model", True),
+                num_workers=settings.get("num_workers", 1),
+                options=settings.get("options"),
             )
         if backend == "vllm":
             settings = config["vllm"]
@@ -284,7 +286,13 @@ class FilterOllama(VLMFilter):
     """Classify dataframe image records using a persistent Ollama connection."""
 
     def __init__(
-        self, *, model: str, pull_model: bool = True, num_workers: int = 4, **kwargs
+        self,
+        *,
+        model: str,
+        pull_model: bool = True,
+        num_workers: int = 4,
+        options: Mapping[str, Any] | None = None,
+        **kwargs,
     ):
         """Initialize the Ollama-backed filter.
 
@@ -292,12 +300,26 @@ class FilterOllama(VLMFilter):
             model: Ollama model name.
             pull_model: Whether to download the model if it is not local.
             num_workers: Number of concurrent worker threads.
+            options: Ollama generation options passed with every classification.
+                ``temperature`` defaults to ``0`` when it is not specified.
             **kwargs: Arguments forwarded to :class:`VLMFilter`.
+
+        Raises:
+            ValueError: If generation options are not a mapping with string keys.
         """
         super().__init__(**kwargs)
+        if options is not None and (
+            not isinstance(options, Mapping)
+            or any(not isinstance(key, str) or not key for key in options)
+        ):
+            raise ValueError("Ollama options must be a mapping with nonempty string keys")
+
         self.client = ollama.Client()
         self.model = model
         self.num_workers = num_workers
+        self.generation_options: dict[str, Any] = {"temperature": 0}
+        if options is not None:
+            self.generation_options.update(options)
         self._closed = False
         if pull_model:
             self.logger.info("Download model")
@@ -328,7 +350,7 @@ class FilterOllama(VLMFilter):
             format="json",
             stream=False,
             think=False,
-            options={"temperature": 0},
+            options=dict(self.generation_options),
         )
         return self.parse_response(response.response)
 
