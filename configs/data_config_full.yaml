@@ -1,5 +1,4 @@
 data:
-
   inaturalist:
     output_path: datasets/inaturalist
     years: []
@@ -50,6 +49,8 @@ data:
       - Ciconia ciconia # white stork
       - Ardea cinerea # grey heron
       - Buteo buteo # common buzzard
+      - Felis catus # house cat
+      - Canis familiaris # domestic dog
     seed: 42
     max_img_num: 2500
     max_observations: 5000
