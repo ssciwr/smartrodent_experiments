@@ -6,8 +6,8 @@ columns:
   image_path: image_path
 
 paths:
-  input_root: datasets/inaturalist
-  output_root: datasets/stage1_filtered_animal
+  input_root: datasets/inaturalist_srilanka
+  output_root: datasets/stage1_filtered_animal_srilanka
 
 ollama:
   model: qwen3.6:35b-a3b

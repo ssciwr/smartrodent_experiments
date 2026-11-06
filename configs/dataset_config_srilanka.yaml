@@ -1,0 +1,45 @@
+data:
+  inaturalist:
+    output_path: datasets/inaturalist_srilanka
+    years: []
+    first_year: 2000
+    last_year: 2026
+    quality_grade: research
+    species:
+      - Rattus rattus # brown rat
+      - Bandicota bengalensis # lesser bandicot rat
+      - Bandicota indica # greater bandicot rat
+      - Mus booduga # little indian field mouse
+      - Vandeleuria oleraceus # climbing mouse
+      - Tatera indica # indian gerbil
+      - Suncus murinus # shrew
+      - Ptyas mucosa # indian rat snake
+      - Python molurus # rock python
+      - Naja naja # indian cobra
+      - Tyto javanica # eastern barn owl
+      - Ninox scutulata # brown boobook
+      - Glaucidium radiatum # jungle owlet
+      - Ketupa zeylonensis # Brown fish owl
+      - Ketupa nipalensis # spot-bellied eagle-owl
+      - Glaucidium castanotum # chestnut-backed owlet
+      - Serendib scops-owl # Otus thilohoffmanni
+      - Milvus migrans # Black kite
+      - Accipiter virgatus # common kestrel
+      - Falco tinnunculus # besra
+      - Urva edwardsii # Indian grey mongoose
+      - Felis catus # house cat
+      - Canis familiaris # domestic dog
+    seed: 42
+    max_img_num: 2500
+    max_observations: 5000
+    cache_file: datasets/inaturalist/api_requests.db
+    ratelimit_path: datasets/inaturalist/api_ratelimit.db
+    backoff_factor: 0.5
+    # Bounds request retries in both the API session and downloader retry loops.
+    max_retries: 5
+    allowed_licenses:
+      - cc0
+      - cc-by
+      - cc-by-sa
+      - cc-by-nc
+      - cc-by-nc-sa

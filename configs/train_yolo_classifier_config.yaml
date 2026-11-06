@@ -1,5 +1,5 @@
-train_dataset: datasets/stage8_yolo_classifier
-model_name: yolo26m-cls.pt
+train_dataset: datasets/stage8_yolo_classifier_srilanka
+model_name: yolo26n-cls.pt
 include_macro_f1: true
 return_format: dataframe
 mlflow:
@@ -7,16 +7,16 @@ mlflow:
   train_experiment_name: smartrodent-yolo-classifier-training
   tune_experiment_name: smartrodent-yolo-classifier-tuning
 train_kwargs:
-  epochs: 50
-  imgsz: 640
-  batch: -1
+  epochs: 200
+  imgsz: 220
+  batch: 48
   device: 0
   workers: 10
   patience: 20
   warmup_epochs: 3.0
-  optimizer: 'auto'
-  project: ./projects/smartrodent_experiments/tuning/yolo_classify_speciesnames
-  name:  full_data_classifier_xl_640
+  optimizer: "auto"
+  project: ./projects/training/classification/nano_speciesnames
+  name: full_data_classifier_n_220
   exist_ok: true
   plots: true
   save: true
@@ -33,74 +33,74 @@ train_kwargs:
 export_kwargs:
   format: "onnx"
 tune_kwargs:
-  name:  full_data_classifier_m_640
-  project: ./projects/smartrodent_experiments/tuning/yolo_classify_speciesnames_tune
+  name: full_data_classifier_n_220
+  project: ./projects/tuning/classification/nano_speciesnames
   epochs: 50
-  imgsz: 640
+  imgsz: 220
   iterations: 300
-  batch: -1
+  batch: 48
   device: 0
   workers: 10
   patience: 20
   warmup_epochs: 3.0
-  optimizer: 'auto'
+  optimizer: "auto"
   plots: true
   save: true
   space:
     lr0:
-    - 1.0e-05
-    - 0.01
+      - 1.0e-05
+      - 0.01
     lrf:
-    - 0.01
-    - 1.0
+      - 0.01
+      - 1.0
     momentum:
-    - 0.7
-    - 0.98
+      - 0.7
+      - 0.98
     weight_decay:
-    - 0.0
-    - 0.001
+      - 0.0
+      - 0.001
     box:
-    - 1.0
-    - 20.0
+      - 1.0
+      - 20.0
     cls:
-    - 0.1
-    - 4.0
+      - 0.1
+      - 4.0
     dfl:
-    - 0.4
-    - 12.0
+      - 0.4
+      - 12.0
     translate:
-    - 0.0
-    - 0.4
+      - 0.0
+      - 0.4
     scale:
-    - 0.0
-    - 0.8
+      - 0.0
+      - 0.8
     fliplr:
-    - 0.0
-    - 0.5
+      - 0.0
+      - 0.5
     mosaic:
-    - 0.0
-    - 1.0
+      - 0.0
+      - 1.0
     close_mosaic:
-    - 0
-    - 10
+      - 0
+      - 10
     cutmix:
-    - 0.0
-    - 1.0
+      - 0.0
+      - 1.0
     mixup:
-    - 0.0
-    - 1.0
+      - 0.0
+      - 1.0
     bgr:
-    - 0.0
-    - 1.0
+      - 0.0
+      - 1.0
     shear:
-    - 0.0
-    - 10.0
+      - 0.0
+      - 10.0
     perspective:
-    - 0.0
-    - 0.001
+      - 0.0
+      - 0.001
     degrees:
-    - 0.0
-    - 45.0
+      - 0.0
+      - 45.0
     copy_paste:
-    - 0.0
-    - 1.0
+      - 0.0
+      - 1.0

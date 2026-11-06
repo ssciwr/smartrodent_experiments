@@ -5,8 +5,9 @@ columns:
   photo_id: photo.id
   image_path: image_path
 
-paths: input_root:datasets/filtered_stage1_animal
-  output_root:datasets/filtered_thermal
+paths:
+  input_root: datasets/stage1_filtered_animal_srilanka
+  output_root: datasets/thermal_filtered_srilanka
 
 ollama:
   model: qwen3.6:35b-a3b

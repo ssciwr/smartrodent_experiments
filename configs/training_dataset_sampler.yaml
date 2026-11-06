@@ -4,16 +4,16 @@
 paths:
   # Must match dataset_splitter_output in configs/dataset_splitter.yaml. The
   # sampler duplicates only rows whose dataset_split value is train.
-  training_dataset_sampler_input:  datasets/stage6_filtered_data_split
+  training_dataset_sampler_input: datasets/stage6_filtered_data_split_srilanka
   # Root where the sampler will write oversampled per-species records.
-  training_dataset_sampler_output: datasets/stage7_filtered_data_sampled_oversampled
+  training_dataset_sampler_output: datasets/stage7_filtered_data_sampled_oversampled_srilanka
 
 data:
   training_dataset_sampler:
-    # Must match the splitter's observation key: the sampler chooses an
+    # This must match the splitter's configured observation key (see splitter config): the sampler chooses an
     # observation first, then one of its image rows to duplicate.
     group_columns: [id]
-    # Must match the splitter's strata so oversampling retains the training
+    # This must match the splitter's configured strata (see splitter config) so oversampling retains the training
     # distribution within each configured stratum, apart from ceil rounding.
     stratify_columns: []
     # Trusted Python callable in module:function form. It receives
