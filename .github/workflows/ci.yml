@@ -42,7 +42,7 @@ jobs:
 
             - name: Install Python package
               run: |
-                  uv sync --extra dev
+                  uv sync --extra dev --extra experiments
 
             - name: Run Python tests
               run: |
@@ -67,7 +67,7 @@ jobs:
 
             - name: Install Python package
               run: |
-                  uv sync --extra dev
+                  uv sync --extra dev --extra experiments
 
             - name: Run Python tests
               working-directory: ./tests
