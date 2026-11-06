@@ -461,6 +461,37 @@ def test_classifier_create_saves_crops_in_assigned_class_and_split(
     }
 
 
+def test_classifier_crops_drop_source_icc_profiles_but_keep_pixels(
+    creator_input, images, tmp_path
+):
+    """Malformed source colour profiles are not copied into the saved crops."""
+    # Arbitrary bytes mimic the malformed profiles found in real source images;
+    # PIL embeds them unvalidated, exactly like the broken ones in the dataset.
+    broken_profile = b"not a valid ICC profile"
+    for path in images:
+        with Image.open(path) as source:
+            pixels = source.copy()
+        pixels.save(path, icc_profile=broken_profile)
+        with Image.open(path) as reloaded:
+            assert reloaded.info["icc_profile"] == broken_profile
+    model = SpeciesNetStub(
+        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
+    )
+    output = tmp_path / "classifier"
+
+    YoloClassifierDatasetCreatorFromSpeciesnet(
+        creator_input, output, model=model
+    ).create()
+
+    crops = sorted(output.rglob("*.png"))
+    assert len(crops) == 3
+    for path in crops:
+        expected = (255, 0, 0) if path.parent.name == "mouse" else (0, 0, 255)
+        with Image.open(path) as crop:
+            assert "icc_profile" not in crop.info
+            assert crop.getpixel((5, 3)) == expected
+
+
 def test_create_skips_images_without_accepted_boxes_and_records_why(
     creator_type, creator_input, images, tmp_path
 ):
