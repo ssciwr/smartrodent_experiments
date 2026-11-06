@@ -34,6 +34,7 @@ vllm = [
 ollama = ["ollama"]
 jupyter = ["ipykernel"]
 experiments = ["dvc>=3.67.1", "mlflow>=3.17.0"]
+all = ["rodent-experiments[dev,vllm,ollama,jupyter,experiments]"]
 
 [tool.pytest]
 # Script entry points live outside the installed src package.
