@@ -113,9 +113,9 @@ stages:
       - projects/smartrodent_experiments/training/yolo_detect
 
   train_yolo_classifier:
-    cmd: uv run python scripts/train_yolo_classfier.py configs/train_yolo_classifier_config.yaml
+    cmd: uv run python scripts/train_yolo_classifier.py configs/train_yolo_classifier_config.yaml
     deps:
-      - scripts/train_yolo_classfier.py
+      - scripts/train_yolo_classifier.py
       - src/smartrodent/config_utils.py
       - src/smartrodent/training.py
       - configs/train_yolo_classifier_config.yaml

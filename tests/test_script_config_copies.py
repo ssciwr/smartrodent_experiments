@@ -132,7 +132,7 @@ def test_download_entry_points_copy_config_before_download(
             True,
         ),
         (
-            "scripts.train_yolo_classfier",
+            "scripts.train_yolo_classifier",
             "YoloClassificationTrainer",
             "train_yolo_classifier_config.yaml",
             "train",
@@ -201,6 +201,9 @@ def test_training_scripts_copy_original_config_to_project_base(
     monkeypatch.setattr(smartrodent, trainer_name, factory)
     if uses_cli:
         monkeypatch.setattr(sys, "argv", [module_name, str(config_path)])
+    # Other tests import the script as a regular module; runpy warns when re-running
+    # an already-imported module as __main__, so drop it for this test only.
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
     runpy.run_module(module_name, run_name="__main__")
     getattr(trainer, operation).assert_called_once()
     trainer.export.assert_called_once()
