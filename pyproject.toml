@@ -5,8 +5,6 @@ description = "machinelearning experiment pipeline for rodent detection in image
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "dvc>=3.67.1",
-    "mlflow>=3.17.0",
     "ollama>=0.6.3",
     "pandas>=3.0.6",
     "pyinaturalist>=0.21.1",
@@ -30,14 +28,13 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-mock>=3.16.0",
 ]
-
 vllm = [
     "vllm==0.28.0",
 ] # needs uv pip install "vllm==0.28.0" --torch-backend=auto to resolve bug: https://github.com/vllm-project/vllm/issues/58236
-
 ollama = ["ollama"]
-
 jupyter = ["ipykernel"]
+experiments = ["dvc>=3.67.1", "mlflow>=3.17.0"]
+all = ["rodent-experiments[dev,vllm,ollama,jupyter,experiments]"]
 
 [tool.pytest]
 # Script entry points live outside the installed src package.

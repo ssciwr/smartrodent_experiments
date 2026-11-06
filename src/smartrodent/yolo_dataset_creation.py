@@ -604,7 +604,14 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(_SpeciesNetDatasetCreatorBase):
                 Path(row["dataset_split"]) / species / f"{stem}_det{index:03d}.png"
             )
             # PNG avoids introducing another lossy compression pass into crops.
-            detection["crop"].save(self.dataset_output_path / image_path)
+            # PIL carries the source JPEG's ICC profile into the crop, and
+            # malformed camera/phone profiles make libpng warn on every decode
+            # during training. Dropping the profile instead of converting to sRGB
+            # keeps the stored pixel values unchanged, which is also what OpenCV
+            # (no colour management) has always fed to the model.
+            detection["crop"].save(
+                self.dataset_output_path / image_path, icc_profile=None
+            )
             outputs.append({"image_path": str(image_path), "detection_index": index})
         return outputs
 
