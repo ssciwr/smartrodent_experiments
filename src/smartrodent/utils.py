@@ -1,7 +1,10 @@
 from collections.abc import Sequence
+import importlib
 from pathlib import Path
 import re
 from typing import Any
+
+import torch
 
 
 def path_component(value: str) -> str:
@@ -38,3 +41,43 @@ def resolve_data_path(path: str | Path) -> Path:
     p = globals().get("PARENT", Path(__file__).resolve().parents[2])
     path = Path(path)
     return path if path.is_absolute() else (p / path).resolve()
+
+
+def import_class(class_path: str) -> Any:
+    """Import an attribute, typically a class, from a dotted import path.
+
+    Args:
+        class_path: Full ``package.module.Attribute`` path, as written in configs.
+
+    Returns:
+        Any: The imported attribute.
+
+    Raises:
+        ValueError: The path has no module part, the module cannot be imported, or
+            the module has no such attribute.
+    """
+    module_name, _, attribute_name = class_path.rpartition(".")
+    if not module_name:
+        raise ValueError(f"'{class_path}' is not a full module.Class import path")
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as error:
+        raise ValueError(f"Cannot import module '{module_name}'") from error
+    if not hasattr(module, attribute_name):
+        raise ValueError(f"Module '{module_name}' has no attribute '{attribute_name}'")
+    return getattr(module, attribute_name)
+
+
+def to_json_value(value: torch.Tensor) -> int | float | bool | list:
+    """Convert a tensor into a JSON-serializable Python value.
+
+    Args:
+        value: Tensor of any shape.
+
+    Returns:
+        A Python scalar for 0-dimensional tensors, otherwise a (nested) list.
+    """
+    if value.ndim == 0:
+        return value.item()
+    else:
+        return value.tolist()

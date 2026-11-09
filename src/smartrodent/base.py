@@ -10,6 +10,7 @@ class Configurable(Protocol):
     """Protocol for objects that can be constructed from a YAML config file."""
 
     @classmethod
+    @abstractmethod
     def from_config(cls, config_path: str | Path) -> "Configurable":
         """Build an instance from a YAML config file.
 
@@ -181,4 +182,14 @@ class YoloDatasetCreatorBase(Configurable, ABC):
         Returns:
             The generated dataset's root directory.
         """
+        raise NotImplementedError
+
+
+@runtime_checkable
+class TesterBase(Configurable, Protocol):
+    """Abstract base class for model testing."""
+
+    @abstractmethod
+    def test(self):
+        """Run the testing process."""
         raise NotImplementedError

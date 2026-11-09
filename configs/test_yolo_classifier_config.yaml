@@ -1,0 +1,32 @@
+model_path: projects/training/classification/xl_speciesnames/full_data_classifier_xl_220/weights/best.pt
+data_path: datasets/stage8_yolo_classifier/test
+output_path: projects/testing/classification/xl_speciesnames/full_data_classifier_xl_220
+predict_kwargs:
+  imgsz: 220
+  batch: 48
+  device: 0
+  verbose: false
+# Each entry: name -> torchmetrics class import path + constructor kwargs.
+# num_classes must match the model (39 species in stage8_yolo_classifier).
+metrics:
+  top1_accuracy:
+    class: torchmetrics.classification.MulticlassAccuracy
+    kwargs: {num_classes: 39, top_k: 1, average: micro}
+  top5_accuracy:
+    class: torchmetrics.classification.MulticlassAccuracy
+    kwargs: {num_classes: 39, top_k: 5, average: micro}
+  macro_precision:
+    class: torchmetrics.classification.MulticlassPrecision
+    kwargs: {num_classes: 39, average: macro}
+  macro_recall:
+    class: torchmetrics.classification.MulticlassRecall
+    kwargs: {num_classes: 39, average: macro}
+  macro_f1:
+    class: torchmetrics.classification.MulticlassF1Score
+    kwargs: {num_classes: 39, average: macro}
+  per_class_f1:
+    class: torchmetrics.classification.MulticlassF1Score
+    kwargs: {num_classes: 39, average: none}
+  confusion_matrix:
+    class: torchmetrics.classification.MulticlassConfusionMatrix
+    kwargs: {num_classes: 39}

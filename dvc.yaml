@@ -123,6 +123,17 @@ stages:
     outs:
       - projects/smartrodent_experiments/tuning/yolo_classify_speciesnames
 
+  test_yolo_classifier:
+    cmd: uv run python scripts/evaluate_yolo_model.py configs/test_yolo_classifier_config.yaml
+    deps:
+      - scripts/evaluate_yolo_model.py
+      - src/smartrodent/testing.py
+      - configs/test_yolo_classifier_config.yaml
+      - datasets/stage8_yolo_classifier/test
+    metrics:
+      - projects/testing/classification/xl_speciesnames/full_data_classifier_xl_220/metrics.json:
+          cache: false
+
   tune_yolo_classifier:
     cmd: uv run python scripts/tune_yolo_classifier.py configs/train_yolo_classifier_config.yaml
     deps:

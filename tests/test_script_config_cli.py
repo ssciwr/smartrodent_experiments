@@ -18,6 +18,7 @@ import pytest
         ("scripts.train_yolo_detector", "_parse_args"),
         ("scripts.train_yolo_classifier", "_parse_args"),
         ("scripts.tune_yolo_classifier", "_parse_args"),
+        ("scripts.evaluate_yolo_model", "_parse_args"),
     ],
 )
 @pytest.mark.parametrize(
