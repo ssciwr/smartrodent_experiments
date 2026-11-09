@@ -9,6 +9,7 @@ dependencies = [
     "pandas>=3.0.6",
     "pyinaturalist>=0.21.1",
     "python-dotenv>=1.2.4",
+    "pytorch-metric-learning>=2.9.0",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
     "speciesnet>=1.0",
