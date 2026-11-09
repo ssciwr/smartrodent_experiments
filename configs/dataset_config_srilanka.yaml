@@ -6,7 +6,8 @@ data:
     last_year: 2026
     quality_grade: research
     species:
-      - Rattus rattus # brown rat
+      - Rattus rattus # black rat
+      - Rattus norvegicus # brown rat
       - Bandicota bengalensis # lesser bandicot rat
       - Bandicota indica # greater bandicot rat
       - Mus booduga # little indian field mouse
