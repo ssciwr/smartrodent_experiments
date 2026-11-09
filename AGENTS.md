@@ -28,6 +28,7 @@ This project uses DVC as its core driver.
 - Always run from an activated virtual environment with this project installed in it in editable mode (because this is still WIP)
 - Run a step using: `dvc repor 'step_name'`
 - Run tests with `pytest --cov=smartrodent --cov-report=term-missing` to run the tests and get line coverage report and `pytest --cov=smartrodent --cov-report=term-missing --cov-branch` to get branch coverage. Both are important
+- we are using mlflow as model registry and experiment tracking system
 
 ## Restrictions
 - do not commit anything to git unless told so explicitly
