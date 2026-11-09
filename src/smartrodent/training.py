@@ -18,6 +18,7 @@ class MlflowTrackingConfiguration:
     tracking_uri: str
     train_experiment_name: str
     tune_experiment_name: str
+    artifact_location: str | None = None
 
     @classmethod
     def from_mapping(
@@ -45,25 +46,32 @@ class MlflowTrackingConfiguration:
             "train_experiment_name",
             "tune_experiment_name",
         }
+
+        not_required = {"artifact_location"}
+
         supplied = set(configuration)
-        if supplied != required:
-            missing = sorted(required.difference(supplied))
-            unexpected = sorted(supplied.difference(required))
-            details = []
-            if missing:
-                details.append(f"missing keys: {', '.join(missing)}")
-            if unexpected:
-                details.append(f"unexpected keys: {', '.join(unexpected)}")
+        missing = sorted(required.difference(supplied))
+        unexpected = sorted(supplied.difference(required | not_required))
+        details = []
+        if missing:
+            details.append(f"missing keys: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected keys: {', '.join(unexpected)}")
+
+        if details:
             raise ValueError("Invalid 'mlflow' configuration; " + "; ".join(details))
 
         values = {}
-        for key in required:
-            value = configuration[key]
+        for key in required | not_required:
+            value = configuration.get(key)
+            if value is None and key not in required:
+                continue
             if not isinstance(value, str):
                 raise TypeError(f"The 'mlflow.{key}' value must be a string")
             if not value.strip():
                 raise ValueError(f"The 'mlflow.{key}' value must not be blank")
             values[key] = value
+
         return cls(**values)
 
     def configure(self, operation: Literal["train", "tune"]) -> None:
@@ -82,6 +90,10 @@ class MlflowTrackingConfiguration:
         os.environ["MLFLOW_TRACKING_URI"] = self.tracking_uri
         os.environ["MLFLOW_EXPERIMENT_NAME"] = experiment_name
         mlflow.set_tracking_uri(self.tracking_uri)
+        if mlflow.get_experiment_by_name(experiment_name) is None:
+            mlflow.create_experiment(
+                experiment_name, artifact_location=self.artifact_location
+            )
         mlflow.set_experiment(experiment_name)
         settings.update({"mlflow": True})
 
