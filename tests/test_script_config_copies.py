@@ -207,3 +207,80 @@ def test_training_scripts_copy_original_config_to_project_base(
     runpy.run_module(module_name, run_name="__main__")
     getattr(trainer, operation).assert_called_once()
     trainer.export.assert_called_once()
+
+
+def test_supcon_training_script_composes_trainer_from_config(tmp_path, monkeypatch):
+    """The SupCon entry point composes, trains, and exports a configured run."""
+    import scripts.train_yolo_classifier_supcon as module
+    from smartrodent.yolo_supcon import YoloSupConClassificationTrainer
+
+    output_root = tmp_path / "supcon_training"
+    config_path = tmp_path / "supcon.yaml"
+    configuration = {
+        "train_dataset": "datasets/classifier",
+        "model_name": "yolo26n-cls.pt",
+        "supcon": {
+            "enabled": True,
+            "classes_per_batch": 3,
+            "samples_per_class": 2,
+            "embedding_dimension": 64,
+        },
+        "train_kwargs": {"epochs": 2, "project": str(output_root)},
+        "export_kwargs": {"format": "onnx"},
+    }
+    config_path.write_text(yaml.safe_dump(configuration), encoding="utf-8")
+
+    trainer_instance = Mock()
+    trainer_instance.model = SimpleNamespace(ckpt={"train_args": {}})
+    loaded_run_configurations = []
+
+    def from_config(run_config_path, *, trainer):
+        assert trainer is YoloSupConClassificationTrainer
+        loaded_run_configurations.append(
+            yaml.safe_load(run_config_path.read_text(encoding="utf-8"))
+        )
+        return trainer_instance
+
+    trainer_factory = Mock()
+    trainer_factory.from_config.side_effect = from_config
+    monkeypatch.setattr(
+        module,
+        "YoloClassificationTrainer",
+        trainer_factory,
+        raising=False,
+    )
+
+    def train():
+        copied_config = output_root / config_path.name
+        assert copied_config.read_bytes() == config_path.read_bytes()
+
+    trainer_instance.train.side_effect = train
+
+    module.main(config_path)
+
+    assert loaded_run_configurations == [configuration]
+    trainer_instance.train.assert_called_once_with()
+    trainer_instance.export.assert_called_once_with()
+
+
+def test_supcon_training_script_rejects_disabled_configuration(tmp_path, monkeypatch):
+    """The SupCon-specific executable fails before constructing a stock trainer."""
+    import scripts.train_yolo_classifier_supcon as module
+
+    config_path = tmp_path / "supcon.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "supcon": {"enabled": False},
+                "train_kwargs": {"project": str(tmp_path / "output")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    trainer_factory = Mock()
+    monkeypatch.setattr(module, "YoloClassificationTrainer", trainer_factory)
+
+    with pytest.raises(ValueError, match="requires supcon.enabled=true"):
+        module.main(config_path)
+
+    trainer_factory.from_config.assert_not_called()
