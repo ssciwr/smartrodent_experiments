@@ -51,3 +51,4 @@ mlflow.db
 mlflow.db-shm
 mlflow.db-wal
 mlartifacts/
+mlruns
