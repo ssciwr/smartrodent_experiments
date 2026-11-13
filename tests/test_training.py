@@ -11,6 +11,7 @@ import yaml
 
 import smartrodent.config_utils as config_utils
 import smartrodent.training as training
+from smartrodent.yolo_supcon import YoloSupConClassificationTrainer
 
 
 class FakeYolo:
@@ -168,6 +169,67 @@ def test_classifier_uses_classification_task_and_dataset_root(tmp_path, fake_yol
     assert trainer.data_yaml() == dataset
     assert fake_yolo[-1].model_name == "custom.pt"
     assert fake_yolo[-1].init_kwargs == {"task": "classify"}
+
+
+def test_classifier_config_forwards_explicit_trainer_and_supcon_settings(
+    tmp_path, fake_yolo
+):
+    """The executable-selected trainer and YAML settings cross the wrapper seam."""
+    dataset = tmp_path / "classifier"
+    (dataset / "train" / "mouse").mkdir(parents=True)
+    config = tmp_path / "trainer.yaml"
+    config.write_text(
+        f"""train_dataset: {dataset}
+model_name: yolo26n-cls.pt
+supcon:
+  enabled: true
+  classes_per_batch: 3
+  samples_per_class: 2
+  embedding_dimension: 64
+train_kwargs:
+  epochs: 2
+"""
+    )
+
+    trainer = training.YoloClassificationTrainer.from_config(
+        config,
+        trainer=YoloSupConClassificationTrainer,
+    )
+    trainer.train()
+
+    train_arguments = fake_yolo[-1].train_kwargs
+    assert train_arguments["trainer"] is YoloSupConClassificationTrainer
+    assert train_arguments["supcon"] == {
+        "enabled": True,
+        "classes_per_batch": 3,
+        "samples_per_class": 2,
+        "embedding_dimension": 64,
+    }
+    assert "batch" not in train_arguments
+
+
+def test_classifier_config_without_injected_trainer_keeps_stock_path(
+    tmp_path, fake_yolo
+):
+    """Normal classifier configuration retains Ultralytics trainer selection."""
+    dataset = tmp_path / "classifier"
+    (dataset / "train" / "mouse").mkdir(parents=True)
+    config = tmp_path / "trainer.yaml"
+    config.write_text(
+        f"""train_dataset: {dataset}
+train_kwargs:
+  epochs: 2
+"""
+    )
+    trainer = training.YoloClassificationTrainer.from_config(config)
+
+    trainer.train()
+
+    train_arguments = fake_yolo[-1].train_kwargs
+    assert train_arguments["trainer"] is None
+    assert train_arguments["epochs"] == 2
+    assert "batch" not in train_arguments
+    assert "supcon" not in train_arguments
 
 
 def test_detector_collects_per_class_metrics(fake_yolo):

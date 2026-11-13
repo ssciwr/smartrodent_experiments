@@ -1,106 +1,158 @@
-train_dataset: datasets/stage8_yolo_classifier_srilanka
-model_name: yolo26n-cls.pt
+train_dataset: datasets/stage8_yolo_classifier
+model_name: yolo26x-cls.pt
 include_macro_f1: true
 return_format: dataframe
 mlflow:
   tracking_uri: sqlite:///mlflow.db
-  train_experiment_name: smartrodent-yolo-classifier-training
+  train_experiment_name: smartrodent-yolo-classifier-training-with-autoaugment-with-classweighting
   tune_experiment_name: smartrodent-yolo-classifier-tuning
+  # artifact_location: runs/classify/tuning
 train_kwargs:
   epochs: 200
   imgsz: 220
   batch: 48
   device: 0
   workers: 10
-  patience: 20
+  patience: 10
   warmup_epochs: 3.0
   optimizer: "auto"
-  project: ./projects/training/classification/nano_speciesnames
-  name: full_data_classifier_n_220
+  project: ./projects/training/classification/xl_speciesnames_220
+  name: full_data_classifier_xl_220
   exist_ok: true
   plots: true
   save: true
   val: true
-  scale: 0.7
+  scale: !sweep
+    - 0.0
+    - 0.3
+    - 0.6
+    - 0.9
   fliplr: 0.5
-  flipud: 0.0
-  auto_augment: randaugment # randaugment, augmix, autoaugment, or null
-  erasing: 0.1
-  # auto_augment: null
-  # hsv_h: 0.015
-  # hsv_s: 0.4
-  # hsv_v: 0.4
+  flipud: 0.2
+  auto_augment: !sweep # randaugment, augmix, autoaugment, or null
+    - augmix
+    - randaugment
+    - autoaugment
+    - null
+  erasing: !sweep
+    - 0.0
+    - 0.3
+    - 0.6
+  hsv_h: 0.
+  hsv_s: 0.
+  hsv_v: 0.
+  cls_pw: 0.5
 export_kwargs:
   format: "onnx"
 tune_kwargs:
-  name: full_data_classifier_n_220
-  project: ./projects/tuning/classification/nano_speciesnames
-  epochs: 50
+  name: full_data_classifier_xl_220_tuning
+  project: ./projects/tuning/classification/xl_speciesnames_220
+  epochs: 20
   imgsz: 220
-  iterations: 300
+  iterations: 100
+  optimizer: "auto"
   batch: 48
   device: 0
   workers: 10
-  patience: 20
+  patience: 10
   warmup_epochs: 3.0
-  optimizer: "auto"
   plots: true
   save: true
+  # Search space for YOLO.tune: each key is [min, max] (an optional 3rd value is the mutation gain).
+  # The tuner mutates values inside these bounds; anything not listed keeps the value from train_kwargs/tune_kwargs.
+  # NOTE: "no effect for classify" = only used by detect/segment/pose trainers; tuning it here just adds noise.
   space:
-    lr0:
+    auto_augment: null
+    # --- optimizer ---
+    lr0: # initial learning rate; IGNORED while optimizer is "auto" (auto picks AdamW + its own lr0)
       - 1.0e-05
       - 0.01
-    lrf:
+    lrf: # final LR as a fraction of lr0 (final_lr = lr0 * lrf) at the end of the schedule
       - 0.01
       - 1.0
-    momentum:
-      - 0.7
+    momentum: # SGD momentum / Adam beta1; IGNORED while optimizer is "auto" (fixed to 0.9)
+      - 0.5
       - 0.98
-    weight_decay:
+    weight_decay: # L2 regularization strength applied by the optimizer
       - 0.0
-      - 0.001
-    box:
+      - 0.01
+    # --- loss gains ---
+    box: # bounding-box regression loss weight (no effect for classify)
       - 1.0
       - 20.0
-    cls:
+    cls: # detection classification-loss weight (no effect for classify, which uses plain cross-entropy)
       - 0.1
       - 4.0
-    dfl:
+    dfl: # distribution focal loss weight for box refinement (no effect for classify)
       - 0.4
       - 12.0
-    translate:
+    # --- geometric / mixing augmentation ---
+    translate: # random shift as a fraction of image size (no effect for classify)
       - 0.0
       - 0.4
-    scale:
-      - 0.0
+    scale: # random-resized-crop strength: crop keeps between (1 - scale) and 100 % of the image area
+      - 0.1
       - 0.8
-    fliplr:
+    fliplr: # probability of a horizontal flip
       - 0.0
       - 0.5
-    mosaic:
+    flipup: # probability of a vertical flip
+      - 0.0
+      - 0.5
+    mosaic: # probability of stitching 4 images into a mosaic (no effect for classify)
       - 0.0
       - 1.0
-    close_mosaic:
+    close_mosaic: # number of final epochs with mosaic switched off; integer (no effect for classify)
       - 0
       - 10
-    cutmix:
+    cutmix: # probability of pasting a patch of another image in (no effect for classify)
       - 0.0
       - 1.0
-    mixup:
+    mixup: # probability of alpha-blending two images and their labels (no effect for classify)
       - 0.0
       - 1.0
-    bgr:
+    bgr: # probability of swapping RGB -> BGR channel order (no effect for classify)
       - 0.0
       - 1.0
-    shear:
+    shear: # random shear in degrees (no effect for classify)
       - 0.0
       - 10.0
-    perspective:
+    perspective: # random perspective warp, fraction; keep <= 0.001 (no effect for classify)
       - 0.0
       - 0.001
-    degrees:
+    degrees: # random rotation in +/- degrees (no effect for classify)
       - 0.0
-      - 45.0
-    copy_paste:
+      - 160.0
+    copy_paste: # probability of copy-pasting segmented objects between images (no effect for classify, needs masks)
+      - 0.0
+      - 1.0
+    warmup_epochs: # epochs of linear LR/momentum warmup at the start; overrides the fixed warmup_epochs above
+      - 0.0
+      - 5.0
+    warmup_momentum: # momentum value the warmup starts from before ramping up to `momentum`
+      - 0.0
+      - 0.95
+    warmup_bias_lr: # LR for bias params during warmup; forced to 0.0 while optimizer is "auto"
+      - 0.0
+      - 0.1
+    dropout: # dropout rate in the classification head (classify only)
+      - 0.0
+      - 0.5
+    erasing: # probability of random erasing (cutout) of an image region (classify only)
+      - 0.0
+      - 0.9
+    flipud: # probability of a vertical flip (rarely realistic for camera traps; tuner can drive it to 0)
+      - 0.0
+      - 1.0
+    hsv_h: # random hue shift, fraction; IGNORED while auto_augment is set (randaugment disables color jitter)
+      - 0.0
+      - 0.01
+    hsv_s: # random saturation change, fraction; IGNORED while auto_augment is set
+      - 0.0
+      - 0.15
+    hsv_v: # random brightness change, fraction; IGNORED while auto_augment is set
+      - 0.0
+      - 0.3
+    cls_pw:
       - 0.0
       - 1.0

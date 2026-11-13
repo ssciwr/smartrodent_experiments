@@ -17,6 +17,7 @@ import pytest
         ("scripts.create_yolo_dataset", "_parse_args"),
         ("scripts.train_yolo_detector", "_parse_args"),
         ("scripts.train_yolo_classifier", "_parse_args"),
+        ("scripts.train_yolo_classifier_supcon", "_parse_args"),
         ("scripts.tune_yolo_classifier", "_parse_args"),
     ],
 )

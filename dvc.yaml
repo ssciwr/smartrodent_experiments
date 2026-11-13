@@ -123,6 +123,18 @@ stages:
     outs:
       - projects/smartrodent_experiments/tuning/yolo_classify_speciesnames
 
+  train_yolo_classifier_supcon:
+    cmd: uv run python scripts/train_yolo_classifier_supcon.py configs/train_yolo_classifier_supcon_config.yaml
+    deps:
+      - scripts/train_yolo_classifier_supcon.py
+      - src/smartrodent/config_utils.py
+      - src/smartrodent/training.py
+      - src/smartrodent/yolo_supcon.py
+      - configs/train_yolo_classifier_supcon_config.yaml
+      - datasets/stage8_yolo_classifier
+    outs:
+      - projects/training/classification/xl_speciesnames_supcon
+
   tune_yolo_classifier:
     cmd: uv run python scripts/tune_yolo_classifier.py configs/train_yolo_classifier_config.yaml
     deps:

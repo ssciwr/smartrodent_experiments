@@ -428,13 +428,19 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
         self.model = YOLO(str(self.model_name), task="classify")
 
     @classmethod
-    def from_config(cls, config_path: str | Path) -> "YoloClassificationTrainer":
+    def from_config(
+        cls,
+        config_path: str | Path,
+        trainer=None,
+    ) -> "YoloClassificationTrainer":
         """Create a classification trainer from a YAML config file.
 
         Args:
             config_path: Path to a YAML file with top-level trainer settings,
                 ``train_kwargs`` for ``YOLO.train``, and optional ``tune_kwargs`` for
                 ``YOLO.tune``.
+            trainer: Optional externally selected Ultralytics trainer passed through
+                to ``YOLO.train``.
 
         Returns:
             A configured ``YoloClassificationTrainer`` instance.
@@ -448,6 +454,7 @@ class YoloClassificationTrainer(YoloDetectionTrainer):
             **config,
             tune_kwargs=tune_kwargs,
             mlflow_config=mlflow_config,
+            trainer=trainer,
             **train_kwargs,
         )
 
