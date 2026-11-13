@@ -16,7 +16,7 @@ train_kwargs:
   patience: 10
   warmup_epochs: 3.0
   optimizer: "auto"
-  project: ./projects/training/classification/xl_speciesnames
+  project: ./projects/training/classification/xl_speciesnames_220
   name: full_data_classifier_xl_220
   exist_ok: true
   plots: true
@@ -46,7 +46,7 @@ export_kwargs:
   format: "onnx"
 tune_kwargs:
   name: full_data_classifier_xl_220_tuning
-  project: ./projects/tuning/classification/xl_speciesnames
+  project: ./projects/tuning/classification/xl_speciesnames_220
   epochs: 20
   imgsz: 220
   iterations: 100
