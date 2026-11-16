@@ -4,16 +4,54 @@ train_dataset: datasets/stage8_yolo_classifier_not_oversampled/train
 output_directory: runs/supcon_standalone_xl
 model_name: notebooks/yolo26x-cls.pt
 class_names:
-  - Bandicota indica
-  - Bandicota bengalensis
-  - Rattus rattus
-  - Rattus norvegicus
-  - Suncus murinus
-  - Sorex araneus
-epochs: 5
+  - Rattus norvegicus # brown rat
+  - Rattus rattus # black rat
+  - Mus musculus # house mouse
+  - Apodemus agrarius # striped field mouse
+  - Apodemus flavicollis # yellow-necked field mouse
+  - Apodemus sylvaticus # wood mouse
+  - Arvicola amphibius #
+  - Microtus arvalis #
+  - Clethrionomys glareolus #
+  - Microtus agrestis #
+  - Crocidura leucodon #
+  - Sorex araneus #
+  - Sorex minutus #
+  - Sorex coronatus #
+  # rodents in sri lanka
+  - Suncus murinus #
+  - Bandicota indica # greater bandicot rat
+  - Bandicota bengalensis # lessert bandicot rat
+  - Mus booduga # little indian field mouse
+  - Vandeleuria oleraceus #
+  # snakes
+  - Vipera berus # common european adder
+  - Coronella austriaca # smooth snake
+  - Natrix natrix # grass snake
+  - Natrix helvetica # barred grass snake
+  # snakes in sri lanka
+  - Ptyas mucosa #
+  - Bungarus caeruleus #
+  - Naja naja #
+  - Daboia russelii #
+  - Coelognathus helena #
+  # predators from sri lanka
+  - Spilornis cheela
+  - Varanus bengalensis #
+  - Centropus sinensis #
+  - Pavo cristatus # peacock
+  # predators of snakes and rodents (birds, mammals )
+  - Vulpes vulpes # red fox
+  - Buteo buteo # common buzzard
+  - Meles meles # european badger
+  - Ciconia ciconia # white stork
+  - Ardea cinerea # grey heron
+  - Felis catus # house cat
+  - Canis familiaris # domestic dog
+epochs: 15
 image_size: 448
 classes_per_batch: 4
-samples_per_class: 6
+samples_per_class: 5
 # Matches the notebook sampler's default; rounded down to complete source batches.
 samples_per_epoch: 100000
 workers: 20
