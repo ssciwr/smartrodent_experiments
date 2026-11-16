@@ -32,6 +32,7 @@ class SupConClassificationOutput:
     embeddings: torch.Tensor
 
 
+# use pydantic for this. this is kinda bad
 @dataclass(frozen=True)
 class SupConTrainerConfiguration:
     """Configure P-K batches and the supervised-contrastive projection head.
@@ -192,7 +193,7 @@ class PKSamplerFactory:
 
         if "generator" in parameters:
             generator = torch.Generator()
-            generator.manual_seed(seed)
+            generator = generator.manual_seed(seed)
             sampler_arguments["generator"] = generator
         return self.sampler_type(**sampler_arguments)
 
@@ -361,7 +362,9 @@ class SupConClassificationHead(Classify):
         """
         if isinstance(x, list):
             x = torch.cat(x, 1)
-        shared_features = self.drop(self.pool(self.conv(x)).flatten(1))
+        shared_features = self.drop(
+            self.pool(self.conv(x)).flatten(1)
+        )  # check if this is really the embeddings of the model backbone?
         logits = self.linear(shared_features)
         if self.training:
             return SupConClassificationOutput(
@@ -539,7 +542,7 @@ class YoloSupConClassificationTrainer(ClassificationTrainer):
         return InfiniteDataLoader(
             dataset=dataset,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=False,  # can't use shuffle with custom samplers
             num_workers=worker_count,
             sampler=sampler,
             prefetch_factor=2 if worker_count > 0 else None,
@@ -551,6 +554,7 @@ class YoloSupConClassificationTrainer(ClassificationTrainer):
         )
 
 
+# TODO: this is useless
 def build_supcon_trainer(
     configuration: SupConTrainerConfiguration,
 ) -> type[YoloSupConClassificationTrainer] | None:

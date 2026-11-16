@@ -168,6 +168,44 @@ interpret prediction indices**, rather than the creator's class list or YAML.
 This differs from detection training, which uses the class-index mapping in
 `data.yaml`.
 
+## Standalone SupCon experiment
+
+The independent two-view experiment runs outside the notebook and uses only the
+supervised contrastive objective. Run from the repository root in the installed
+project environment:
+
+```bash
+python scripts/train_supcon.py configs/train_supcon_config.yaml
+```
+
+The YAML config specifies the source species, augmentation size, P-K batch,
+workers, optimizer settings, and output directory. A batch contains
+`classes_per_batch * samples_per_class` source images and twice as many augmented
+views. `samples_per_epoch` counts source-image selections and is rounded down to
+complete batches. The default experiment uses FP32, without AMP or validation.
+
+Each epoch saves `epoch_0001.pt`, etc., along with `config.yaml` and `history.yaml`.
+Checkpoints contain architecture, encoder/classifier/projector weights, class
+mapping, optimizer state, and experiment settings. Evaluation can reload a model
+without the original pretrained weights or the original Python session:
+
+```python
+from smartrodent.supcon_model import YoloSupConModel
+
+model = YoloSupConModel.from_checkpoint(
+    "runs/supcon_standalone_xl/epoch_0005.pt", device="cpu"
+)
+```
+
+The plotting and evaluation workflow remains in `notebooks/supcon_training.ipynb`.
+Its helpers are imported from `smartrodent.supcon_datasets`,
+`smartrodent.supcon_model`, and `smartrodent.eval`. The notebook compares the same
+balanced image subset in pretrained pooled, trained pooled, and trained projected
+spaces. Set its checkpoint path to the experiment you want to inspect.
+
+This script is separate from the older Ultralytics trainer integration in
+`scripts/train_yolo_classifier_supcon.py` and `smartrodent.yolo_supcon`.
+
 ## Tests
 
 Install the development extra, then run the test suite from the repository

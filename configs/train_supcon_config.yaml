@@ -1,0 +1,28 @@
+# Run from the repository root:
+# python scripts/train_supcon.py configs/train_supcon_config.yaml
+train_dataset: datasets/stage8_yolo_classifier_not_oversampled/train
+output_directory: runs/supcon_standalone_xl
+model_name: notebooks/yolo26x-cls.pt
+class_names:
+  - Bandicota indica
+  - Bandicota bengalensis
+  - Rattus rattus
+  - Rattus norvegicus
+  - Suncus murinus
+  - Sorex araneus
+epochs: 5
+image_size: 448
+classes_per_batch: 4
+samples_per_class: 6
+# Matches the notebook sampler's default; rounded down to complete source batches.
+samples_per_epoch: 100000
+workers: 20
+prefetch_factor: 4
+seed: 42
+device: cuda
+learning_rate: 0.0001
+dropout: 0.5
+output_features: 128
+temperature: 0.1
+freeze: []
+log_every: 50
