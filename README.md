@@ -206,6 +206,34 @@ spaces. Set its checkpoint path to the experiment you want to inspect.
 This script is separate from the older Ultralytics trainer integration in
 `scripts/train_yolo_classifier_supcon.py` and `smartrodent.yolo_supcon`.
 
+### Model cards
+
+Standalone SupCon training fills `configs/model_card_template.yaml` with the
+selected best checkpoint's model name, registry version, class mapping, and
+validation results. Set `model_card_template` in the training config to use a
+different template. Editable narrative fields are preserved.
+
+The `provenance` section records the checkpoint filename, SHA-256, epoch,
+MLflow run and model IDs, Git commit, and dataset revision. Unavailable IDs or
+revisions remain `null`. Provenance is included in both YAML and Markdown.
+
+Both `epoch_0007.model_card.yaml` and `epoch_0007.model_card.md` are saved beside
+`epoch_0007.pt`. With MLflow registration enabled, both files are uploaded to the
+logged model and the Markdown becomes the registered version's description.
+Without registration, the version is unset; cards are saved locally and uploaded
+to the run when tracking is enabled.
+
+The generic helpers in `smartrodent.model_card` also work independently:
+
+```python
+from pathlib import Path
+from smartrodent.model_card import load_card_template, render_model_card
+
+card = load_card_template(Path("configs/model_card_template.yaml"))
+card["model"]["name"] = "rodent-species"
+markdown = render_model_card(card)
+```
+
 ## Tests
 
 Install the development extra, then run the test suite from the repository

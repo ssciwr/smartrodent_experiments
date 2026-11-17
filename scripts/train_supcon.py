@@ -2,6 +2,7 @@
 
 import argparse
 import functools
+import hashlib
 import random
 import subprocess
 from collections.abc import Callable, Mapping
@@ -20,6 +21,10 @@ from mlflow import MlflowClient
 from pytorch_metric_learning.losses import SupConLoss
 from pytorch_metric_learning.samplers import MPerClassSampler
 from smartrodent import config_utils
+from smartrodent.model_card import (
+    load_card_template,
+    write_model_card,
+)
 from smartrodent.supcon_datasets import (
     ImageDataset,
     MultiViewImageDataset,
@@ -162,6 +167,7 @@ class TrainingConfiguration:
         validation_metrics: Scikit-learn metrics computed from validation predictions.
         tracked_metric: Validation metric whose highest value selects the best model.
         early_stopping: Optional patience, tolerance, and comparison settings.
+        model_card_template: YAML template used for the selected checkpoint's card.
     """
 
     train_dataset: Path
@@ -188,6 +194,7 @@ class TrainingConfiguration:
     validation_metrics: Mapping[str, Mapping[str, Any]] | None = None
     tracked_metric: str | None = None
     early_stopping: Mapping[str, Any] | None = None
+    model_card_template: str = "configs/model_card_template.yaml"
 
     def __post_init__(self):
         """Reject invalid settings before building datasets or writing outputs."""
@@ -478,6 +485,8 @@ class SupConExperiment:
     def __init__(self, configuration: TrainingConfiguration):
         self.configuration = configuration
         self.validation_metrics = self._resolve_validation_metrics()
+        # Fail on malformed templates before spending time on training.
+        self.card_template = load_card_template(Path(configuration.model_card_template))
 
     def _register_best_model(
         self,
@@ -523,6 +532,17 @@ class SupConExperiment:
                 value,
             )
 
+        card_paths = self._write_model_card(
+            checkpoint, checkpoint_data, version,
+            provenance={**source_tags, "run_id": model_info.run_id, "model_id": model_info.model_id},
+        )
+        for path in card_paths:
+            client.log_model_artifact(model_info.model_id, str(path))
+        client.update_model_version(
+            name=mlflow_config.registered_model_name,
+            version=version,
+            description=card_paths[1].read_text(encoding="utf-8"),
+        )
         if validation_status == "passed":
             client.set_registered_model_alias(
                 mlflow_config.registered_model_name,
@@ -908,7 +928,9 @@ class SupConExperiment:
         if config.mlflow is None:
             model = None
             try:
-                final_checkpoint, _, _, _, model = self._run_training()
+                final_checkpoint, best_checkpoint, _, _, model = self._run_training()
+                checkpoint_data = torch.load(best_checkpoint, map_location="cpu", weights_only=True)
+                self._write_model_card(best_checkpoint, checkpoint_data)
                 return final_checkpoint
             finally:
                 if model is not None:
@@ -918,7 +940,7 @@ class SupConExperiment:
         client = MlflowClient(tracking_uri=config.mlflow.tracking_uri)
         source_tags = config.mlflow.run_tags()
         model = None
-        with mlflow.start_run(run_name=Path(config.output_directory).name):
+        with mlflow.start_run(run_name=Path(config.output_directory).name) as run:
             try:
                 mlflow.set_tags(source_tags)
                 mlflow.log_params(config.mlflow_parameters())
@@ -945,10 +967,50 @@ class SupConExperiment:
                         source_tags,
                         best_epoch,
                     )
+                else:
+                    checkpoint_data = torch.load(best_checkpoint, map_location="cpu", weights_only=True)
+                    for path in self._write_model_card(
+                        best_checkpoint, checkpoint_data,
+                        provenance={**source_tags, "run_id": run.info.run_id},
+                    ):
+                        mlflow.log_artifact(str(path), artifact_path="best_model")
             finally:
                 if model is not None:
                     model.finalize()
         return final_checkpoint
+
+    def _write_model_card(
+        self, checkpoint: Path, checkpoint_data: dict, version: str | None = None,
+        *, provenance: Mapping[str, str] | None = None,
+    ) -> tuple[Path, Path]:
+        """Fill the template with the selected snapshot's metadata and save it."""
+        config = self.configuration
+        card = deepcopy(self.card_template)
+        name = config.mlflow.registered_model_name if config.mlflow else None
+        card["model"].update(
+            name=name or Path(config.output_directory).name,
+            registry_version=version, base_model=config.model_name,
+        )
+        card["classes"] = dict(sorted(
+            ((index, name) for name, index in checkpoint_data["label_names"].items())
+        ))
+        # The snapshot's last history row belongs to that snapshot, not the final epoch.
+        metrics = checkpoint_data["history"][-1].get("validation", {})
+        card["validation"].update(
+            status="evaluated" if metrics else "not_validated",
+            dataset=str(config.validation_dataset) if config.validation_dataset else None,
+            epoch=checkpoint_data["epoch"], metrics=metrics,
+        )
+        with checkpoint.open("rb") as stream:
+            checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+        card["provenance"].update(
+            checkpoint=checkpoint.name, checkpoint_sha256=checksum,
+            epoch=checkpoint_data["epoch"], run_id=None, model_id=None,
+            git_commit=_git_commit(),
+            dataset_revision=config.mlflow.dataset_revision if config.mlflow else None,
+        )
+        card["provenance"].update(provenance or {})
+        return write_model_card(card, checkpoint)
 
 
 def _git_commit() -> str:
