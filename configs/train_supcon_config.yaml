@@ -1,8 +1,17 @@
 # Run from the repository root:
 # python scripts/train_supcon.py configs/train_supcon_config.yaml
-train_dataset: datasets/stage8_yolo_classifier_not_oversampled/train
+train_dataset: datasets/stage8_yolo_classifier/train
+validation_dataset: datasets/stage8_yolo_classifier/val
 output_directory: runs/supcon_standalone_xl
 model_name: notebooks/yolo26x-cls.pt
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: smartrodent-standalone-supcon
+  registered_model_name: rodent-species
+  model_artifact_name: classifier
+  champion_alias: champion
+  # Set this to the immutable DVC/data revision used for the run when available.
+  # dataset_revision: <revision>
 class_names:
   - Rattus norvegicus # brown rat
   - Rattus rattus # black rat
@@ -49,18 +58,65 @@ class_names:
   - Felis catus # house cat
   - Canis familiaris # domestic dog
 epochs: 15
-image_size: 448
+transforms:
+  image_size: 448
+  resize:
+    interpolation: bilinear
+    antialias: true
+  random_adjust_sharpness:
+    sharpness_factor: 0.5
+    p: 0.2
+  random_grayscale:
+    p: 0.2
+  random_perspective:
+    distortion_scale: 0.5
+    p: 0.2
+    interpolation: bilinear
+    fill: 0
+  random_horizontal_flip:
+    p: 0.2
+  random_resized_crop:
+    scale: [0.75, 1.0]
+    ratio: [0.75, 1.3333333333333333]
+    interpolation: bilinear
+    antialias: true
+optimizer:
+  lr: !sweep
+    values:
+      - 0.0001
+      - 0.001
+      - 0.005
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+  weight_decay: 0.01
+  amsgrad: false
 classes_per_batch: 4
-samples_per_class: 5
+samples_per_class: 4
 # Matches the notebook sampler's default; rounded down to complete source batches.
 samples_per_epoch: 100000
 workers: 20
 prefetch_factor: 4
 seed: 42
 device: cuda
-learning_rate: 0.0001
-dropout: 0.5
+dropout: !sweep
+  values:
+    - 0.0
+    - 0.5
 output_features: 128
 temperature: 0.1
 freeze: []
-log_every: 50
+log_every: 10
+validation_metrics:
+  accuracy:
+    function: accuracy_score
+  balanced_accuracy:
+    function: balanced_accuracy_score
+  f1_macro:
+    function: f1_score
+    average: macro
+    zero_division: 0
+tracked_metric: supcon_loss_mean # not defined means track supcon_loss
+early_stopping:
+  patience: 5
+  tolerance: 0.001
+  comparison: less
