@@ -139,6 +139,104 @@ class MlflowConfiguration:
 
 
 @dataclass(frozen=True)
+class SchedulerConfiguration:
+    """Configure a native PyTorch validation-driven learning-rate scheduler.
+
+    Args:
+        name: Supported PyTorch scheduler class name, ``ReduceLROnPlateau``.
+        parameters: Native scheduler arguments, excluding the optimizer.
+    """
+
+    name: str
+    parameters: Mapping[str, Any]
+
+    def __post_init__(self):
+        """Reject unsupported schedulers and invalid native parameters early."""
+        if self.name != "ReduceLROnPlateau":
+            raise ValueError("scheduler.name must be 'ReduceLROnPlateau'")
+        if not isinstance(self.parameters, Mapping):
+            raise TypeError("scheduler.parameters must be a mapping")
+        allowed = {
+            "mode",
+            "factor",
+            "patience",
+            "threshold",
+            "threshold_mode",
+            "cooldown",
+            "min_lr",
+            "eps",
+        }
+        if set(self.parameters).difference(allowed):
+            raise ValueError("Unsupported scheduler.parameters keys")
+        if self.mode not in ("min", "max"):
+            raise ValueError("scheduler.parameters.mode must be 'min' or 'max'")
+        if self.parameters.get("threshold_mode", "rel") not in ("rel", "abs"):
+            raise ValueError(
+                "scheduler.parameters.threshold_mode must be 'rel' or 'abs'"
+            )
+        for name in ("patience", "cooldown"):
+            value = self.parameters.get(name, 10 if name == "patience" else 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f"scheduler.parameters.{name} must be a nonnegative integer"
+                )
+        defaults = {"factor": 0.1, "threshold": 0.0001, "min_lr": 0.0, "eps": 1e-8}
+        for name, default in defaults.items():
+            value = self.parameters.get(name, default)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not np.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"scheduler.parameters.{name} must be finite and nonnegative"
+                )
+        if not 0 < self.parameters.get("factor", 0.1) < 1:
+            raise ValueError(
+                "scheduler.parameters.factor must be between 0 and 1 exclusively"
+            )
+
+    @property
+    def mode(self) -> str:
+        """Return the native comparison mode, defaulting to PyTorch's minimum."""
+        return self.parameters.get("mode", "min")
+
+    @classmethod
+    def from_mapping(cls, values: Mapping | None) -> "SchedulerConfiguration | None":
+        """Parse optional YAML scheduler settings.
+
+        Args:
+            values: Mapping with ``name`` and ``parameters``, or ``None``.
+
+        Returns:
+            Validated scheduler settings, or ``None`` for constant learning rate.
+        """
+        if values is None:
+            return None
+        if not isinstance(values, Mapping):
+            raise TypeError("scheduler must be a mapping")
+        if set(values) != {"name", "parameters"}:
+            raise ValueError("scheduler requires exactly name and parameters")
+        if not isinstance(values["parameters"], Mapping):
+            raise TypeError("scheduler.parameters must be a mapping")
+        return cls(values["name"], dict(values["parameters"]))
+
+    def build(
+        self, optimizer: torch.optim.Optimizer
+    ) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
+        """Construct the scheduler bound to this run's optimizer.
+
+        Args:
+            optimizer: Optimizer whose learning rate will be adjusted.
+
+        Returns:
+            A native PyTorch plateau scheduler with the configured parameters.
+        """
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **self.parameters)
+
+
+@dataclass(frozen=True)
 class TrainingConfiguration:
     """Configure the standalone, full-precision contrastive training experiment.
 
@@ -167,6 +265,7 @@ class TrainingConfiguration:
         validation_metrics: Scikit-learn metrics computed from validation predictions.
         tracked_metric: Validation metric whose highest value selects the best model.
         early_stopping: Optional patience, tolerance, and comparison settings.
+        scheduler: Optional validation-driven learning-rate scheduler settings.
         model_card_template: YAML template used for the selected checkpoint's card.
     """
 
@@ -194,6 +293,7 @@ class TrainingConfiguration:
     validation_metrics: Mapping[str, Mapping[str, Any]] | None = None
     tracked_metric: str | None = None
     early_stopping: Mapping[str, Any] | None = None
+    scheduler: SchedulerConfiguration | None = None
     model_card_template: str = "configs/model_card_template.yaml"
 
     def __post_init__(self):
@@ -275,9 +375,10 @@ class TrainingConfiguration:
                 self.validation_metrics is not None
                 or self.tracked_metric is not None
                 or self.early_stopping is not None
+                or self.scheduler is not None
             ):
                 raise ValueError(
-                    "validation_metrics, tracked_metric, and early_stopping require "
+                    "validation_metrics, tracked_metric, early_stopping, and scheduler require "
                     "validation_dataset"
                 )
         elif self.tracked_metric is not None:
@@ -296,6 +397,21 @@ class TrainingConfiguration:
                 )
         if self.early_stopping is not None:
             EarlyStopping.from_mapping(self.early_stopping)
+        if self.scheduler is not None:
+            if not isinstance(self.scheduler, SchedulerConfiguration):
+                raise TypeError("scheduler must be a SchedulerConfiguration or null")
+            if self.scheduler.parameters.get("min_lr", 0.0) > learning_rate:
+                raise ValueError(
+                    "scheduler.parameters.min_lr must not exceed optimizer.lr"
+                )
+            if self.early_stopping is not None:
+                expected_mode = {"less": "min", "greater": "max"}[
+                    self.early_stopping["comparison"]
+                ]
+                if self.scheduler.mode != expected_mode:
+                    raise ValueError(
+                        "scheduler mode must agree with early_stopping.comparison"
+                    )
 
     @property
     def batch_size(self) -> int:
@@ -334,6 +450,9 @@ class TrainingConfiguration:
                 raise TypeError(f"{name} must be a mapping")
             values[name] = dict(values[name])
         values["mlflow"] = MlflowConfiguration.from_mapping(values.get("mlflow"))
+        values["scheduler"] = SchedulerConfiguration.from_mapping(
+            values.get("scheduler")
+        )
         validation_dataset = values.get("validation_dataset")
         if validation_dataset is not None:
             values["validation_dataset"] = Path(validation_dataset)
@@ -405,15 +524,25 @@ class TrainingConfiguration:
                     for name, value in self.early_stopping.items()
                 }
             )
+        if self.scheduler is not None:
+            parameters["scheduler_name"] = self.scheduler.name
+            parameters.update(
+                {
+                    f"scheduler_{name}": value
+                    for name, value in self.scheduler.parameters.items()
+                }
+            )
         return parameters
 
 
 class EarlyStopping:
-    """Stop after repeated failures to improve beyond a tolerance threshold.
+    """Stop after repeated failures to improve on the best value seen so far.
 
-    The tolerance is subtracted from the previous value before applying the
-    configured comparison. For ``less``, a value therefore improves only when
-    it is lower than ``previous_value - tolerance``.
+    A value improves only when it beats the best value by more than the
+    tolerance: for ``less`` it must be lower than ``best - tolerance``, for
+    ``greater`` it must be higher than ``best + tolerance``. Comparing against
+    the best value, not the previous one, keeps noisy metrics from resetting
+    patience with dips that never beat the best.
     """
 
     def __init__(self, patience: int, tolerance: float, comparison: str):
@@ -432,9 +561,8 @@ class EarlyStopping:
         self.patience = patience
         self.current_patience = patience
         self.tol = float(tolerance)
-        self.compare = (
-            (lambda x, y: x > y) if comparison == "greater" else (lambda x, y: x < y)
-        )
+        self.comparison = comparison
+        self.best: float | None = None
         self.history: list[float] = []
 
     @classmethod
@@ -458,20 +586,29 @@ class EarlyStopping:
 
         return cls(config["patience"], config["tolerance"], config["comparison"])
 
+    def _improves(self, value: float) -> bool:
+        """Return whether a value beats the best value by more than the tolerance."""
+        if self.comparison == "less":
+            return value < self.best - self.tol
+        elif self.comparison == "greater":
+            return value > self.best + self.tol
+        else:
+            raise ValueError(f"Unsupported comparison '{self.comparison}'")
+
     def __call__(self, value: float) -> bool:
         """Record a value and report whether patience has been exhausted."""
         if not np.isfinite(value):
             raise ValueError("Early-stopping values must be finite")
-        if not self.history:
-            self.history.append(value)
+        self.history.append(value)
+        if self.best is None:
+            self.best = value
             return False
 
-        if self.compare(value, self.history[-1] - self.tol):
+        if self._improves(value):
+            self.best = value
             self.current_patience = self.patience
         else:
             self.current_patience -= 1
-
-        self.history.append(value)
         return self.current_patience == 0
 
 
@@ -533,8 +670,14 @@ class SupConExperiment:
             )
 
         card_paths = self._write_model_card(
-            checkpoint, checkpoint_data, version,
-            provenance={**source_tags, "run_id": model_info.run_id, "model_id": model_info.model_id},
+            checkpoint,
+            checkpoint_data,
+            version,
+            provenance={
+                **source_tags,
+                "run_id": model_info.run_id,
+                "model_id": model_info.model_id,
+            },
         )
         for path in card_paths:
             client.log_model_artifact(model_info.model_id, str(path))
@@ -744,8 +887,10 @@ class SupConExperiment:
             )
         return results
 
-    def _save_checkpoint(self, model, optimizer, epoch, history) -> Path:
-        """Save weights, architecture, label mapping, optimizer, and scalar history."""
+    def _save_checkpoint(
+        self, model, optimizer, epoch, history, scheduler=None
+    ) -> Path:
+        """Save model and training state at the boundary before the next epoch."""
         config = self.configuration
         path = Path(config.output_directory) / f"epoch_{epoch:04d}.pt"
         torch.save(
@@ -760,6 +905,9 @@ class SupConExperiment:
                 },
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": (
+                    scheduler.state_dict() if scheduler is not None else None
+                ),
                 "label_names": dict(model.label_names),
                 "configuration": config.to_dict(),
                 "history": list(history),
@@ -796,6 +944,9 @@ class SupConExperiment:
         optimizer = torch.optim.AdamW(
             (p for p in model.parameters() if p.requires_grad), **config.optimizer
         )
+        scheduler = (
+            config.scheduler.build(optimizer) if config.scheduler is not None else None
+        )
         criterion = SupConLoss(temperature=config.temperature)
         early_stopping = (
             EarlyStopping.from_mapping(config.early_stopping)
@@ -818,6 +969,7 @@ class SupConExperiment:
         return_live_model = False
         try:
             for epoch in range(1, config.epochs + 1):
+                learning_rate = optimizer.param_groups[0]["lr"]
                 losses = []
                 progress = tqdm(loader, desc=f"Epoch {epoch}")
                 for step, (labels, images) in enumerate(progress):
@@ -842,6 +994,7 @@ class SupConExperiment:
                     "mean": values.mean().item(),
                     "std": values.std(correction=1 if len(values) > 1 else 0).item(),
                     "max": values.max().item(),
+                    "learning_rate": learning_rate,
                 }
                 validation = (
                     self._validate(model, validation_loader, criterion)
@@ -850,12 +1003,32 @@ class SupConExperiment:
                 )
                 if validation:
                     statistics["validation"] = validation
+                    tracked_metric = config.effective_tracked_metric
+                    tracked_value = validation[tracked_metric]
+                    selection_value = (
+                        -tracked_value
+                        if tracked_metric.startswith("supcon_loss_")
+                        else tracked_value
+                    )
+                else:
+                    tracked_value = statistics["mean"]
+                    selection_value = -tracked_value
+                if scheduler is not None:
+                    # Step after validation, before saving both optimizer and scheduler:
+                    # the checkpoint then holds the LR ready for the next epoch.
+                    scheduler.step(tracked_value)
+                next_learning_rate = optimizer.param_groups[0]["lr"]
+                statistics["next_learning_rate"] = next_learning_rate
                 history.append(statistics)
                 print(
                     f"Epoch: {epoch}, {statistics['min']:.6f}, "
                     f"{statistics['mean']:.6f} +/- {statistics['std']:.6f}, "
-                    f"{statistics['max']:.6f}"
+                    f"{statistics['max']:.6f}; lr={learning_rate:.6g}"
                 )
+                if next_learning_rate < learning_rate:
+                    print(
+                        f"Learning rate reduced: {learning_rate:.6g} -> {next_learning_rate:.6g} for the next epoch"
+                    )
                 if validation:
                     print(
                         "Validation: "
@@ -863,7 +1036,9 @@ class SupConExperiment:
                             f"{name}={value:.6f}" for name, value in validation.items()
                         )
                     )
-                checkpoint = self._save_checkpoint(model, optimizer, epoch, history)
+                checkpoint = self._save_checkpoint(
+                    model, optimizer, epoch, history, scheduler
+                )
                 (output / "history.yaml").write_text(
                     yaml.safe_dump(history, sort_keys=False)
                 )
@@ -873,6 +1048,8 @@ class SupConExperiment:
                         "supcon_loss_mean": statistics["mean"],
                         "supcon_loss_std": statistics["std"],
                         "supcon_loss_max": statistics["max"],
+                        "learning_rate": learning_rate,
+                        "next_learning_rate": next_learning_rate,
                     }
                     mlflow_metrics.update(
                         {
@@ -881,18 +1058,6 @@ class SupConExperiment:
                         }
                     )
                     mlflow.log_metrics(mlflow_metrics, step=epoch)
-                if validation:
-                    tracked_metric = config.effective_tracked_metric
-                    tracked_value = validation[tracked_metric]
-                    selection_value = (
-                        -tracked_value
-                        if tracked_metric.startswith("supcon_loss_")
-                        else tracked_value
-                    )
-
-                else:
-                    tracked_value = statistics["mean"]
-                    selection_value = -tracked_value
                 if selection_value > best_selection_value:
                     best_selection_value = selection_value
                     best_metric_value = tracked_value
@@ -929,7 +1094,9 @@ class SupConExperiment:
             model = None
             try:
                 final_checkpoint, best_checkpoint, _, _, model = self._run_training()
-                checkpoint_data = torch.load(best_checkpoint, map_location="cpu", weights_only=True)
+                checkpoint_data = torch.load(
+                    best_checkpoint, map_location="cpu", weights_only=True
+                )
                 self._write_model_card(best_checkpoint, checkpoint_data)
                 return final_checkpoint
             finally:
@@ -968,9 +1135,12 @@ class SupConExperiment:
                         best_epoch,
                     )
                 else:
-                    checkpoint_data = torch.load(best_checkpoint, map_location="cpu", weights_only=True)
+                    checkpoint_data = torch.load(
+                        best_checkpoint, map_location="cpu", weights_only=True
+                    )
                     for path in self._write_model_card(
-                        best_checkpoint, checkpoint_data,
+                        best_checkpoint,
+                        checkpoint_data,
                         provenance={**source_tags, "run_id": run.info.run_id},
                     ):
                         mlflow.log_artifact(str(path), artifact_path="best_model")
@@ -980,8 +1150,12 @@ class SupConExperiment:
         return final_checkpoint
 
     def _write_model_card(
-        self, checkpoint: Path, checkpoint_data: dict, version: str | None = None,
-        *, provenance: Mapping[str, str] | None = None,
+        self,
+        checkpoint: Path,
+        checkpoint_data: dict,
+        version: str | None = None,
+        *,
+        provenance: Mapping[str, str] | None = None,
     ) -> tuple[Path, Path]:
         """Fill the template with the selected snapshot's metadata and save it."""
         config = self.configuration
@@ -989,23 +1163,35 @@ class SupConExperiment:
         name = config.mlflow.registered_model_name if config.mlflow else None
         card["model"].update(
             name=name or Path(config.output_directory).name,
-            registry_version=version, base_model=config.model_name,
+            registry_version=version,
+            base_model=config.model_name,
         )
-        card["classes"] = dict(sorted(
-            ((index, name) for name, index in checkpoint_data["label_names"].items())
-        ))
+        card["classes"] = dict(
+            sorted(
+                (
+                    (index, name)
+                    for name, index in checkpoint_data["label_names"].items()
+                )
+            )
+        )
         # The snapshot's last history row belongs to that snapshot, not the final epoch.
         metrics = checkpoint_data["history"][-1].get("validation", {})
         card["validation"].update(
             status="evaluated" if metrics else "not_validated",
-            dataset=str(config.validation_dataset) if config.validation_dataset else None,
-            epoch=checkpoint_data["epoch"], metrics=metrics,
+            dataset=(
+                str(config.validation_dataset) if config.validation_dataset else None
+            ),
+            epoch=checkpoint_data["epoch"],
+            metrics=metrics,
         )
         with checkpoint.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
         card["provenance"].update(
-            checkpoint=checkpoint.name, checkpoint_sha256=checksum,
-            epoch=checkpoint_data["epoch"], run_id=None, model_id=None,
+            checkpoint=checkpoint.name,
+            checkpoint_sha256=checksum,
+            epoch=checkpoint_data["epoch"],
+            run_id=None,
+            model_id=None,
             git_commit=_git_commit(),
             dataset_revision=config.mlflow.dataset_revision if config.mlflow else None,
         )

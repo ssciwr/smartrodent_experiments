@@ -1,7 +1,7 @@
 # Run from the repository root:
 # python scripts/train_supcon.py configs/train_supcon_config.yaml
-train_dataset: datasets/stage8_yolo_classifier/train
-validation_dataset: datasets/stage8_yolo_classifier/val
+train_dataset: datasets/stage8_yolo_classifier_not_oversampled/train
+validation_dataset: datasets/stage8_yolo_classifier_not_oversampled/val
 output_directory: runs/supcon_standalone_xl
 model_name: notebooks/yolo26x-cls.pt
 mlflow:
@@ -57,7 +57,7 @@ class_names:
   - Ardea cinerea # grey heron
   - Felis catus # house cat
   - Canis familiaris # domestic dog
-epochs: 15
+epochs: 30
 transforms:
   image_size: 448
   resize:
@@ -84,8 +84,8 @@ optimizer:
   lr: !sweep
     values:
       - 0.0001
+      - 0.0005
       - 0.001
-      - 0.005
   betas: [0.9, 0.999]
   eps: 1.0e-08
   weight_decay: 0.01
@@ -98,10 +98,7 @@ workers: 20
 prefetch_factor: 4
 seed: 42
 device: cuda
-dropout: !sweep
-  values:
-    - 0.0
-    - 0.5
+dropout: 0.0
 output_features: 128
 temperature: 0.1
 freeze: []
@@ -116,6 +113,17 @@ validation_metrics:
     average: macro
     zero_division: 0
 tracked_metric: supcon_loss_mean # not defined means track supcon_loss
+scheduler:
+  name: ReduceLROnPlateau
+  parameters:
+    mode: min
+    factor: 0.5
+    # PyTorch reduces after patience + 1 non-improving epochs.
+    patience: 2
+    threshold: 0.001
+    threshold_mode: abs
+    min_lr: 0.000001
+    cooldown: 0
 early_stopping:
   patience: 5
   tolerance: 0.001

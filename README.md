@@ -182,12 +182,27 @@ The YAML config specifies the source species, augmentation size, P-K batch,
 workers, optimizer settings, and output directory. A batch contains
 `classes_per_batch * samples_per_class` source images and twice as many augmented
 views. `samples_per_epoch` counts source-image selections and is rounded down to
-complete batches. The default experiment uses FP32, without AMP or validation.
+complete batches. Training uses FP32 without AMP. Set `validation_dataset` to
+enable validation; the supplied config monitors mean validation SupCon loss.
+
+The optional `scheduler` mapping selects `ReduceLROnPlateau` by `name` and accepts
+native PyTorch arguments under `parameters`. Omit it or set it to `null` for a
+constant learning rate. Scheduling requires validation and monitors
+`tracked_metric` (default: `supcon_loss_mean`). Its `mode` must agree with the
+early-stopping comparison when early stopping is configured.
+
+The supplied config halves the learning rate after three non-improving epochs
+(`patience: 2` in PyTorch), using an absolute improvement threshold of `0.001`
+and a floor of `0.000001`. A reduction applies to the next epoch and does not
+reset early-stopping patience. History and MLflow record `learning_rate` for the
+completed epoch and `next_learning_rate` for the following epoch.
 
 Each epoch saves `epoch_0001.pt`, etc., along with `config.yaml` and `history.yaml`.
 Checkpoints contain architecture, encoder/classifier/projector weights, class
-mapping, optimizer state, and experiment settings. Evaluation can reload a model
-without the original pretrained weights or the original Python session:
+mapping, optimizer state, scheduler state, and experiment settings. Optimizer and
+scheduler state are saved after the scheduler steps, ready for the next epoch.
+Training resumption is not currently exposed by the script. Evaluation can reload
+a model without the original pretrained weights or the original Python session:
 
 ```python
 from smartrodent.supcon_model import YoloSupConModel
