@@ -6,6 +6,8 @@ import random
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from numbers import Real
+from operator import gt, lt
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ from mlflow import MlflowClient
 from pytorch_metric_learning.losses import SupConLoss
 from pytorch_metric_learning.samplers import MPerClassSampler
 from smartrodent import config_utils
+from smartrodent.experiment_results import ExperimentResult
 # Re-export the existing configuration names for callers importing this script.
 from smartrodent.experiment_support import (
     CheckpointStore,
@@ -69,7 +72,8 @@ class TrainingConfiguration:
         mlflow: Optional MLflow tracking settings.
         validation_dataset: Optional directory containing validation class folders.
         validation_metrics: Scikit-learn metrics computed from validation predictions.
-        tracked_metric: Validation metric whose highest value selects the best model.
+        tracked_metric: Validation metric used to select the best model.
+        tracked_mode: Optional ``min``/``max`` direction; omitted preserves legacy defaults.
         early_stopping: Optional patience, tolerance, and comparison settings.
         scheduler: Optional validation-driven learning-rate scheduler settings.
         model_card_template: YAML template used for the selected checkpoint's card.
@@ -101,6 +105,7 @@ class TrainingConfiguration:
     early_stopping: Mapping[str, Any] | None = None
     scheduler: SchedulerConfiguration | None = None
     model_card_template: str = "configs/model_card_template.yaml"
+    tracked_mode: str | None = None
 
     def __post_init__(self):
         """Reject invalid settings before building datasets or writing outputs."""
@@ -172,6 +177,8 @@ class TrainingConfiguration:
             raise ValueError("dropout must be between zero and one")
         if any(not isinstance(index, int) or index < 0 for index in self.freeze):
             raise ValueError("freeze must contain nonnegative layer indices")
+        if self.tracked_mode is not None and self.tracked_mode not in ("min", "max"):
+            raise ValueError("tracked_mode must be 'min', 'max', or null")
         output = Path(self.output_directory).resolve()
         source = Path(self.train_dataset).resolve()
         if output.is_relative_to(source):
@@ -180,11 +187,12 @@ class TrainingConfiguration:
             if (
                 self.validation_metrics is not None
                 or self.tracked_metric is not None
+                or self.tracked_mode is not None
                 or self.early_stopping is not None
                 or self.scheduler is not None
             ):
                 raise ValueError(
-                    "validation_metrics, tracked_metric, early_stopping, and scheduler require "
+                    "validation_metrics, tracked_metric, tracked_mode, early_stopping, and scheduler require "
                     "validation_dataset"
                 )
         elif self.tracked_metric is not None:
@@ -201,8 +209,10 @@ class TrainingConfiguration:
                 raise ValueError(
                     f"tracked_metric '{self.tracked_metric}' is not available"
                 )
+        stopping_mode = None
         if self.early_stopping is not None:
-            EarlyStopping.from_mapping(self.early_stopping)
+            stopper = EarlyStopping.from_mapping(self.early_stopping)
+            stopping_mode = "min" if stopper.comparison == "less" else "max"
         if self.scheduler is not None:
             if not isinstance(self.scheduler, SchedulerConfiguration):
                 raise TypeError("scheduler must be a SchedulerConfiguration or null")
@@ -210,14 +220,15 @@ class TrainingConfiguration:
                 raise ValueError(
                     "scheduler.parameters.min_lr must not exceed optimizer.lr"
                 )
-            if self.early_stopping is not None:
-                expected_mode = {"less": "min", "greater": "max"}[
-                    self.early_stopping["comparison"]
-                ]
-                if self.scheduler.mode != expected_mode:
-                    raise ValueError(
-                        "scheduler mode must agree with early_stopping.comparison"
-                    )
+            if stopping_mode is not None and self.scheduler.mode != stopping_mode:
+                raise ValueError(
+                    "scheduler mode must agree with early_stopping.comparison"
+                )
+        if self.tracked_mode is not None:
+            if self.scheduler is not None and self.scheduler.mode != self.tracked_mode:
+                raise ValueError("scheduler direction must agree with tracked_mode")
+            if stopping_mode is not None and stopping_mode != self.tracked_mode:
+                raise ValueError("early_stopping direction must agree with tracked_mode")
 
     @property
     def batch_size(self) -> int:
@@ -228,6 +239,13 @@ class TrainingConfiguration:
     def effective_tracked_metric(self) -> str:
         """Return the configured metric or the mean validation SupCon loss."""
         return self.tracked_metric or "supcon_loss_mean"
+
+    @property
+    def effective_tracked_mode(self) -> str:
+        """Return explicit direction or preserve the legacy loss/score defaults."""
+        if self.tracked_mode is not None:
+            return self.tracked_mode
+        return "min" if self.effective_tracked_metric.startswith("supcon_loss_") else "max"
 
     @classmethod
     def from_mapping(cls, values: Mapping) -> "TrainingConfiguration":
@@ -323,6 +341,7 @@ class TrainingConfiguration:
         if self.validation_dataset is not None:
             parameters["validation_dataset"] = str(self.validation_dataset)
             parameters["tracked_metric"] = self.effective_tracked_metric
+            parameters["tracked_mode"] = self.effective_tracked_mode
         if self.early_stopping is not None:
             parameters.update(
                 {
@@ -486,13 +505,23 @@ class SupConExperiment:
             batch_size=config.batch_size,
             length_before_new_iter=validation_length,
         )
+        # PML draws from NumPy's global RNG. Materialize one seeded cohort and
+        # restore that RNG immediately, so validation neither resamples each epoch
+        # nor changes the training sampler's future draws. Reuse PML's P–K policy.
+        numpy_state = np.random.get_state()
+        try:
+            np.random.seed(config.seed)
+            indices = list(sampler)
+        finally:
+            np.random.set_state(numpy_state)
         options = dict(
             dataset=dataset,
-            sampler=sampler,
+            sampler=indices,
             batch_size=config.batch_size,
             num_workers=config.workers,
             pin_memory=torch.device(config.device).type == "cuda",
             drop_last=True,
+            generator=torch.Generator().manual_seed(config.seed),
             persistent_workers=config.workers > 0,
         )
         if config.workers > 0:
@@ -584,7 +613,7 @@ class SupConExperiment:
     def _run_training(
         self,
     ) -> tuple[Path, Path, float, int, YoloSupConModel]:
-        """Train and return checkpoints, selection data, and the live model."""
+        """Train and return checkpoints, tracked-metric results, and the live model."""
         config = self.configuration
         random.seed(config.seed)
         np.random.seed(config.seed)
@@ -629,7 +658,10 @@ class SupConExperiment:
         )
         history = []
         best_checkpoint = None
-        best_selection_value = float("-inf")
+        tracked_metric = config.effective_tracked_metric
+        tracked_mode = config.effective_tracked_mode
+        is_improvement = lt if tracked_mode == "min" else gt
+        best_metric_value = float("inf") if tracked_mode == "min" else float("-inf")
         best_epoch = 0
         return_live_model = False
         try:
@@ -666,18 +698,15 @@ class SupConExperiment:
                     if validation_loader is not None
                     else {}
                 )
-                if validation:
+                if validation_loader is not None:
+                    if tracked_metric not in validation:
+                        raise ValueError(f"Validation is missing tracked metric '{tracked_metric}'")
                     statistics["validation"] = validation
-                    tracked_metric = config.effective_tracked_metric
                     tracked_value = validation[tracked_metric]
-                    selection_value = (
-                        -tracked_value
-                        if tracked_metric.startswith("supcon_loss_")
-                        else tracked_value
-                    )
                 else:
                     tracked_value = statistics["mean"]
-                    selection_value = -tracked_value
+                if not isinstance(tracked_value, Real) or not np.isfinite(tracked_value):
+                    raise FloatingPointError(f"Nonfinite tracked validation metric '{tracked_metric}'")
                 if scheduler is not None:
                     # Step after validation, before saving both optimizer and scheduler:
                     # the checkpoint then holds the LR ready for the next epoch.
@@ -701,7 +730,7 @@ class SupConExperiment:
                             f"{name}={value:.6f}" for name, value in validation.items()
                         )
                     )
-                is_best = selection_value > best_selection_value
+                is_best = is_improvement(tracked_value, best_metric_value)
                 checkpoint = self._save_checkpoint(
                     model, optimizer, epoch, history, scheduler, is_best=is_best
                 )
@@ -725,7 +754,6 @@ class SupConExperiment:
                     )
                     mlflow.log_metrics(mlflow_metrics, step=epoch)
                 if is_best:
-                    best_selection_value = selection_value
                     best_metric_value = tracked_value
                     best_checkpoint = checkpoint.with_name("best.pt")
                     best_epoch = epoch
@@ -746,25 +774,40 @@ class SupConExperiment:
                 model.finalize()
 
     def run(self) -> Path:
-        """Train in FP32 and optionally track the run with MLflow.
+        """Train in FP32, preserving the standalone checkpoint-path API.
 
         Returns:
             Path of the final epoch checkpoint.
 
         Raises:
-            ValueError: Batch composition is incompatible with the source dataset.
-            FloatingPointError: An epoch contains nonfinite losses.
+            ValueError: Batch composition or configured tracked metrics are invalid.
+            FloatingPointError: Training or tracked validation values are nonfinite.
+        """
+        return self.run_with_result().last_checkpoint
+
+    def run_with_result(self) -> ExperimentResult:
+        """Train once and report the best epoch selected by the configured metric.
+
+        Returns:
+            Completed run metadata, including best/last checkpoints and an optional
+            MLflow run ID. Training-only runs remain valid standalone results.
+
+        Raises:
+            ValueError: Batch composition or configured tracked metrics are invalid.
+            FloatingPointError: Training or tracked validation values are nonfinite.
         """
         config = self.configuration
         if config.mlflow is None:
             model = None
             try:
-                final_checkpoint, best_checkpoint, _, _, model = self._run_training()
+                final_checkpoint, best_checkpoint, best_value, best_epoch, model = (
+                    self._run_training()
+                )
                 checkpoint_data = torch.load(
                     best_checkpoint, map_location="cpu", weights_only=True
                 )
                 self._write_model_card(best_checkpoint, checkpoint_data)
-                return final_checkpoint
+                return self._build_result(final_checkpoint, best_checkpoint, best_value, best_epoch)
             finally:
                 if model is not None:
                     model.finalize()
@@ -813,7 +856,31 @@ class SupConExperiment:
             finally:
                 if model is not None:
                     model.finalize()
-        return final_checkpoint
+        return self._build_result(
+            final_checkpoint, best_checkpoint, best_value, best_epoch, run.info.run_id
+        )
+
+    def _build_result(
+        self,
+        last_checkpoint: Path,
+        best_checkpoint: Path,
+        best_value: float,
+        best_epoch: int,
+        mlflow_run_id: str | None = None,
+    ) -> ExperimentResult:
+        """Report the same configured metric and snapshots used by the training loop."""
+        config = self.configuration
+        return ExperimentResult(
+            output_directory=Path(config.output_directory),
+            last_checkpoint=last_checkpoint,
+            best_checkpoint=best_checkpoint,
+            best_epoch=best_epoch,
+            tracked_metric=config.effective_tracked_metric,
+            tracked_mode=config.effective_tracked_mode,
+            best_value=best_value,
+            validation_dataset=config.validation_dataset,
+            mlflow_run_id=mlflow_run_id,
+        )
 
     def _write_model_card(
         self,
@@ -897,6 +964,8 @@ def load_training_configurations(config_path: Path) -> list[TrainingConfiguratio
             output_directory = Path(values["output_directory"])
             values["output_directory"] = output_directory / f"run_{run_number:03d}"
         configurations.append(TrainingConfiguration.from_mapping(values))
+    if len({config.temperature for config in configurations}) > 1:
+        raise ValueError("SupCon temperature must remain fixed within a sweep")
     return configurations
 
 

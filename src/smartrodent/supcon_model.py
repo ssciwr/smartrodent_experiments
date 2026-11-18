@@ -89,7 +89,11 @@ class YoloSupConModel(torch.nn.Module):
         """
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         required = {"architecture", "model_configuration", "model_state_dict", "label_names"}
-        if not isinstance(checkpoint, dict) or not required.issubset(checkpoint):
+        if (
+            not isinstance(checkpoint, dict)
+            or not required.issubset(checkpoint)
+            or checkpoint.get("checkpoint_type") not in (None, "supcon")
+        ):
             raise ValueError("Expected a checkpoint produced by scripts/train_supcon.py")
         architecture = deepcopy(checkpoint["architecture"])
         scale = architecture.get("scale")

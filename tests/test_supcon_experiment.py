@@ -5,6 +5,7 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import pickle
+import random
 import subprocess
 import sys
 
@@ -729,3 +730,278 @@ def test_scheduler_state_restoration_preserves_future_rates(values):
             restored_optimizer.param_groups[0]["lr"]
             == original_optimizer.param_groups[0]["lr"]
         )
+
+
+@pytest.fixture
+def validation_configuration(experiment_configuration, tmp_path):
+    """Create identifiable validation images only inside the temporary test fixture."""
+    validation = tmp_path / "validation-images"
+    for label, name in enumerate(sorted(experiment_configuration.class_names)):
+        directory = validation / name
+        directory.mkdir(parents=True)
+        for index in range(5):
+            Image.new("RGB", (16, 16), (20 + 30 * index, 255 * label, 80)).save(
+                directory / f"{index}.png"
+            )
+    return replace(experiment_configuration, validation_dataset=validation)
+
+
+@pytest.fixture
+def isolated_validation_rng():
+    """Restore global RNG state after simulating arbitrary training work."""
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    with torch.random.fork_rng(devices=[]):
+        try:
+            yield
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+
+
+def test_run_with_result_reports_training_only_best_without_changing_legacy_run(
+    experiment_configuration,
+):
+    """The additive result API describes real snapshots; run() still returns last.pt."""
+    from smartrodent import experiment_results
+
+    torch.set_num_threads(2)
+    config = experiment_configuration
+    result = SupConExperiment(config).run_with_result()
+    assert isinstance(result, experiment_results.ExperimentResult)
+    assert result.output_directory == config.output_directory
+    assert result.last_checkpoint == config.output_directory / "last.pt"
+    assert result.best_checkpoint == config.output_directory / "best.pt"
+    best = torch.load(result.best_checkpoint, weights_only=True)
+    last = torch.load(result.last_checkpoint, weights_only=True)
+    assert last["epoch"] == config.epochs
+    assert result.best_epoch == best["epoch"]
+    assert result.tracked_metric == "supcon_loss_mean"
+    assert result.tracked_mode == "min"
+    assert result.best_value == min(row["mean"] for row in last["history"])
+    assert result.validation_dataset is None
+    assert result.mlflow_run_id is None
+
+    legacy_config = replace(config, output_directory=config.output_directory / "legacy")
+    legacy_path = SupConExperiment(legacy_config).run()
+    assert legacy_path == legacy_config.output_directory / "last.pt"
+    assert torch.load(legacy_path, weights_only=True)["epoch"] == config.epochs
+
+
+@pytest.mark.parametrize("mode", ["min", "max"])
+@pytest.mark.parametrize("tracking", [False, True])
+def test_configured_metric_controls_checkpoint_result_scheduler_and_stopping(
+    validation_configuration, monkeypatch, tmp_path, mode, tracking
+):
+    """Honor the configured metric even when validation SupCon loss prefers another epoch."""
+    torch.set_num_threads(2)
+    tracking_config = None
+    if tracking:
+        tracking_config = train_supcon.MlflowConfiguration(
+            tracking_uri=f"sqlite:///{tmp_path / 'tracked.db'}",
+            experiment_name="tracked-tests",
+        )
+        client = train_supcon.MlflowClient(tracking_uri=tracking_config.tracking_uri)
+        client.create_experiment(
+            tracking_config.experiment_name, artifact_location=(tmp_path / "artifacts").as_uri()
+        )
+    config = replace(
+        validation_configuration,
+        epochs=8,
+        mlflow=tracking_config,
+        tracked_metric="balanced_accuracy",
+        tracked_mode=mode,
+        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        scheduler=SchedulerConfiguration(
+            "ReduceLROnPlateau", {"mode": mode, "patience": 0, "factor": 0.5}
+        ),
+        early_stopping={
+            "patience": 2, "tolerance": 0.0,
+            "comparison": "less" if mode == "min" else "greater",
+        },
+    )
+    tracked_values = [0.8, 0.2, 0.2, 0.5] if mode == "min" else [0.2, 0.8, 0.8, 0.5]
+    supcon_values = [0.1, 0.2, 0.3, 0.4]  # Loss prefers epoch 1, NOT the configured winner.
+    scores = iter(zip(tracked_values, supcon_values, strict=True))
+
+    def validate(self, model, loader, criterion):
+        """Supply conflicting metrics so accidentally hardcoding loss is observable."""
+        tracked, supcon = next(scores)
+        return {"balanced_accuracy": tracked, "supcon_loss_mean": supcon}
+
+    monkeypatch.setattr(SupConExperiment, "_validate", validate)
+    result = SupConExperiment(config).run_with_result()
+    last = torch.load(result.last_checkpoint, weights_only=True)
+    best = torch.load(result.best_checkpoint, weights_only=True)
+    history = last["history"]
+    assert last["epoch"] == 4  # Two misses after the configured metric's epoch-2 best.
+    assert best["epoch"] == result.best_epoch == 2  # First exact tie wins.
+    assert result.tracked_metric == config.tracked_metric
+    assert result.tracked_mode == mode
+    assert result.best_value == tracked_values[1]  # Original value, not a signed score.
+    assert result.validation_dataset == config.validation_dataset
+    assert [row["validation"]["balanced_accuracy"] for row in history] == tracked_values
+    assert [row["next_learning_rate"] for row in history] == [0.001, 0.001, 0.0005, 0.00025]
+    assert best["optimizer_state_dict"]["param_groups"][0]["lr"] == 0.001
+    assert last["configuration"]["tracked_metric"] == "balanced_accuracy"
+    assert last["configuration"]["tracked_mode"] == mode
+    assert all("selection" not in row for row in history)  # No separate scoring pass.
+    assert yaml.safe_load((config.output_directory / "history.yaml").read_text()) == history
+    card = yaml.safe_load((config.output_directory / "best.model_card.yaml").read_text())
+    assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
+    assert card["validation"]["metrics"]["balanced_accuracy"] == tracked_values[1]
+    assert {path.name for path in config.output_directory.glob("*.pt")} == {"best.pt", "last.pt"}
+    if tracking:
+        run = client.get_run(result.mlflow_run_id)
+        assert run.info.status == "FINISHED"
+        metrics = client.get_metric_history(result.mlflow_run_id, "validation/balanced_accuracy")
+        assert [item.step for item in metrics] == [1, 2, 3, 4]
+        assert [item.value for item in metrics] == tracked_values
+        assert run.data.metrics["best_validation_balanced_accuracy"] == tracked_values[1]
+        assert run.data.metrics["best_epoch"] == 2
+    else:
+        assert result.mlflow_run_id is None
+
+
+@pytest.mark.usefixtures("isolated_validation_rng")
+def test_normal_validation_loader_repeats_batches_without_perturbing_training_rng(
+    validation_configuration,
+):
+    """Reuse the existing validation data and loader, not a second evaluation pipeline."""
+    trainer = SupConExperiment(validation_configuration)
+    before_python = pickle.dumps(random.getstate())
+    before_numpy = pickle.dumps(np.random.get_state())
+    before_torch = torch.get_rng_state().clone()
+    loader = trainer._build_validation_loader()
+    reference = list(loader)
+    assert reference
+    assert pickle.dumps(random.getstate()) == before_python
+    assert pickle.dumps(np.random.get_state()) == before_numpy
+    assert torch.equal(torch.get_rng_state(), before_torch)
+    for candidate_loader in (loader, trainer._build_validation_loader()):
+        random.random()
+        np.random.random(7)
+        torch.rand(7)
+        candidate = list(candidate_loader)
+        assert len(candidate) == len(reference)
+        for (labels, images), (expected_labels, expected_images) in zip(
+            candidate, reference, strict=True
+        ):
+            torch.testing.assert_close(labels, expected_labels)
+            torch.testing.assert_close(images, expected_images)
+            _, counts = labels.unique(return_counts=True)
+            assert len(counts) == validation_configuration.classes_per_batch
+            assert torch.all(counts == validation_configuration.samples_per_class)
+
+
+def test_tracking_configuration_round_trip_and_fixed_temperature_sweep(
+    validation_configuration, tmp_path
+):
+    """Other hyperparameters may sweep; the configured metric and temperature remain fixed."""
+    config = replace(
+        validation_configuration,
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+    )
+    path = tmp_path / "tracked.yaml"
+    path.write_text(yaml.safe_dump(config.to_dict()))
+    assert TrainingConfiguration.from_yaml(path) == config
+    assert config.mlflow_parameters()["tracked_mode"] == "max"
+    path.write_text(path.read_text().replace(
+        "\n  lr: 0.001\n", "\n  lr: !sweep\n    values: [0.001, 0.002]\n"
+    ))
+    runs = train_supcon.load_training_configurations(path)
+    assert [run.optimizer["lr"] for run in runs] == [0.001, 0.002]
+    assert all(run.temperature == config.temperature for run in runs)
+    assert all(run.tracked_metric == "balanced_accuracy" for run in runs)
+    assert all(run.effective_tracked_mode == "max" for run in runs)
+
+
+def test_temperature_cannot_vary_within_a_supcon_sweep(experiment_configuration, tmp_path):
+    """Reject different temperatures before any run rather than adding another scoring pass."""
+    path = tmp_path / "varying-temperature.yaml"
+    path.write_text(yaml.safe_dump(experiment_configuration.to_dict()).replace(
+        "\ntemperature: 0.1\n", "\ntemperature: !sweep\n  values: [0.05, 0.2]\n"
+    ))
+    with pytest.raises(ValueError, match="temperature.*sweep|sweep.*temperature"):
+        train_supcon.load_training_configurations(path)
+    assert not experiment_configuration.output_directory.exists()
+
+
+@pytest.mark.parametrize(
+    "metric,expected_mode",
+    [(None, "min"), ("supcon_loss_mean", "min"), ("balanced_accuracy", "max")],
+)
+def test_omitted_tracking_direction_preserves_legacy_defaults(
+    validation_configuration, metric, expected_mode
+):
+    """Existing configs keep their old direction; new configs can override it explicitly."""
+    document = replace(
+        validation_configuration,
+        tracked_metric=metric,
+        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+    ).to_dict()
+    document.pop("tracked_mode", None)
+    config = TrainingConfiguration.from_mapping(document)
+    assert config.effective_tracked_mode == expected_mode
+
+
+@pytest.mark.parametrize("mode", ["", "lowest", True])
+def test_invalid_tracking_direction_fails_early(validation_configuration, mode):
+    """Invalid directions cannot silently change the chosen checkpoint."""
+    with pytest.raises(ValueError, match="tracked_mode"):
+        replace(validation_configuration, tracked_mode=mode)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"scheduler": SchedulerConfiguration("ReduceLROnPlateau", {"mode": "min"})},
+        {"early_stopping": {"patience": 2, "tolerance": 0.0, "comparison": "less"}},
+    ],
+)
+def test_explicit_tracking_direction_must_agree_with_scheduler_and_stopping(
+    validation_configuration, updates
+):
+    """One configured direction applies consistently to the same tracked metric."""
+    with pytest.raises(ValueError, match="tracked_mode|direction"):
+        replace(
+            validation_configuration, tracked_metric="balanced_accuracy", tracked_mode="max",
+            validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+            **updates,
+        )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_nonfinite_tracked_metric_aborts_before_checkpointing(
+    validation_configuration, monkeypatch, value
+):
+    """A valid training loss cannot hide an invalid configured validation metric."""
+    torch.set_num_threads(2)
+    config = replace(
+        validation_configuration, tracked_metric="balanced_accuracy",
+        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+    )
+    monkeypatch.setattr(
+        SupConExperiment, "_validate",
+        lambda self, model, loader, criterion: {"balanced_accuracy": value, "supcon_loss_mean": 0.1},
+    )
+    with pytest.raises(FloatingPointError, match="tracked|validation"):
+        SupConExperiment(config).run_with_result()
+    assert not list(config.output_directory.glob("*.pt"))
+
+
+def test_missing_tracked_metric_does_not_fall_back_to_loss(validation_configuration, monkeypatch):
+    """A missing configured metric must fail explicitly instead of switching objectives."""
+    torch.set_num_threads(2)
+    config = replace(
+        validation_configuration, tracked_metric="balanced_accuracy",
+        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+    )
+    monkeypatch.setattr(
+        SupConExperiment, "_validate", lambda self, model, loader, criterion: {"supcon_loss_mean": 0.1}
+    )
+    with pytest.raises(ValueError, match="balanced_accuracy"):
+        SupConExperiment(config).run_with_result()
+    assert not list(config.output_directory.glob("*.pt"))

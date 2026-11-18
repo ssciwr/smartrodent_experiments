@@ -118,7 +118,9 @@ class FeatureExtractor:
         ValueError: The supplied pooling module does not belong to the network.
     """
 
-    def __init__(self, network: nn.Module, pool: nn.Module, projector: nn.Module | None = None):
+    def __init__(
+        self, network: nn.Module, pool: nn.Module, projector: nn.Module | None = None
+    ):
         if not any(module is pool for module in network.modules()):
             raise ValueError("pool must belong to network")
         self.network = network
@@ -148,10 +150,14 @@ class FeatureExtractor:
             RuntimeError: Pooling does not run exactly once in a forward pass.
         """
         if batch_size < 1 or num_workers < 0 or len(dataset) == 0:
-            raise ValueError("Use a nonempty dataset, positive batch_size, and num_workers >= 0")
+            raise ValueError(
+                "Use a nonempty dataset, positive batch_size, and num_workers >= 0"
+            )
         parameter = next(self.network.parameters(), None)
         if parameter is None:
-            raise ValueError("network must have parameters to determine its device and dtype")
+            raise ValueError(
+                "network must have parameters to determine its device and dtype"
+            )
         if self.projector is not None:
             if any(p.device != parameter.device for p in self.projector.parameters()):
                 raise ValueError("projector and network must be on the same device")
@@ -165,7 +171,9 @@ class FeatureExtractor:
         roots = [self.network]
         if self.projector is not None:
             roots.append(self.projector)
-        states = {module: module.training for root in roots for module in root.modules()}
+        states = {
+            module: module.training for root in roots for module in root.modules()
+        }
         captured = []
 
         def capture_pool(module, inputs, output):
@@ -184,11 +192,15 @@ class FeatureExtractor:
                 )
                 self.network(images)
                 if len(captured) != 1:
-                    raise RuntimeError("Expected the selected pooling module to run exactly once")
+                    raise RuntimeError(
+                        "Expected the selected pooling module to run exactly once"
+                    )
                 pooled = captured.pop()
                 pooled_rows.append(pooled.float().cpu().numpy())
                 if self.projector is not None:
-                    projected = nn.functional.normalize(self.projector(pooled).float(), dim=1)
+                    projected = nn.functional.normalize(
+                        self.projector(pooled).float(), dim=1
+                    )
                     projected_rows.append(projected.cpu().numpy())
                 label_rows.append(labels.numpy())
         finally:
@@ -199,7 +211,9 @@ class FeatureExtractor:
             for module, training in states.items():
                 module.training = training
 
-        projected = np.concatenate(projected_rows) if self.projector is not None else None
+        projected = (
+            np.concatenate(projected_rows) if self.projector is not None else None
+        )
         return EvaluationFeatures(
             pooled=np.concatenate(pooled_rows),
             projected=projected,
@@ -223,11 +237,16 @@ class TsneComparison:
     """
 
     def __init__(
-        self, perplexity: float = 30, pca_components: int = 50,
-        seed: int = 42, max_iter: int = 1000,
+        self,
+        perplexity: float = 30,
+        pca_components: int = 50,
+        seed: int = 42,
+        max_iter: int = 1000,
     ):
         if perplexity <= 0 or pca_components < 2 or max_iter < 250:
-            raise ValueError("Use perplexity > 0, pca_components >= 2, and max_iter >= 250")
+            raise ValueError(
+                "Use perplexity > 0, pca_components >= 2, and max_iter >= 250"
+            )
         self.perplexity = perplexity
         self.pca_components = pca_components
         self.seed = seed
@@ -247,13 +266,19 @@ class TsneComparison:
         """
         features = np.asarray(features, dtype=np.float32)
         if features.ndim != 2 or features.shape[0] < 3 or features.shape[1] < 2:
-            raise ValueError("features must have at least three samples and two dimensions")
+            raise ValueError(
+                "features must have at least three samples and two dimensions"
+            )
         if not np.isfinite(features).all():
             raise ValueError("features must contain only finite values")
         if not np.any(np.ptp(features, axis=0) > 0):
-            raise ValueError("All feature rows are identical; there is no variation to visualize")
+            raise ValueError(
+                "All feature rows are identical; there is no variation to visualize"
+            )
         if self.perplexity >= len(features):
-            raise ValueError("perplexity must be smaller than the number of selected images")
+            raise ValueError(
+                "perplexity must be smaller than the number of selected images"
+            )
         # Compare angular structure consistently in both pooled and projected
         # spaces. Euclidean distances of unit vectors reflect cosine similarity.
         reduced = normalize(features)
@@ -272,7 +297,10 @@ class TsneComparison:
         ).fit_transform(reduced)
 
     def plot(
-        self, baseline: EvaluationFeatures, trained: EvaluationFeatures
+        self,
+        baseline: EvaluationFeatures,
+        trained: EvaluationFeatures,
+        figsize: tuple[int, int] = (18, 6),
     ) -> tuple[plt.Figure, dict[str, np.ndarray]]:
         """Plot the three feature spaces for identical images and species labels.
 
@@ -286,10 +314,14 @@ class TsneComparison:
         Raises:
             ValueError: Images or class labels differ, or projected features are missing.
         """
-        if (baseline.images != trained.images
-                or baseline.label_names != trained.label_names
-                or not np.array_equal(baseline.labels, trained.labels)):
-            raise ValueError("Compare the same images, in the same order, with identical labels")
+        if (
+            baseline.images != trained.images
+            or baseline.label_names != trained.label_names
+            or not np.array_equal(baseline.labels, trained.labels)
+        ):
+            raise ValueError(
+                "Compare the same images, in the same order, with identical labels"
+            )
         if trained.projected is None:
             raise ValueError("trained features must include projector outputs")
         panels = {
@@ -299,22 +331,30 @@ class TsneComparison:
         }
         if any(len(features) != len(trained.labels) for features in panels.values()):
             raise ValueError("Each feature matrix must have one row per label")
-        coordinates = {title: self.project(features) for title, features in panels.items()}
-        figure, axes = plt.subplots(1, 3, figsize=(18, 6))
+        coordinates = {
+            title: self.project(features) for title, features in panels.items()
+        }
+        figure, axes = plt.subplots(1, 3, figsize=figsize)
         colors = plt.get_cmap("tab20", len(trained.label_names))
         names = sorted(trained.label_names, key=trained.label_names.get)
         for axis, (title, points) in zip(axes, coordinates.items()):
             for index, name in enumerate(names):
                 mask = trained.labels == trained.label_names[name]
                 axis.scatter(
-                    points[mask, 0], points[mask, 1], color=colors(index),
-                    label=name, s=12, alpha=0.7,
+                    points[mask, 0],
+                    points[mask, 1],
+                    color=colors(index),
+                    label=name,
+                    s=12,
+                    alpha=0.7,
                 )
             axis.set_title(title)
             axis.set_xticks([])
             axis.set_yticks([])
         handles, legend_labels = axes[0].get_legend_handles_labels()
-        figure.legend(handles, legend_labels, loc="lower center", ncol=min(3, len(names)))
+        figure.legend(
+            handles, legend_labels, loc="lower center", ncol=min(3, len(names))
+        )
         figure.suptitle("Same images · independent t-SNE projections")
         figure.tight_layout(rect=(0, 0.12, 1, 0.94))
         return figure, coordinates
