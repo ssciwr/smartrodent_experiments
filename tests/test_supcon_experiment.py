@@ -128,8 +128,11 @@ def test_experiment_saves_reusable_checkpoints(experiment_configuration):
     torch.set_num_threads(2)
     config = experiment_configuration
     result = SupConExperiment(config).run()
-    assert result.name == "epoch_0002.pt"
-    assert (config.output_directory / "epoch_0001.pt").is_file()
+    assert result.name == "last.pt"
+    assert {path.name for path in config.output_directory.glob("*.pt")} == {
+        "best.pt",
+        "last.pt",
+    }
     checkpoint = torch.load(result, weights_only=True)
     assert checkpoint["epoch"] == 2 and len(checkpoint["history"]) == 2
     assert checkpoint["optimizer_state_dict"]["state"]
@@ -165,7 +168,7 @@ def test_experiment_saves_reusable_checkpoints(experiment_configuration):
     )
     assert card["validation"]["status"] == "not_validated"
     assert card["provenance"]["epoch"] == card["validation"]["epoch"]
-    assert card["provenance"]["checkpoint"].endswith(".pt")
+    assert card["provenance"]["checkpoint"] == "best.pt"
     assert len(card["provenance"]["checkpoint_sha256"]) == 64
     assert card["provenance"]["git_commit"]
     assert card["provenance"]["run_id"] is None
@@ -252,6 +255,34 @@ def test_experiment_rejects_nonfinite_epoch_loss(experiment_configuration, monke
     assert not list(experiment_configuration.output_directory.glob("*.pt"))
 
 
+def test_interrupted_checkpoint_preserves_last_complete_state(
+    experiment_configuration, monkeypatch
+):
+    """A failed replacement leaves valid last and best checkpoints from before it."""
+    torch.set_num_threads(2)
+    original_save = torch.save
+    latest_save_count = 0
+
+    def interrupt_second_latest_save(value, path, *args, **kwargs):
+        """Leave a partial temporary file and simulate an interrupted filesystem write."""
+        nonlocal latest_save_count
+        if Path(path).name == ".last.pt.tmp":
+            latest_save_count += 1
+            if latest_save_count == 2:
+                Path(path).write_bytes(b"partial checkpoint")
+                raise OSError("simulated checkpoint write failure")
+        return original_save(value, path, *args, **kwargs)
+
+    monkeypatch.setattr(train_supcon.torch, "save", interrupt_second_latest_save)
+    with pytest.raises(OSError, match="simulated checkpoint"):
+        SupConExperiment(experiment_configuration).run()
+
+    output = experiment_configuration.output_directory
+    assert torch.load(output / "last.pt", weights_only=True)["epoch"] == 1
+    assert torch.load(output / "best.pt", weights_only=True)["epoch"] == 1
+    assert not list(output.glob(".*.tmp"))
+
+
 @pytest.mark.parametrize(
     "updates,message",
     [
@@ -331,7 +362,8 @@ def test_script_cli_trains_without_notebook_imports(experiment_configuration, tm
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Final checkpoint:" in result.stdout
-    assert (configuration.output_directory / "epoch_0001.pt").is_file()
+    assert (configuration.output_directory / "last.pt").is_file()
+    assert (configuration.output_directory / "best.pt").is_file()
 
 
 def test_script_cli_supports_multiprocessing_workers(
@@ -350,7 +382,8 @@ def test_script_cli_supports_multiprocessing_workers(
         env={**os.environ, "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (configuration.output_directory / "epoch_0001.pt").is_file()
+    assert (configuration.output_directory / "last.pt").is_file()
+    assert (configuration.output_directory / "best.pt").is_file()
 
 
 def test_early_stopping_ignores_dips_that_never_beat_the_best():
@@ -630,7 +663,11 @@ def test_scheduler_integrates_with_early_stopping_and_checkpoints(
 
     monkeypatch.setattr(SupConExperiment, "_validate", validate)
     result = SupConExperiment(config).run()
-    assert result.name == "epoch_0006.pt"
+    assert result.name == "last.pt"
+    assert {path.name for path in config.output_directory.glob("*.pt")} == {
+        "best.pt",
+        "last.pt",
+    }
     history = yaml.safe_load((config.output_directory / "history.yaml").read_text())
     assert [row["learning_rate"] for row in history] == [0.001] * 4 + [0.0005] * 2
     assert [row["next_learning_rate"] for row in history] == [0.001] * 3 + [0.0005] * 3
@@ -645,7 +682,7 @@ def test_scheduler_integrates_with_early_stopping_and_checkpoints(
     scheduler.step(1.2 if mode == "min" else 0.8)
     assert optimizer.param_groups[0]["lr"] == 0.00025
     card = yaml.safe_load(
-        (config.output_directory / "epoch_0001.model_card.yaml").read_text()
+        (config.output_directory / "best.model_card.yaml").read_text()
     )
     assert card["validation"]["epoch"] == 1
     assert "Learning rate reduced" in capsys.readouterr().out

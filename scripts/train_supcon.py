@@ -3,6 +3,7 @@
 import argparse
 import functools
 import hashlib
+import os
 import random
 import subprocess
 from collections.abc import Callable, Mapping
@@ -890,31 +891,51 @@ class SupConExperiment:
     def _save_checkpoint(
         self, model, optimizer, epoch, history, scheduler=None
     ) -> Path:
-        """Save model and training state at the boundary before the next epoch."""
+        """Atomically replace the checkpoint containing the latest training state."""
         config = self.configuration
-        path = Path(config.output_directory) / f"epoch_{epoch:04d}.pt"
-        torch.save(
-            {
-                "epoch": epoch,
-                "architecture": deepcopy(model.full_model.model.yaml),
-                "model_configuration": {
-                    "dropout": config.dropout,
-                    "output_features": config.output_features,
-                    "num_classes": len(config.class_names),
-                    "freeze": list(config.freeze),
+        path = Path(config.output_directory) / "last.pt"
+        temporary_path = path.with_name(f".{path.name}.tmp")
+        temporary_path.unlink(missing_ok=True)
+        try:
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "architecture": deepcopy(model.full_model.model.yaml),
+                    "model_configuration": {
+                        "dropout": config.dropout,
+                        "output_features": config.output_features,
+                        "num_classes": len(config.class_names),
+                        "freeze": list(config.freeze),
+                    },
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": (
+                        scheduler.state_dict() if scheduler is not None else None
+                    ),
+                    "label_names": dict(model.label_names),
+                    "configuration": config.to_dict(),
+                    "history": list(history),
                 },
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": (
-                    scheduler.state_dict() if scheduler is not None else None
-                ),
-                "label_names": dict(model.label_names),
-                "configuration": config.to_dict(),
-                "history": list(history),
-            },
-            path,
-        )
+                temporary_path,
+            )
+            temporary_path.replace(path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
         return path
+
+    def _replace_best_checkpoint(self, checkpoint: Path) -> Path:
+        """Atomically point ``best.pt`` at an immutable latest checkpoint snapshot."""
+        best_path = checkpoint.with_name("best.pt")
+        temporary_path = best_path.with_name(f".{best_path.name}.tmp")
+        temporary_path.unlink(missing_ok=True)
+        try:
+            # A hard link avoids writing a second large snapshot. Replacing last.pt
+            # next epoch leaves this inode, and therefore the best state, unchanged.
+            os.link(checkpoint, temporary_path)
+            temporary_path.replace(best_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        return best_path
 
     def _run_training(
         self,
@@ -1061,7 +1082,7 @@ class SupConExperiment:
                 if selection_value > best_selection_value:
                     best_selection_value = selection_value
                     best_metric_value = tracked_value
-                    best_checkpoint = checkpoint
+                    best_checkpoint = self._replace_best_checkpoint(checkpoint)
                     best_epoch = epoch
                 if early_stopping is not None and early_stopping(tracked_value):
                     print(
