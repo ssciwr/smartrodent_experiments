@@ -1,11 +1,8 @@
 """Run the standalone multiview SupCon experiment from a YAML configuration."""
 
 import argparse
-import functools
 import hashlib
-import os
 import random
-import subprocess
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -15,13 +12,22 @@ from typing import Any
 import mlflow
 import mlflow.pytorch
 import numpy as np
-import sklearn.metrics
 import torch
 import yaml
 from mlflow import MlflowClient
 from pytorch_metric_learning.losses import SupConLoss
 from pytorch_metric_learning.samplers import MPerClassSampler
 from smartrodent import config_utils
+# Re-export the existing configuration names for callers importing this script.
+from smartrodent.experiment_support import (
+    CheckpointStore,
+    EarlyStopping,
+    ImageTransforms,
+    MlflowConfiguration,
+    SchedulerConfiguration,
+    _git_commit,
+    resolve_validation_metrics,
+)
 from smartrodent.model_card import (
     load_card_template,
     write_model_card,
@@ -33,208 +39,8 @@ from smartrodent.supcon_datasets import (
 )
 from smartrodent.supcon_model import YoloSupConModel
 from torch.utils.data import DataLoader
-from torchvision.transforms.v2 import (
-    Compose,
-    PILToTensor,
-    RandomAdjustSharpness,
-    RandomGrayscale,
-    RandomHorizontalFlip,
-    RandomPerspective,
-    RandomResizedCrop,
-    Resize,
-    ToDtype,
-)
+from torchvision.transforms.v2 import Compose
 from tqdm.auto import tqdm
-
-
-@dataclass(frozen=True)
-class MlflowConfiguration:
-    """Configure MLflow tracking for the standalone SupCon experiment.
-
-    Args:
-        tracking_uri: MLflow tracking server or local database URI.
-        experiment_name: Experiment receiving all expanded sweep runs.
-        registered_model_name: Optional registry name for each run's best model.
-        model_artifact_name: Name of the logged MLflow PyTorch model.
-        champion_alias: Alias assigned to the best validated registered version.
-        dataset_revision: Optional immutable dataset revision recorded as a tag.
-    """
-
-    tracking_uri: str
-    experiment_name: str
-    registered_model_name: str | None = None
-    model_artifact_name: str = "classifier"
-    champion_alias: str = "champion"
-    dataset_revision: str | None = None
-
-    def __post_init__(self):
-        """Reject missing or blank MLflow settings before training starts."""
-        for field_name in (
-            "tracking_uri",
-            "experiment_name",
-            "model_artifact_name",
-            "champion_alias",
-        ):
-            value = getattr(self, field_name)
-            if not isinstance(value, str):
-                raise TypeError(f"mlflow.{field_name} must be a string")
-            if not value.strip():
-                raise ValueError(f"mlflow.{field_name} must not be blank")
-        for field_name in ("registered_model_name", "dataset_revision"):
-            value = getattr(self, field_name)
-            if value is not None and not isinstance(value, str):
-                raise TypeError(f"mlflow.{field_name} must be a string or null")
-            if isinstance(value, str) and not value.strip():
-                raise ValueError(f"mlflow.{field_name} must not be blank")
-
-    @classmethod
-    def from_mapping(cls, values: Mapping | None) -> "MlflowConfiguration | None":
-        """Build optional MLflow settings from YAML-compatible values.
-
-        Args:
-            values: Optional nested ``mlflow`` configuration mapping.
-
-        Returns:
-            Validated MLflow settings, or ``None`` when tracking is disabled.
-
-        Raises:
-            TypeError: The supplied value is not a mapping.
-            ValueError: Required keys are missing or unexpected keys are present.
-        """
-        if values is None:
-            return None
-        if not isinstance(values, Mapping):
-            raise TypeError("mlflow must be a mapping")
-        required = {"tracking_uri", "experiment_name"}
-        optional = {
-            "registered_model_name",
-            "model_artifact_name",
-            "champion_alias",
-            "dataset_revision",
-        }
-        supplied = set(values)
-        if not required.issubset(supplied) or not supplied.issubset(
-            required | optional
-        ):
-            missing = sorted(required.difference(supplied))
-            unexpected = sorted(supplied.difference(required | optional))
-            details = []
-            if missing:
-                details.append(f"missing keys: {', '.join(missing)}")
-            if unexpected:
-                details.append(f"unexpected keys: {', '.join(unexpected)}")
-            raise ValueError("Invalid mlflow configuration; " + "; ".join(details))
-        return cls(**values)
-
-    def configure(self) -> None:
-        """Select the configured tracking backend and experiment."""
-        mlflow.set_tracking_uri(self.tracking_uri)
-        mlflow.set_experiment(self.experiment_name)
-
-    def run_tags(self) -> dict[str, str]:
-        """Return source revisions that make a tracked run reproducible."""
-        tags = {"git_commit": _git_commit()}
-        if self.dataset_revision is not None:
-            tags["dataset_revision"] = self.dataset_revision
-        return tags
-
-
-@dataclass(frozen=True)
-class SchedulerConfiguration:
-    """Configure a native PyTorch validation-driven learning-rate scheduler.
-
-    Args:
-        name: Supported PyTorch scheduler class name, ``ReduceLROnPlateau``.
-        parameters: Native scheduler arguments, excluding the optimizer.
-    """
-
-    name: str
-    parameters: Mapping[str, Any]
-
-    def __post_init__(self):
-        """Reject unsupported schedulers and invalid native parameters early."""
-        if self.name != "ReduceLROnPlateau":
-            raise ValueError("scheduler.name must be 'ReduceLROnPlateau'")
-        if not isinstance(self.parameters, Mapping):
-            raise TypeError("scheduler.parameters must be a mapping")
-        allowed = {
-            "mode",
-            "factor",
-            "patience",
-            "threshold",
-            "threshold_mode",
-            "cooldown",
-            "min_lr",
-            "eps",
-        }
-        if set(self.parameters).difference(allowed):
-            raise ValueError("Unsupported scheduler.parameters keys")
-        if self.mode not in ("min", "max"):
-            raise ValueError("scheduler.parameters.mode must be 'min' or 'max'")
-        if self.parameters.get("threshold_mode", "rel") not in ("rel", "abs"):
-            raise ValueError(
-                "scheduler.parameters.threshold_mode must be 'rel' or 'abs'"
-            )
-        for name in ("patience", "cooldown"):
-            value = self.parameters.get(name, 10 if name == "patience" else 0)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(
-                    f"scheduler.parameters.{name} must be a nonnegative integer"
-                )
-        defaults = {"factor": 0.1, "threshold": 0.0001, "min_lr": 0.0, "eps": 1e-8}
-        for name, default in defaults.items():
-            value = self.parameters.get(name, default)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not np.isfinite(value)
-                or value < 0
-            ):
-                raise ValueError(
-                    f"scheduler.parameters.{name} must be finite and nonnegative"
-                )
-        if not 0 < self.parameters.get("factor", 0.1) < 1:
-            raise ValueError(
-                "scheduler.parameters.factor must be between 0 and 1 exclusively"
-            )
-
-    @property
-    def mode(self) -> str:
-        """Return the native comparison mode, defaulting to PyTorch's minimum."""
-        return self.parameters.get("mode", "min")
-
-    @classmethod
-    def from_mapping(cls, values: Mapping | None) -> "SchedulerConfiguration | None":
-        """Parse optional YAML scheduler settings.
-
-        Args:
-            values: Mapping with ``name`` and ``parameters``, or ``None``.
-
-        Returns:
-            Validated scheduler settings, or ``None`` for constant learning rate.
-        """
-        if values is None:
-            return None
-        if not isinstance(values, Mapping):
-            raise TypeError("scheduler must be a mapping")
-        if set(values) != {"name", "parameters"}:
-            raise ValueError("scheduler requires exactly name and parameters")
-        if not isinstance(values["parameters"], Mapping):
-            raise TypeError("scheduler.parameters must be a mapping")
-        return cls(values["name"], dict(values["parameters"]))
-
-    def build(
-        self, optimizer: torch.optim.Optimizer
-    ) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
-        """Construct the scheduler bound to this run's optimizer.
-
-        Args:
-            optimizer: Optimizer whose learning rate will be adjusted.
-
-        Returns:
-            A native PyTorch plateau scheduler with the configured parameters.
-        """
-        return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **self.parameters)
 
 
 @dataclass(frozen=True)
@@ -536,83 +342,6 @@ class TrainingConfiguration:
         return parameters
 
 
-class EarlyStopping:
-    """Stop after repeated failures to improve on the best value seen so far.
-
-    A value improves only when it beats the best value by more than the
-    tolerance: for ``less`` it must be lower than ``best - tolerance``, for
-    ``greater`` it must be higher than ``best + tolerance``. Comparing against
-    the best value, not the previous one, keeps noisy metrics from resetting
-    patience with dips that never beat the best.
-    """
-
-    def __init__(self, patience: int, tolerance: float, comparison: str):
-        if not isinstance(patience, int) or isinstance(patience, bool) or patience < 1:
-            raise ValueError("early_stopping.patience must be a positive integer")
-        if (
-            isinstance(tolerance, bool)
-            or not isinstance(tolerance, (int, float))
-            or not np.isfinite(tolerance)
-        ):
-            raise ValueError("early_stopping.tolerance must be finite")
-        if tolerance < 0:
-            raise ValueError("early_stopping.tolerance must be nonnegative")
-        if comparison not in {"less", "greater"}:
-            raise ValueError("early_stopping.comparison must be 'less' or 'greater'")
-        self.patience = patience
-        self.current_patience = patience
-        self.tol = float(tolerance)
-        self.comparison = comparison
-        self.best: float | None = None
-        self.history: list[float] = []
-
-    @classmethod
-    def from_mapping(cls, config: Mapping[str, Any]) -> "EarlyStopping":
-        """Build an early stopper from its YAML-compatible configuration."""
-        if not isinstance(config, Mapping):
-            raise TypeError("early_stopping must be a mapping")
-        required = {"patience", "tolerance", "comparison"}
-        supplied = set(config)
-        if supplied != required:
-            missing = sorted(required.difference(supplied))
-            unexpected = sorted(supplied.difference(required))
-            details = []
-            if missing:
-                details.append(f"missing keys: {', '.join(missing)}")
-            if unexpected:
-                details.append(f"unexpected keys: {', '.join(unexpected)}")
-            raise ValueError(
-                "Invalid early_stopping configuration; " + "; ".join(details)
-            )
-
-        return cls(config["patience"], config["tolerance"], config["comparison"])
-
-    def _improves(self, value: float) -> bool:
-        """Return whether a value beats the best value by more than the tolerance."""
-        if self.comparison == "less":
-            return value < self.best - self.tol
-        elif self.comparison == "greater":
-            return value > self.best + self.tol
-        else:
-            raise ValueError(f"Unsupported comparison '{self.comparison}'")
-
-    def __call__(self, value: float) -> bool:
-        """Record a value and report whether patience has been exhausted."""
-        if not np.isfinite(value):
-            raise ValueError("Early-stopping values must be finite")
-        self.history.append(value)
-        if self.best is None:
-            self.best = value
-            return False
-
-        if self._improves(value):
-            self.best = value
-            self.current_patience = self.patience
-        else:
-            self.current_patience -= 1
-        return self.current_patience == 0
-
-
 class SupConExperiment:
     """Train the independent notebook experiment and save portable checkpoints.
 
@@ -703,56 +432,11 @@ class SupConExperiment:
         self,
     ) -> dict[str, Callable[[np.ndarray, np.ndarray], float]]:
         """Resolve configured sklearn metrics and reject invalid specs early."""
-        specs = self.configuration.validation_metrics
-        if specs is None:
-            return {}
-        if not isinstance(specs, Mapping):
-            raise TypeError("validation_metrics must be a mapping")
-
-        scorers = {}
-        for name, spec in specs.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError("validation metric names must be nonempty strings")
-            if not isinstance(spec, Mapping):
-                raise TypeError(f"validation_metrics.{name} must be a mapping")
-            options = dict(spec)
-            function_name = options.pop("function", None)
-            function = getattr(sklearn.metrics, str(function_name), None)
-            if not callable(function):
-                raise ValueError(
-                    f"validation_metrics.{name}: unknown sklearn.metrics function "
-                    f"'{function_name}'"
-                )
-            scorer = functools.partial(function, **options)
-            try:
-                float(scorer(np.array([0, 1]), np.array([0, 1])))
-            except Exception as error:
-                raise ValueError(
-                    f"validation_metrics.{name}: '{function_name}' with options "
-                    f"{options} cannot score label arrays: {error}"
-                ) from error
-            scorers[name] = scorer
-        return scorers
+        return resolve_validation_metrics(self.configuration.validation_metrics)
 
     def _build_transform(self) -> Compose:
         """Reproduce the notebook's independently sampled augmentation pipeline."""
-        settings = self.configuration.transforms
-        size = settings["image_size"]
-        return Compose(
-            [
-                PILToTensor(),
-                ToDtype(torch.float32, scale=True),
-                Resize((size, size), **settings["resize"]),
-                RandomAdjustSharpness(**settings["random_adjust_sharpness"]),
-                RandomGrayscale(**settings["random_grayscale"]),
-                RandomPerspective(**settings["random_perspective"]),
-                RandomHorizontalFlip(**settings["random_horizontal_flip"]),
-                RandomResizedCrop(
-                    (size, size),
-                    **settings["random_resized_crop"],
-                ),
-            ]
-        )
+        return ImageTransforms(self.configuration.transforms).training()
 
     def _build_loader(self) -> tuple[MultiViewImageDataset, DataLoader]:
         """Build label-aligned P-K batches with two views per selected image."""
@@ -794,16 +478,7 @@ class SupConExperiment:
         config = self.configuration
         if config.validation_dataset is None:
             return None
-        transform = Compose(
-            [
-                PILToTensor(),
-                ToDtype(torch.float32, scale=True),
-                Resize(
-                    (config.transforms["image_size"], config.transforms["image_size"]),
-                    **config.transforms["resize"],
-                ),
-            ]
-        )
+        transform = ImageTransforms(config.transforms).validation()
         dataset = ImageDataset(
             config.validation_dataset,
             labels=config.class_names,
@@ -889,53 +564,31 @@ class SupConExperiment:
         return results
 
     def _save_checkpoint(
-        self, model, optimizer, epoch, history, scheduler=None
+        self, model, optimizer, epoch, history, scheduler=None, *, is_best=False
     ) -> Path:
-        """Atomically replace the checkpoint containing the latest training state."""
+        """Assemble SupCon state and publish it through the shared checkpoint store."""
         config = self.configuration
-        path = Path(config.output_directory) / "last.pt"
-        temporary_path = path.with_name(f".{path.name}.tmp")
-        temporary_path.unlink(missing_ok=True)
-        try:
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "architecture": deepcopy(model.full_model.model.yaml),
-                    "model_configuration": {
-                        "dropout": config.dropout,
-                        "output_features": config.output_features,
-                        "num_classes": len(config.class_names),
-                        "freeze": list(config.freeze),
-                    },
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": (
-                        scheduler.state_dict() if scheduler is not None else None
-                    ),
-                    "label_names": dict(model.label_names),
-                    "configuration": config.to_dict(),
-                    "history": list(history),
+        return CheckpointStore(config.output_directory).save(
+            {
+                "epoch": epoch,
+                "architecture": deepcopy(model.full_model.model.yaml),
+                "model_configuration": {
+                    "dropout": config.dropout,
+                    "output_features": config.output_features,
+                    "num_classes": len(config.class_names),
+                    "freeze": list(config.freeze),
                 },
-                temporary_path,
-            )
-            temporary_path.replace(path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
-        return path
-
-    def _replace_best_checkpoint(self, checkpoint: Path) -> Path:
-        """Atomically point ``best.pt`` at an immutable latest checkpoint snapshot."""
-        best_path = checkpoint.with_name("best.pt")
-        temporary_path = best_path.with_name(f".{best_path.name}.tmp")
-        temporary_path.unlink(missing_ok=True)
-        try:
-            # A hard link avoids writing a second large snapshot. Replacing last.pt
-            # next epoch leaves this inode, and therefore the best state, unchanged.
-            os.link(checkpoint, temporary_path)
-            temporary_path.replace(best_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
-        return best_path
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": (
+                    scheduler.state_dict() if scheduler is not None else None
+                ),
+                "label_names": dict(model.label_names),
+                "configuration": config.to_dict(),
+                "history": list(history),
+            },
+            is_best=is_best,
+        )
 
     def _run_training(
         self,
@@ -1057,8 +710,9 @@ class SupConExperiment:
                             f"{name}={value:.6f}" for name, value in validation.items()
                         )
                     )
+                is_best = selection_value > best_selection_value
                 checkpoint = self._save_checkpoint(
-                    model, optimizer, epoch, history, scheduler
+                    model, optimizer, epoch, history, scheduler, is_best=is_best
                 )
                 (output / "history.yaml").write_text(
                     yaml.safe_dump(history, sort_keys=False)
@@ -1079,10 +733,10 @@ class SupConExperiment:
                         }
                     )
                     mlflow.log_metrics(mlflow_metrics, step=epoch)
-                if selection_value > best_selection_value:
+                if is_best:
                     best_selection_value = selection_value
                     best_metric_value = tracked_value
-                    best_checkpoint = self._replace_best_checkpoint(checkpoint)
+                    best_checkpoint = checkpoint.with_name("best.pt")
                     best_epoch = epoch
                 if early_stopping is not None and early_stopping(tracked_value):
                     print(
@@ -1218,20 +872,6 @@ class SupConExperiment:
         )
         card["provenance"].update(provenance or {})
         return write_model_card(card, checkpoint)
-
-
-def _git_commit() -> str:
-    """Return the exact Git commit associated with a tracked run."""
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    commit = result.stdout.strip()
-    if not commit:
-        raise RuntimeError("Git returned an empty commit revision")
-    return commit
 
 
 def _load_run_mappings(config_path: Path) -> list[dict]:
