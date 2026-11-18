@@ -64,10 +64,7 @@ class TwoStageConfiguration:
         if self.data["validation_dataset"] is None:
             raise ValueError("Automatic SupCon selection requires validation_dataset")
         for name in ("supcon", "classifier"):
-            settings = getattr(self, name)
-            conflicts = (required_data | {"output_directory", "mlflow"}) & set(settings)
-            if conflicts:
-                raise ValueError(f"{name} cannot override shared or deferred settings: {sorted(conflicts)}")
+            self._validate_stage_ownership(getattr(self, name), name)
         self._reject_sweeps(self.data, "data")
         self._reject_sweeps(self.classifier, "classifier")
         initialization = self.classifier.get("initialization")
@@ -76,31 +73,10 @@ class TwoStageConfiguration:
         runs = config_utils.ConfigHandler(self.to_dict()).run_configs
         if not runs:
             raise ValueError("SupCon sweep must contain at least one candidate; empty sweep")
-        configurations = []
-        for index, run in enumerate(runs, start=1):
-            # A whole-section sweep can introduce keys absent before expansion.
-            conflicts = (required_data | {"output_directory", "mlflow"}) & set(run["supcon"])
-            if conflicts:
-                raise ValueError(f"supcon cannot override shared or deferred settings: {sorted(conflicts)}")
-            self._validate_seed(run["supcon"].get("seed", 42))
-            values = {**run["supcon"], **self.data, "output_directory": self.output_directory / "supcon" / f"run_{index:03d}"}
-            try:
-                config = TrainingConfiguration.from_mapping(values)
-            except TypeError as error:
-                raise ValueError(f"Invalid supcon settings: {error}") from error
-            # Standalone legacy configurations may infer direction. The pipeline
-            # also enforces agreement when tracked_mode was omitted explicitly.
-            if config.scheduler is not None and config.scheduler.mode != config.effective_tracked_mode:
-                raise ValueError("SupCon scheduler direction must agree with tracked_mode")
-            if config.early_stopping is not None:
-                mode = "min" if config.early_stopping["comparison"] == "less" else "max"
-                if mode != config.effective_tracked_mode:
-                    raise ValueError("SupCon early_stopping direction must agree with tracked_mode")
-            ImageTransforms(config.transforms).training()
-            torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], **config.optimizer)
-            resolve_validation_metrics(config.validation_metrics)
-            load_card_template(Path(config.model_card_template))
-            configurations.append(config)
+        configurations = [
+            self._build_supcon_configuration(run["supcon"], index)
+            for index, run in enumerate(runs, start=1)
+        ]
         reference = configurations[0]
         if any(config.temperature != reference.temperature for config in configurations):
             raise ValueError("SupCon temperature must remain fixed within a sweep")
@@ -121,6 +97,48 @@ class TwoStageConfiguration:
         load_card_template(Path(classifier.model_card_template))
         object.__setattr__(self, "_classifier_configuration", classifier)
         self._validate_output_paths()
+
+    @staticmethod
+    def _validate_stage_ownership(settings: Mapping, section: str) -> None:
+        """Reject shared data/output overrides and deferred tracking before merging settings."""
+        reserved = {
+            "train_dataset", "validation_dataset", "class_names", "output_directory", "mlflow",
+        }
+        conflicts = reserved & set(settings)
+        if conflicts:
+            raise ValueError(
+                f"{section} cannot override shared or deferred settings: {sorted(conflicts)}"
+            )
+
+    def _build_supcon_configuration(
+        self, settings: Mapping, index: int
+    ) -> TrainingConfiguration:
+        """Build and prevalidate one expanded candidate without training or output writes."""
+        # A whole-section sweep can introduce keys absent before expansion.
+        self._validate_stage_ownership(settings, "supcon")
+        self._validate_seed(settings.get("seed", 42))
+        values = {
+            **settings,
+            **self.data,
+            "output_directory": self.output_directory / "supcon" / f"run_{index:03d}",
+        }
+        try:
+            config = TrainingConfiguration.from_mapping(values)
+        except TypeError as error:
+            raise ValueError(f"Invalid supcon settings: {error}") from error
+        # Standalone legacy configurations may infer direction. The pipeline
+        # also enforces agreement when tracked_mode was omitted explicitly.
+        if config.scheduler is not None and config.scheduler.mode != config.effective_tracked_mode:
+            raise ValueError("SupCon scheduler direction must agree with tracked_mode")
+        if config.early_stopping is not None:
+            mode = "min" if config.early_stopping["comparison"] == "less" else "max"
+            if mode != config.effective_tracked_mode:
+                raise ValueError("SupCon early_stopping direction must agree with tracked_mode")
+        ImageTransforms(config.transforms).training()
+        torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], **config.optimizer)
+        resolve_validation_metrics(config.validation_metrics)
+        load_card_template(Path(config.model_card_template))
+        return config
 
     @staticmethod
     def _validate_seed(seed) -> None:
