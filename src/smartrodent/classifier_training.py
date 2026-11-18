@@ -23,7 +23,9 @@ from smartrodent.experiment_support import (
     EarlyStopping,
     ImageTransforms,
     MlflowConfiguration,
+    ModelPublication,
     SchedulerConfiguration,
+    _git_commit,
     resolve_validation_metrics,
 )
 from smartrodent.model_card import load_card_template, write_model_card
@@ -150,8 +152,6 @@ class ClassifierConfiguration:
                 raise ValueError(
                     "early_stopping direction must agree with tracked_mode"
                 )
-        if self.mlflow is not None and self.mlflow.registered_model_name is not None:
-            raise ValueError("registered_model_name registration is deferred")
         output = Path(self.output_directory).resolve()
         for source in (self.train_dataset, self.validation_dataset):
             if source is not None and output.is_relative_to(Path(source).resolve()):
@@ -287,11 +287,14 @@ class ClassifierExperiment:
 
     Args:
         configuration: Validated standalone classifier configuration.
+        encoder_provenance: Optional selected-run metadata supplied by orchestration.
+            The source path/checksum are always calculated from the actual input.
     """
 
-    def __init__(self, configuration: ClassifierConfiguration):
+    def __init__(self, configuration: ClassifierConfiguration, *, encoder_provenance: Mapping | None = None):
         """Prepare scorers and transforms without modifying inputs or creating outputs."""
         self.configuration = configuration
+        self.encoder_provenance = deepcopy(dict(encoder_provenance or {}))
         self.transforms = ImageTransforms(configuration.transforms)
         self.scorers = resolve_validation_metrics(configuration.validation_metrics)
         self.card_template = load_card_template(Path(configuration.model_card_template))
@@ -380,8 +383,11 @@ class ClassifierExperiment:
         """
         return self.run_with_result().last_checkpoint
 
-    def run_with_result(self) -> ExperimentResult:
+    def run_with_result(self, *, parent_run_id: str | None = None) -> ExperimentResult:
         """Train with configured metric selection and optional MLflow tracking.
+
+        Args:
+            parent_run_id: Explicit active pipeline parent for a tracked child run.
 
         Returns:
             Best/last checkpoint metadata with the original configured objective.
@@ -391,12 +397,9 @@ class ClassifierExperiment:
             ValueError: Required data or the configured tracked metric is missing.
         """
         config = self.configuration
-        if config.mlflow is not None:
-            config.mlflow.configure()
         context = (
-            mlflow.start_run(run_name=Path(config.output_directory).name)
-            if config.mlflow
-            else nullcontext()
+            config.mlflow.start_run(Path(config.output_directory).name, parent_run_id=parent_run_id)
+            if config.mlflow is not None else nullcontext()
         )
         with context as run:
             run_id = run.info.run_id if run is not None else None
@@ -421,7 +424,31 @@ class ClassifierExperiment:
                     step=result.best_epoch,
                 )
                 mlflow.log_metric("best_epoch", result.best_epoch)
+                if config.mlflow.registered_model_name is not None:
+                    self._publish_best_model(result)
+                else:
+                    config.mlflow.log_best_artifacts(result.best_checkpoint)
             return result
+
+    def _publish_best_model(self, result: ExperimentResult) -> None:
+        """Restore best.pt independently of the final epoch and publish that trained classifier."""
+        config = self.configuration
+        checkpoint = result.best_checkpoint
+        model = YoloClassifierModel.from_checkpoint(checkpoint)
+        snapshot = torch.load(checkpoint, map_location="cpu", weights_only=True)
+
+        def write_card(version, identity):
+            """Complete local and run-level cards before registry alias promotion."""
+            paths = self._write_model_card(checkpoint, result.mlflow_run_id, version=version, provenance=identity)
+            config.mlflow.log_best_artifacts(checkpoint)
+            return paths
+
+        ModelPublication(config.mlflow).publish(
+            model, best_epoch=result.best_epoch,
+            validated=config.validation_dataset is not None,
+            tags={**snapshot["provenance"], **config.mlflow.run_tags()},
+            write_card=write_card,
+        )
 
     def _train_epoch(
         self, model: YoloClassifierModel, loader: DataLoader, optimizer: torch.optim.Optimizer
@@ -468,6 +495,7 @@ class ClassifierExperiment:
         with source.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
         provenance = {
+            **self.encoder_provenance,
             "encoder_checkpoint": str(source),
             "encoder_checkpoint_sha256": checksum,
         }
@@ -557,14 +585,19 @@ class ClassifierExperiment:
         finally:
             model.eval()
 
-    def _write_model_card(self, checkpoint: Path, run_id: str | None) -> None:
+    def _write_model_card(
+        self, checkpoint: Path, run_id: str | None, *, version: str | None = None,
+        provenance: Mapping | None = None,
+    ) -> tuple[Path, Path]:
         """Describe the selected snapshot rather than the last completed epoch."""
         config = self.configuration
         snapshot = torch.load(checkpoint, map_location="cpu", weights_only=True)
         card = deepcopy(self.card_template)
         card["model"].update(
-            name=Path(config.output_directory).name,
+            name=(config.mlflow.registered_model_name if config.mlflow else None) or Path(config.output_directory).name,
+            registry_version=version,
             base_model=str(config.initialization["encoder"]["checkpoint"]),
+            task="image-classification",
         )
         card["classes"] = {
             index: name for name, index in snapshot["label_names"].items()
@@ -586,6 +619,8 @@ class ClassifierExperiment:
             checkpoint_sha256=checksum,
             epoch=snapshot["epoch"],
             run_id=run_id,
+            git_commit=_git_commit(),
             dataset_revision=config.mlflow.dataset_revision if config.mlflow else None,
         )
-        write_model_card(card, checkpoint)
+        card["provenance"].update(provenance or {})
+        return write_model_card(card, checkpoint)

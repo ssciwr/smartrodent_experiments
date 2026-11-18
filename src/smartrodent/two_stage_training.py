@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field, replace
 import hashlib
 from pathlib import Path
 
+import mlflow
 import torch
 import yaml
 
@@ -13,7 +14,7 @@ from scripts.train_supcon import SupConExperiment, TrainingConfiguration
 from smartrodent import config_utils
 from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
-from smartrodent.experiment_support import ImageTransforms, resolve_validation_metrics
+from smartrodent.experiment_support import ImageTransforms, MlflowConfiguration, resolve_validation_metrics
 from smartrodent.model_card import load_card_template
 
 
@@ -41,12 +42,14 @@ class TwoStageConfiguration:
         data: Shared training/validation paths and class names, never a test split.
         supcon: Standalone SupCon settings without data or output overrides.
         classifier: Standalone CE settings with encoder source selected_supcon.
+        mlflow: Optional shared tracking; registry publication applies only to CE.
     """
 
     output_directory: Path
     data: Mapping
     supcon: Mapping
     classifier: Mapping
+    mlflow: MlflowConfiguration | None = None
     supcon_configurations: tuple[TrainingConfiguration, ...] = field(init=False, repr=False)
     _classifier_configuration: ClassifierConfiguration = field(init=False, repr=False)
 
@@ -58,6 +61,8 @@ class TwoStageConfiguration:
             if not isinstance(values, Mapping):
                 raise ValueError(f"{name} must be a mapping")
             object.__setattr__(self, name, deepcopy(dict(values)))
+        if self.mlflow is not None and not isinstance(self.mlflow, MlflowConfiguration):
+            raise TypeError("mlflow must be a MlflowConfiguration or null")
         required_data = {"train_dataset", "validation_dataset", "class_names"}
         if set(self.data) != required_data:
             raise ValueError(f"data requires exactly {sorted(required_data)}; got {sorted(self.data)}")
@@ -85,7 +90,11 @@ class TwoStageConfiguration:
         if any(config.effective_tracked_mode != reference.effective_tracked_mode for config in configurations):
             raise ValueError("SupCon sweep must use the same tracked mode/direction")
         object.__setattr__(self, "supcon_configurations", tuple(configurations))
-        values = {**deepcopy(self.classifier), **self.data, "output_directory": self.output_directory / "classifier"}
+        values = {
+            **deepcopy(self.classifier), **self.data,
+            "output_directory": self.output_directory / "classifier",
+            "mlflow": asdict(self.mlflow) if self.mlflow is not None else None,
+        }
         # This path only prevalidates CE settings; no checkpoint is loaded until
         # all candidates complete and the actual winning best.pt is known.
         values["initialization"]["encoder"] = {"source": "supcon", "checkpoint": str(reference.output_directory / "best.pt")}
@@ -121,6 +130,8 @@ class TwoStageConfiguration:
             **settings,
             **self.data,
             "output_directory": self.output_directory / "supcon" / f"run_{index:03d}",
+            # Pipeline candidates are encoders, never classifier registry versions.
+            "mlflow": asdict(replace(self.mlflow, registered_model_name=None)) if self.mlflow is not None else None,
         }
         try:
             config = TrainingConfiguration.from_mapping(values)
@@ -205,9 +216,12 @@ class TwoStageConfiguration:
         if not isinstance(values, Mapping):
             raise ValueError("Two-stage configuration must be a mapping")
         required = {"output_directory", "data", "supcon", "classifier"}
-        if set(values) != required:
-            raise ValueError(f"Two-stage configuration requires {sorted(required)}; missing {sorted(required - set(values))}; unexpected {sorted(set(values) - required)}")
-        return cls(**deepcopy(dict(values)))
+        allowed = required | {"mlflow"}
+        if not required.issubset(values) or set(values) - allowed:
+            raise ValueError(f"Two-stage configuration requires {sorted(required)}; missing {sorted(required - set(values))}; unexpected {sorted(set(values) - allowed)}")
+        values = deepcopy(dict(values))
+        values["mlflow"] = MlflowConfiguration.from_mapping(values.get("mlflow"))
+        return cls(**values)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TwoStageConfiguration":
@@ -228,10 +242,13 @@ class TwoStageConfiguration:
         Returns:
             Unified settings including the selected_supcon encoder placeholder.
         """
-        return _plain_values({
+        values = {
             "output_directory": self.output_directory, "data": self.data,
             "supcon": self.supcon, "classifier": self.classifier,
-        })
+        }
+        if self.mlflow is not None:
+            values["mlflow"] = asdict(self.mlflow)
+        return _plain_values(values)
 
     def classifier_configuration(self, checkpoint: Path) -> ClassifierConfiguration:
         """Resolve the CE encoder source without changing the unified settings.
@@ -256,12 +273,14 @@ class TwoStageResult:
         supcon_results: Completed candidates in sweep-product order.
         selected_supcon: Configured-metric winner, retaining the first exact tie.
         classifier_result: Completed CE training result.
+        mlflow_run_id: Pipeline parent run ID, or None for untracked execution.
     """
 
     output_directory: Path
     supcon_results: tuple[ExperimentResult, ...]
     selected_supcon: ExperimentResult
     classifier_result: ExperimentResult
+    mlflow_run_id: str | None = None
 
 
 class TwoStageExperiment:
@@ -287,6 +306,18 @@ class TwoStageExperiment:
                 unchanged; failed candidates are never skipped.
         """
         config = self.configuration
+        if config.mlflow is None:
+            return self._run_pipeline()
+        with config.mlflow.start_run(config.output_directory.name) as run:
+            mlflow.set_tags(config.mlflow.run_tags())
+            result = self._run_pipeline(run.info.run_id)
+            for name in ("config.yaml", "selection.yaml"):
+                mlflow.log_artifact(str(config.output_directory / name))
+            return result
+
+    def _run_pipeline(self, run_id: str | None = None) -> TwoStageResult:
+        """Run stage composition, using explicit child ownership only when tracking is enabled."""
+        config = self.configuration
         root = config.output_directory
         root.mkdir(parents=True, exist_ok=True)
         summary_path = root / "selection.yaml"
@@ -298,8 +329,9 @@ class TwoStageExperiment:
             }), encoding="utf-8")
         (root / "config.yaml").write_text(yaml.safe_dump(config.to_dict()), encoding="utf-8")
         results = []
+        context = {"parent_run_id": run_id} if run_id is not None else {}
         for candidate in config.supcon_configurations:
-            result = SupConExperiment(candidate).run_with_result()
+            result = SupConExperiment(candidate).run_with_result(**context)
             if result.tracked_metric != candidate.effective_tracked_metric:
                 raise ValueError("SupCon result tracked metric does not match configuration")
             if result.tracked_mode != candidate.effective_tracked_mode:
@@ -314,9 +346,18 @@ class TwoStageExperiment:
             "supcon_results": [_plain_values(asdict(result)) for result in results],
             "selected_supcon": {**_plain_values(asdict(selected)), "checkpoint_sha256": checksum},
             "classifier_result": None,
+            "mlflow_run_id": run_id,
         }
         summary_path.write_text(yaml.safe_dump(summary), encoding="utf-8")
-        classifier = ClassifierExperiment(config.classifier_configuration(selected.best_checkpoint)).run_with_result()
+        encoder_provenance = {
+            "encoder_run_id": selected.mlflow_run_id, "encoder_epoch": selected.best_epoch,
+            "encoder_tracked_metric": selected.tracked_metric,
+            "encoder_tracked_mode": selected.tracked_mode, "encoder_best_value": selected.best_value,
+            "pipeline_run_id": run_id,
+        }
+        classifier = ClassifierExperiment(
+            config.classifier_configuration(selected.best_checkpoint), encoder_provenance=encoder_provenance,
+        ).run_with_result(**context)
         summary["classifier_result"] = _plain_values(asdict(classifier))
         summary_path.write_text(yaml.safe_dump(summary), encoding="utf-8")
-        return TwoStageResult(root, tuple(results), selected, classifier)
+        return TwoStageResult(root, tuple(results), selected, classifier, run_id)

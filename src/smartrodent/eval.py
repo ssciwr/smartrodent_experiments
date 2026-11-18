@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 import numpy as np
 import torch
 from PIL import Image
@@ -239,11 +240,11 @@ class TsneComparison:
     def __init__(
         self,
         perplexity: float = 30,
-        pca_components: int = 50,
+        pca_components: int | None = 50,
         seed: int = 42,
         max_iter: int = 1000,
     ):
-        if perplexity <= 0 or pca_components < 2 or max_iter < 250:
+        if perplexity <= 0 or (pca_components and pca_components < 2) or max_iter < 250:
             raise ValueError(
                 "Use perplexity > 0, pca_components >= 2, and max_iter >= 250"
             )
@@ -282,7 +283,7 @@ class TsneComparison:
         # Compare angular structure consistently in both pooled and projected
         # spaces. Euclidean distances of unit vectors reflect cosine similarity.
         reduced = normalize(features)
-        if reduced.shape[1] > self.pca_components:
+        if self.pca_components and reduced.shape[1] > self.pca_components:
             components = min(self.pca_components, len(reduced) - 1)
             reduced = PCA(
                 n_components=components, svd_solver="randomized", random_state=self.seed
@@ -301,6 +302,7 @@ class TsneComparison:
         baseline: EvaluationFeatures,
         trained: EvaluationFeatures,
         figsize: tuple[int, int] = (18, 6),
+        markersize: int = 12
     ) -> tuple[plt.Figure, dict[str, np.ndarray]]:
         """Plot the three feature spaces for identical images and species labels.
 
@@ -335,7 +337,14 @@ class TsneComparison:
             title: self.project(features) for title, features in panels.items()
         }
         figure, axes = plt.subplots(1, 3, figsize=figsize)
-        colors = plt.get_cmap("tab20", len(trained.label_names))
+        # Grab the discrete colors from both tables (20 + 20 = 40 total)
+        tab20_colors = plt.get_cmap("tab20").colors
+        tab20b_colors = plt.get_cmap("tab20b").colors
+        tab20c_colors = plt.get_cmap("tab20c").colors
+
+        # Combine them and slice out exactly how many classes you have (25)
+        colors = ListedColormap(np.vstack((tab20_colors, tab20b_colors, tab20c_colors))[: len(trained.label_names)])
+
         names = sorted(trained.label_names, key=trained.label_names.get)
         for axis, (title, points) in zip(axes, coordinates.items()):
             for index, name in enumerate(names):
@@ -345,7 +354,7 @@ class TsneComparison:
                     points[mask, 1],
                     color=colors(index),
                     label=name,
-                    s=12,
+                    s=markersize,
                     alpha=0.7,
                 )
             axis.set_title(title)

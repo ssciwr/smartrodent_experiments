@@ -27,6 +27,7 @@ from smartrodent.experiment_support import (
     EarlyStopping,
     ImageTransforms,
     MlflowConfiguration,
+    ModelPublication,
     SchedulerConfiguration,
     _git_commit,
     resolve_validation_metrics,
@@ -392,56 +393,16 @@ class SupConExperiment:
         checkpoint_data = torch.load(checkpoint, map_location="cpu", weights_only=True)
         model.to("cpu")
         model.load_state_dict(checkpoint_data["model_state_dict"])
-        model_info = mlflow.pytorch.log_model(
-            pytorch_model=model,
-            name=mlflow_config.model_artifact_name,
-            registered_model_name=mlflow_config.registered_model_name,
-            serialization_format="pickle",
+        model.eval()
+        version = ModelPublication(mlflow_config, client).publish(
+            model, best_epoch=best_epoch,
+            validated=config.validation_dataset is not None, tags=source_tags,
+            write_card=lambda version, identity: self._write_model_card(
+                checkpoint, checkpoint_data, version,
+                provenance={**source_tags, **identity},
+            ),
         )
-
-        version = model_info.registered_model_version
-        if version is None:
-            raise RuntimeError("MLflow did not return a registered model version")
-        version = str(version)
-        validation_status = (
-            "passed" if config.validation_dataset is not None else "not_validated"
-        )
-        version_tags = {
-            **source_tags,
-            "validation_status": validation_status,
-            "best_epoch": str(best_epoch),
-        }
-        for key, value in version_tags.items():
-            client.set_model_version_tag(
-                mlflow_config.registered_model_name,
-                version,
-                key,
-                value,
-            )
-
-        card_paths = self._write_model_card(
-            checkpoint,
-            checkpoint_data,
-            version,
-            provenance={
-                **source_tags,
-                "run_id": model_info.run_id,
-                "model_id": model_info.model_id,
-            },
-        )
-        for path in card_paths:
-            client.log_model_artifact(model_info.model_id, str(path))
-        client.update_model_version(
-            name=mlflow_config.registered_model_name,
-            version=version,
-            description=card_paths[1].read_text(encoding="utf-8"),
-        )
-        if validation_status == "passed":
-            client.set_registered_model_alias(
-                mlflow_config.registered_model_name,
-                mlflow_config.champion_alias,
-                version,
-            )
+        if config.validation_dataset is not None:
             print(
                 f"Promoted {mlflow_config.registered_model_name} version {version} "
                 f"to @{mlflow_config.champion_alias}"
@@ -785,8 +746,11 @@ class SupConExperiment:
         """
         return self.run_with_result().last_checkpoint
 
-    def run_with_result(self) -> ExperimentResult:
+    def run_with_result(self, *, parent_run_id: str | None = None) -> ExperimentResult:
         """Train once and report the best epoch selected by the configured metric.
+
+        Args:
+            parent_run_id: Explicit active pipeline parent for a tracked child run.
 
         Returns:
             Completed run metadata, including best/last checkpoints and an optional
@@ -812,11 +776,10 @@ class SupConExperiment:
                 if model is not None:
                     model.finalize()
 
-        config.mlflow.configure()
-        client = MlflowClient(tracking_uri=config.mlflow.tracking_uri)
         source_tags = config.mlflow.run_tags()
         model = None
-        with mlflow.start_run(run_name=Path(config.output_directory).name) as run:
+        with config.mlflow.start_run(Path(config.output_directory).name, parent_run_id=parent_run_id) as run:
+            client = MlflowClient(tracking_uri=config.mlflow.tracking_uri)
             try:
                 mlflow.set_tags(source_tags)
                 mlflow.log_params(config.mlflow_parameters())
@@ -898,6 +861,7 @@ class SupConExperiment:
             name=name or Path(config.output_directory).name,
             registry_version=version,
             base_model=config.model_name,
+            task="contrastive-encoder",
         )
         card["classes"] = dict(
             sorted(

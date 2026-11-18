@@ -428,13 +428,12 @@ def test_unknown_or_conflicting_ownership_is_rejected_not_silently_ignored(
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
-@pytest.mark.parametrize("section", [None, "supcon", "classifier"])
-def test_pipeline_tracking_is_explicitly_deferred_until_milestone_six(
+@pytest.mark.parametrize("section", ["supcon", "classifier"])
+def test_pipeline_tracking_settings_are_owned_by_the_root(
     pipeline_api, pipeline_document, section
 ):
-    """Do not silently create unrelated tracking runs before parent/child integration exists."""
-    target = pipeline_document if section is None else pipeline_document[section]
-    target["mlflow"] = {"tracking_uri": "sqlite:///unused.db", "experiment_name": "pipeline"}
+    """Stage overrides cannot silently create unrelated tracking runs or registries."""
+    pipeline_document[section]["mlflow"] = {"tracking_uri": "sqlite:///unused.db", "experiment_name": "pipeline"}
     with pytest.raises(ValueError, match="mlflow|tracking"):
         _configuration(pipeline_api, pipeline_document)
 

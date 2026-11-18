@@ -610,18 +610,6 @@ def test_omitted_direction_uses_the_configured_metric_default(classifier_configu
     assert config.effective_tracked_mode == mode
 
 
-def test_registry_options_are_explicitly_deferred_not_silently_ignored(classifier_configuration, tmp_path):
-    """Milestone 4 enables tracking; registry publication belongs to milestone 6."""
-    with pytest.raises(ValueError, match="registered_model_name|registration"):
-        replace(
-            classifier_configuration,
-            mlflow=MlflowConfiguration(
-                tracking_uri=f"sqlite:///{tmp_path / 'unused.db'}", experiment_name="ce",
-                registered_model_name="classifier",
-            ),
-        )
-
-
 def test_noncolliding_source_can_share_the_output_directory(
     training_api, classifier_configuration, classifier_assets
 ):
