@@ -1,8 +1,7 @@
 """Behavioral contracts for infrastructure shared by SupCon and CE experiments.
 
-These tests deliberately require the new library API without providing stubs or
-skipping missing imports. They should be red until the extraction is implemented.
-Existing SupCon tests remain the integration/regression guard.
+Existing SupCon tests provide the integration/regression guard for these shared
+components. Seeded pixel comparisons preserve the original augmentation behavior.
 """
 
 from copy import deepcopy
@@ -16,7 +15,7 @@ from PIL import Image
 
 @pytest.fixture
 def support():
-    """Load the proposed shared API without blocking collection of other tests."""
+    """Load shared experiment components for their behavioral tests."""
     from smartrodent import experiment_support
 
     return experiment_support

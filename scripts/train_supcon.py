@@ -3,7 +3,7 @@
 import argparse
 import hashlib
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -39,7 +39,6 @@ from smartrodent.supcon_datasets import (
 )
 from smartrodent.supcon_model import YoloSupConModel
 from torch.utils.data import DataLoader
-from torchvision.transforms.v2 import Compose
 from tqdm.auto import tqdm
 
 
@@ -351,7 +350,9 @@ class SupConExperiment:
 
     def __init__(self, configuration: TrainingConfiguration):
         self.configuration = configuration
-        self.validation_metrics = self._resolve_validation_metrics()
+        self.validation_metrics = resolve_validation_metrics(
+            configuration.validation_metrics
+        )
         # Fail on malformed templates before spending time on training.
         self.card_template = load_card_template(Path(configuration.model_card_template))
 
@@ -428,23 +429,13 @@ class SupConExperiment:
             )
         return version
 
-    def _resolve_validation_metrics(
-        self,
-    ) -> dict[str, Callable[[np.ndarray, np.ndarray], float]]:
-        """Resolve configured sklearn metrics and reject invalid specs early."""
-        return resolve_validation_metrics(self.configuration.validation_metrics)
-
-    def _build_transform(self) -> Compose:
-        """Reproduce the notebook's independently sampled augmentation pipeline."""
-        return ImageTransforms(self.configuration.transforms).training()
-
     def _build_loader(self) -> tuple[MultiViewImageDataset, DataLoader]:
         """Build label-aligned P-K batches with two views per selected image."""
         config = self.configuration
         dataset = MultiViewImageDataset(
             Path(config.train_dataset),
             labels=config.class_names,
-            transform=self._build_transform(),
+            transform=ImageTransforms(config.transforms).training(),
             size=config.transforms["image_size"],
         )
         labels = [dataset.label_names[path.parent.name] for path in dataset.images]

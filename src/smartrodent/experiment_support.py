@@ -335,9 +335,7 @@ class ImageTransforms:
         size = settings["image_size"]
         return Compose(
             [
-                PILToTensor(),
-                ToDtype(torch.float32, scale=True),
-                Resize((size, size), **settings["resize"]),
+                *self._preprocessing_steps(),
                 RandomAdjustSharpness(**settings["random_adjust_sharpness"]),
                 RandomGrayscale(**settings["random_grayscale"]),
                 RandomPerspective(**settings["random_perspective"]),
@@ -352,14 +350,16 @@ class ImageTransforms:
         Returns:
             RGB tensor conversion, zero-to-one scaling, and configured resize.
         """
+        return Compose(self._preprocessing_steps())
+
+    def _preprocessing_steps(self) -> list[torch.nn.Module]:
+        """Keep conversion, scaling, and resizing identical across both pipelines."""
         size = self.settings["image_size"]
-        return Compose(
-            [
-                PILToTensor(),
-                ToDtype(torch.float32, scale=True),
-                Resize((size, size), **self.settings["resize"]),
-            ]
-        )
+        return [
+            PILToTensor(),
+            ToDtype(torch.float32, scale=True),
+            Resize((size, size), **self.settings["resize"]),
+        ]
 
 
 def resolve_validation_metrics(
