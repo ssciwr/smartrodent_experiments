@@ -36,6 +36,27 @@ This project uses DVC as its core driver.
 - never modify the data in the ./datasets directory unless explicitly told to do so. It contains the data of the project in various stages or. processing and must hence be held sacred! If told to modify it, raise the concern that this is normally forbidden first, plan out a step-by-step workflow and ask for explicit permission to execute it first.
 - config files are treated as ephemeral and do not need tests
 
+## Workflow
+When implementing features, work like this:
+- use test driven development paradigm
+- after the user gives you the requirements, use the following process when tasked with implementation:
+    1) plan out features and ask human for plan approval
+    2) write tests that assertain the plan's specified functionality and behavior
+    3) review by subagent up to 4 times and correct code according to feedback until ok
+    4) correct until ok
+    5) pass to user for review
+    6) when user approved: implement feature
+    7) review by subagent up to 4 times and correct code according to feedback until ok
+    8) human review
+    9) when approved: refactor code
+    10) review by subagent up to 4 times and correct code according to feedback until ok
+    11) final human review, iterate until human approves
+
+- The reviewer agent should find issues with maintainability, logic errors, requirement violations, going off-topic or making unnecessary changes, introducing additional complexity where not needed. It should verify correctness (run tests, cross check logic) and adherence to plan.
+
+The 'refactor' step aims at simplifying the implementation as much as possible and remove as much as possible complexity without
+compromising functionality or best practices and without violating the requirements.
+
 ## Coding guidelines
 - Adhere to SOLID principles
     - single responsibility principle: One code unit (function, class, module) should have one single purpose
