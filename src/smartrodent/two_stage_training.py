@@ -12,7 +12,8 @@ import yaml
 
 from scripts.train_supcon import SupConExperiment, TrainingConfiguration
 from smartrodent import config_utils
-from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
+from smartrodent.classifier_training import ClassifierConfiguration
+from smartrodent.classifier_sweeps import ClassifierSweepConfiguration, ClassifierSweepExperiment
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
 from smartrodent.experiment_support import ImageTransforms, MlflowConfiguration, resolve_validation_metrics
 from smartrodent.model_card import load_card_template
@@ -35,7 +36,7 @@ class TwoStageConfiguration:
     """Validate the entire pipeline before running any candidate or writing outputs.
 
     Paths follow the standalone scripts: relative to the working directory.
-    Only SupCon settings may sweep. Coupled targets use full document paths.
+    Stage sweeps expand independently. Coupled targets use full document paths.
 
     Args:
         output_directory: Root for the unified configuration and stage artifacts.
@@ -51,7 +52,7 @@ class TwoStageConfiguration:
     classifier: Mapping
     mlflow: MlflowConfiguration | None = None
     supcon_configurations: tuple[TrainingConfiguration, ...] = field(init=False, repr=False)
-    _classifier_configuration: ClassifierConfiguration = field(init=False, repr=False)
+    _classifier_sweep: ClassifierSweepConfiguration = field(init=False, repr=False)
 
     def __post_init__(self):
         """Own independent settings and prevalidate all expanded stage configurations."""
@@ -71,11 +72,9 @@ class TwoStageConfiguration:
         for name in ("supcon", "classifier"):
             self._validate_stage_ownership(getattr(self, name), name)
         self._reject_sweeps(self.data, "data")
-        self._reject_sweeps(self.classifier, "classifier")
-        initialization = self.classifier.get("initialization")
-        if not isinstance(initialization, Mapping) or initialization.get("encoder") != {"source": "selected_supcon"}:
-            raise ValueError("classifier encoder must be exactly {source: selected_supcon}, without checkpoint")
-        runs = config_utils.ConfigHandler(self.to_dict()).run_configs
+        # Expand one stage at a time: a classifier Cartesian product must never
+        # multiply SupCon candidates or change which encoder is selected.
+        runs = config_utils.ConfigHandler({"supcon": deepcopy(self.supcon)}).run_configs
         if not runs:
             raise ValueError("SupCon sweep must contain at least one candidate; empty sweep")
         configurations = [
@@ -90,21 +89,31 @@ class TwoStageConfiguration:
         if any(config.effective_tracked_mode != reference.effective_tracked_mode for config in configurations):
             raise ValueError("SupCon sweep must use the same tracked mode/direction")
         object.__setattr__(self, "supcon_configurations", tuple(configurations))
-        values = {
-            **deepcopy(self.classifier), **self.data,
-            "output_directory": self.output_directory / "classifier",
+        classifier_runs = config_utils.ConfigHandler({"classifier": deepcopy(self.classifier)}).run_configs
+        classifier_root = self.output_directory / "classifier"
+        shared_classifier_settings = {
+            **self.data,
+            "output_directory": classifier_root,
             "mlflow": asdict(self.mlflow) if self.mlflow is not None else None,
         }
-        # This path only prevalidates CE settings; no checkpoint is loaded until
-        # all candidates complete and the actual winning best.pt is known.
-        values["initialization"]["encoder"] = {"source": "supcon", "checkpoint": str(reference.output_directory / "best.pt")}
-        self._validate_seed(values.get("seed", 42))
-        try:
-            classifier = ClassifierConfiguration.from_mapping(values)
-        except TypeError as error:
-            raise ValueError(f"Invalid classifier settings: {error}") from error
-        load_card_template(Path(classifier.model_card_template))
-        object.__setattr__(self, "_classifier_configuration", classifier)
+        values = []
+        for run in classifier_runs:
+            settings = run["classifier"]
+            self._validate_stage_ownership(settings, "classifier")
+            initialization = settings.get("initialization")
+            if not isinstance(initialization, Mapping) or initialization.get("encoder") != {"source": "selected_supcon"}:
+                raise ValueError("classifier encoder must be exactly {source: selected_supcon}, without checkpoint")
+            self._validate_seed(settings.get("seed", 42))
+            candidate = {**deepcopy(settings), **shared_classifier_settings}
+            # The winning file does not exist yet; this validates settings and
+            # source/output relationships without loading any model weights.
+            candidate["initialization"]["encoder"] = {
+                "source": "supcon", "checkpoint": str(reference.output_directory / "best.pt"),
+            }
+            values.append(candidate)
+        document = _plain_values({**deepcopy(self.classifier), **shared_classifier_settings})
+        sweep = ClassifierSweepConfiguration.from_runs(classifier_root, values, document)
+        object.__setattr__(self, "_classifier_sweep", sweep)
         self._validate_output_paths()
 
     @staticmethod
@@ -159,10 +168,10 @@ class TwoStageConfiguration:
 
     @classmethod
     def _reject_sweeps(cls, values, section: str) -> None:
-        """Reject sweep directives outside SupCon, even one-value sweeps."""
+        """Reject sweeps in shared data, which must remain comparable across stages."""
         if isinstance(values, Mapping):
             if values.get("type") in ("sweep", "coupled-sweep", "range", "random_uniform"):
-                raise ValueError(f"{section} sweeps are not supported; only supcon may sweep")
+                raise ValueError(f"{section} sweeps are not supported; sweep stage settings instead")
             for value in values.values():
                 cls._reject_sweeps(value, section)
         elif isinstance(values, (list, tuple)):
@@ -172,7 +181,7 @@ class TwoStageConfiguration:
     def _validate_output_paths(self) -> None:
         """Protect shared datasets and model/head inputs from every generated artifact."""
         stage_directories = [config.output_directory for config in self.supcon_configurations]
-        stage_directories.append(self._classifier_configuration.output_directory)
+        stage_directories.extend(config.output_directory for config in self._classifier_sweep.configurations)
         for directory in [self.output_directory, *stage_directories]:
             for split in ("train_dataset", "validation_dataset"):
                 if directory.resolve().is_relative_to(Path(self.data[split]).resolve()):
@@ -186,14 +195,16 @@ class TwoStageConfiguration:
             "config.yaml", "history.yaml", "last.pt", "best.pt",
             ".last.pt.tmp", ".best.pt.tmp", "best.model_card.yaml", "best.model_card.md",
         )
-        artifacts = [self.output_directory / name for name in ("config.yaml", "selection.yaml")]
+        roots = (self.output_directory, self._classifier_sweep.output_directory)
+        artifacts = [root / name for root in roots for name in ("config.yaml", "selection.yaml")]
         artifacts.extend(directory / name for directory in stage_directories for name in names)
         sources = [Path(config.model_name) for config in self.supcon_configurations]
         sources.extend(Path(config.model_card_template) for config in self.supcon_configurations)
-        sources.append(Path(self._classifier_configuration.model_card_template))
-        head = self._classifier_configuration.initialization["head"]
-        if head.get("checkpoint") is not None:
-            sources.append(Path(head["checkpoint"]))
+        for classifier in self._classifier_sweep.configurations:
+            sources.append(Path(classifier.model_card_template))
+            head = classifier.initialization["head"]
+            if head.get("checkpoint") is not None:
+                sources.append(Path(head["checkpoint"]))
         for source in sources:
             for artifact in artifacts:
                 same_file = source.exists() and artifact.exists() and source.samefile(artifact)
@@ -259,9 +270,26 @@ class TwoStageConfiguration:
         Returns:
             Ordinary standalone CE configuration using that SupCon source.
         """
-        initialization = deepcopy(self._classifier_configuration.initialization)
-        initialization["encoder"] = {"source": "supcon", "checkpoint": str(checkpoint.resolve())}
-        return replace(self._classifier_configuration, initialization=initialization)
+        configurations = self.classifier_sweep_configuration(checkpoint).configurations
+        if len(configurations) != 1:
+            raise ValueError("Multiple classifier configurations; use classifier_sweep_configuration")
+        return configurations[0]
+
+    def classifier_sweep_configuration(self, checkpoint: Path) -> ClassifierSweepConfiguration:
+        """Inject the same selected encoder into every prepared classifier variant.
+
+        Args:
+            checkpoint: Winning SupCon candidate's best.pt file.
+
+        Returns:
+            The shared sweep settings with concrete encoder paths for every run.
+        """
+        configurations = []
+        for configuration in self._classifier_sweep.configurations:
+            initialization = deepcopy(configuration.initialization)
+            initialization["encoder"] = {"source": "supcon", "checkpoint": str(checkpoint.resolve())}
+            configurations.append(replace(configuration, initialization=initialization))
+        return replace(self._classifier_sweep, configurations=tuple(configurations))
 
 
 @dataclass(frozen=True)
@@ -272,15 +300,31 @@ class TwoStageResult:
         output_directory: Pipeline artifact root.
         supcon_results: Completed candidates in sweep-product order.
         selected_supcon: Configured-metric winner, retaining the first exact tie.
-        classifier_result: Completed CE training result.
+        classifier_results: Completed CE runs in classifier sweep order.
+        selected_classifier: Best validated CE result for this invocation.
         mlflow_run_id: Pipeline parent run ID, or None for untracked execution.
     """
 
     output_directory: Path
     supcon_results: tuple[ExperimentResult, ...]
     selected_supcon: ExperimentResult
-    classifier_result: ExperimentResult
+    classifier_results: tuple[ExperimentResult, ...]
+    selected_classifier: ExperimentResult
     mlflow_run_id: str | None = None
+
+    @property
+    def classifier_result(self) -> ExperimentResult:
+        """Return the legacy single-run result, rejecting ambiguous multi-run access.
+
+        Returns:
+            The only completed classifier result.
+
+        Raises:
+            ValueError: Multiple classifiers ran; use classifier_results instead.
+        """
+        if len(self.classifier_results) != 1:
+            raise ValueError("Classifier sweep has multiple results; use classifier_results or selected_classifier")
+        return self.classifier_results[0]
 
 
 class TwoStageExperiment:
@@ -326,6 +370,7 @@ class TwoStageExperiment:
             # config/checkpoints. Retain prior stage files and unrelated runs.
             summary_path.write_text(yaml.safe_dump({
                 "supcon_results": [], "selected_supcon": None, "classifier_result": None,
+                "classifier_results": [], "selected_classifier": None,
             }), encoding="utf-8")
         (root / "config.yaml").write_text(yaml.safe_dump(config.to_dict()), encoding="utf-8")
         results = []
@@ -343,9 +388,9 @@ class TwoStageExperiment:
         with selected.best_checkpoint.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
         summary = {
-            "supcon_results": [_plain_values(asdict(result)) for result in results],
-            "selected_supcon": {**_plain_values(asdict(selected)), "checkpoint_sha256": checksum},
-            "classifier_result": None,
+            "supcon_results": [result.to_dict() for result in results],
+            "selected_supcon": {**selected.to_dict(), "checkpoint_sha256": checksum},
+            "classifier_result": None, "classifier_results": [], "selected_classifier": None,
             "mlflow_run_id": run_id,
         }
         summary_path.write_text(yaml.safe_dump(summary), encoding="utf-8")
@@ -355,9 +400,15 @@ class TwoStageExperiment:
             "encoder_tracked_mode": selected.tracked_mode, "encoder_best_value": selected.best_value,
             "pipeline_run_id": run_id,
         }
-        classifier = ClassifierExperiment(
-            config.classifier_configuration(selected.best_checkpoint), encoder_provenance=encoder_provenance,
-        ).run_with_result(**context)
-        summary["classifier_result"] = _plain_values(asdict(classifier))
+        classifiers = ClassifierSweepExperiment(
+            config.classifier_sweep_configuration(selected.best_checkpoint), encoder_provenance=encoder_provenance,
+        ).run(**context)
+        classifier_report = classifiers.to_dict()
+        for name in ("classifier_results", "selected_classifier", "registered_champion_version"):
+            summary[name] = classifier_report[name]
+        if len(classifiers.classifier_results) == 1:
+            summary["classifier_result"] = classifiers.classifier_results[0].to_dict()
         summary_path.write_text(yaml.safe_dump(summary), encoding="utf-8")
-        return TwoStageResult(root, tuple(results), selected, classifier, run_id)
+        return TwoStageResult(
+            root, tuple(results), selected, classifiers.classifier_results, classifiers.selected_classifier, run_id,
+        )

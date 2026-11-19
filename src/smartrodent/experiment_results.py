@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from numbers import Real
 from pathlib import Path
 
@@ -21,6 +21,7 @@ class ExperimentResult:
         best_value: Original metric value, not an internally sign-inverted score.
         validation_dataset: Validation split, or ``None`` for training-only runs.
         mlflow_run_id: Tracking run ID when MLflow is enabled.
+        registered_model_version: Published classifier version, when registered.
     """
 
     output_directory: Path
@@ -32,6 +33,7 @@ class ExperimentResult:
     best_value: float
     validation_dataset: Path | None = None
     mlflow_run_id: str | None = None
+    registered_model_version: str | None = None
 
     def __post_init__(self):
         """Reject unnamed metrics, ambiguous directions, and invalid tracked values."""
@@ -45,6 +47,14 @@ class ExperimentResult:
             or not math.isfinite(self.best_value)
         ):
             raise ValueError("best_value must be a finite metric value")
+
+    def to_dict(self) -> dict:
+        """Serialize result paths without changing scores or optional registry metadata.
+
+        Returns:
+            YAML-compatible fields retaining the original, unnormalized paths.
+        """
+        return {name: str(value) if isinstance(value, Path) else value for name, value in asdict(self).items()}
 
 
 def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentResult:
@@ -72,7 +82,9 @@ def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentRes
             raise ValueError("Experiments must use the same tracked metric")
         if result.tracked_mode != reference.tracked_mode:
             raise ValueError("Experiments must use the same tracked mode")
-        if result.validation_dataset != reference.validation_dataset:
+        # Input aliases identify the same split; preserve original report paths
+        # while matching the canonical identity used during sweep prevalidation.
+        if result.validation_dataset.resolve() != reference.validation_dataset.resolve():
             raise ValueError("Experiments must use the same validation dataset")
     # Result construction validates the direction. Both builtins preserve the
     # first exact tie and return the original object, without sorting or copying.

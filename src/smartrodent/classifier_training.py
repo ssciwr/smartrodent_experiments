@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Mapping
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import mlflow
@@ -15,7 +15,9 @@ import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
+from smartrodent.classifier_champions import ClassifierChampionRegistry
 from smartrodent.classifier_model import YoloClassifierModel
 from smartrodent.experiment_results import ExperimentResult
 from smartrodent.experiment_support import (
@@ -227,6 +229,19 @@ class ClassifierConfiguration:
             "min" if self.tracked_metric == "ce_loss_mean" else "max"
         )
 
+    @property
+    def tracked_metric_definition(self) -> dict:
+        """Return the scoring function/options used for objective comparability.
+
+        Returns:
+            A copy of the configured sklearn definition, or the fixed native CE
+            objective. Metric display names alone do not identify an objective.
+        """
+        if self.tracked_metric == "ce_loss_mean":
+            return {"function": "torch.nn.functional.cross_entropy", "reduction": "mean"}
+        else:
+            return deepcopy(dict(self.validation_metrics[self.tracked_metric]))
+
     @classmethod
     def from_mapping(cls, values: Mapping) -> "ClassifierConfiguration":
         """Parse one concrete configuration mapping.
@@ -383,11 +398,15 @@ class ClassifierExperiment:
         """
         return self.run_with_result().last_checkpoint
 
-    def run_with_result(self, *, parent_run_id: str | None = None) -> ExperimentResult:
+    def run_with_result(
+        self, *, parent_run_id: str | None = None, defer_promotion: bool = False
+    ) -> ExperimentResult:
         """Train with configured metric selection and optional MLflow tracking.
 
         Args:
             parent_run_id: Explicit active pipeline parent for a tracked child run.
+            defer_promotion: Publish without changing the alias; the sweep owner
+                compares its winner only after every classifier has succeeded.
 
         Returns:
             Best/last checkpoint metadata with the original configured objective.
@@ -425,12 +444,15 @@ class ClassifierExperiment:
                 )
                 mlflow.log_metric("best_epoch", result.best_epoch)
                 if config.mlflow.registered_model_name is not None:
-                    self._publish_best_model(result)
+                    version = self._publish_best_model(result)
+                    result = replace(result, registered_model_version=version)
+                    if not defer_promotion:
+                        ClassifierChampionRegistry(config.mlflow, config.tracked_metric_definition, config.class_names).promote(result)
                 else:
                     config.mlflow.log_best_artifacts(result.best_checkpoint)
             return result
 
-    def _publish_best_model(self, result: ExperimentResult) -> None:
+    def _publish_best_model(self, result: ExperimentResult) -> str:
         """Restore best.pt independently of the final epoch and publish that trained classifier."""
         config = self.configuration
         checkpoint = result.best_checkpoint
@@ -443,11 +465,12 @@ class ClassifierExperiment:
             config.mlflow.log_best_artifacts(checkpoint)
             return paths
 
-        ModelPublication(config.mlflow).publish(
+        registry = ClassifierChampionRegistry(config.mlflow, config.tracked_metric_definition, config.class_names)
+        return ModelPublication(config.mlflow).publish(
             model, best_epoch=result.best_epoch,
             validated=config.validation_dataset is not None,
-            tags={**snapshot["provenance"], **config.mlflow.run_tags()},
-            write_card=write_card,
+            tags={**snapshot["provenance"], **config.mlflow.run_tags(), **registry.comparison_tags(result)},
+            write_card=write_card, promote=False,
         )
 
     def _train_epoch(
@@ -529,7 +552,9 @@ class ClassifierExperiment:
             for epoch in range(1, config.epochs + 1):
                 row = {
                     "epoch": epoch,
-                    "mean": self._train_epoch(model, loader, optimizer),
+                    "mean": self._train_epoch(
+                        model, tqdm(loader, desc=f"Epoch {epoch}"), optimizer
+                    ),
                 }
                 if validation_loader is not None:
                     row["validation"] = self._validate(model, validation_loader)

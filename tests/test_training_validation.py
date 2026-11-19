@@ -1,0 +1,182 @@
+"""Compatibility and consistency contracts for the new training configuration layer.
+
+Legacy YOLO trainers are deliberately outside this refactor. Existing integration
+suites cover training, sweeps, checkpoint safety, and champion publication; these
+checks target schema gaps and the Python/YAML interface that must survive.
+"""
+
+from copy import deepcopy
+from dataclasses import replace
+from pathlib import Path
+
+from hypothesis import HealthCheck, given, settings, strategies as st
+import pytest
+import yaml
+
+from scripts.train_supcon import TrainingConfiguration
+from smartrodent.classifier_training import ClassifierConfiguration
+from smartrodent.experiment_support import MlflowConfiguration, SchedulerConfiguration
+
+
+@pytest.fixture(params=["supcon", "classifier"])
+def configuration(request, tmp_path):
+    """Validate settings without requiring images, model weights, or output directories."""
+    values = {
+        "train_dataset": str(tmp_path / "train"),
+        "output_directory": str(tmp_path / "outputs"),
+        "class_names": ["rat", "mouse"],
+        "workers": 0,
+        "device": "cpu",
+        "optimizer": {"lr": 0.001},
+        "transforms": {
+            "image_size": 16,
+            "resize": {"antialias": True},
+            "random_adjust_sharpness": {"sharpness_factor": 0.5, "p": 0.0},
+            "random_grayscale": {"p": 0.0},
+            "random_perspective": {"distortion_scale": 0.5, "p": 0.0},
+            "random_horizontal_flip": {"p": 0.0},
+            "random_resized_crop": {"scale": [1.0, 1.0], "ratio": [1.0, 1.0]},
+        },
+    }
+    if request.param == "supcon":
+        values.update(model_name=str(tmp_path / "model.yaml"), classes_per_batch=2, samples_per_class=2)
+        return TrainingConfiguration.from_mapping(values)
+    elif request.param == "classifier":
+        values["initialization"] = {
+            "encoder": {"source": "supcon", "checkpoint": str(tmp_path / "encoder.pt")},
+            "head": {"replace": "linear", "source": "random"},
+        }
+        return ClassifierConfiguration.from_mapping(values)
+    else:
+        raise AssertionError(f"Unknown training system: {request.param}")
+
+
+def _parse_update(configuration, path, value):
+    """Change one input only, so a failure cannot be explained by another missing field."""
+    document = deepcopy(configuration.to_dict())
+    node = document
+    for name in path[:-1]:
+        node = node[name]
+    node[path[-1]] = value
+    return type(configuration).from_mapping(document)
+
+
+@pytest.mark.parametrize("path,value", [
+    (("epochs",), True), (("epochs",), "2"), (("epochs",), 1.5),
+    (("workers",), True), (("workers",), "0"), (("workers",), 0.5),
+    (("seed",), True), (("seed",), -1), (("seed",), 2**32),
+    (("seed",), "42"), (("seed",), 0.5),
+    (("optimizer", "lr"), True), (("optimizer", "lr"), "0.001"),
+    (("optimizer", "lr"), 0), (("optimizer", "lr"), float("nan")),
+    (("optimizer", "lr"), float("inf")),
+    (("transforms", "image_size"), True), (("transforms", "image_size"), 0),
+])
+def test_new_training_systems_reject_invalid_scalar_settings_consistently(configuration, path, value):
+    """Reject coercible strings, bool-as-number inputs, and invalid ranges before training."""
+    with pytest.raises((ValueError, TypeError)):
+        _parse_update(configuration, path, value)
+    assert not configuration.output_directory.exists()
+
+
+@pytest.mark.parametrize("seed", [True, -1, 2**32, "42", 0.5])
+def test_invalid_seeds_are_rejected_through_dataclass_replace_too(configuration, seed):
+    """Direct Python callers must not bypass constraints enforced by mapping loaders."""
+    with pytest.raises((ValueError, TypeError)) as error:
+        replace(configuration, seed=seed)
+    assert "seed" in str(error.value)
+
+
+@pytest.mark.parametrize("configuration", ["supcon"], indirect=True)
+@pytest.mark.parametrize("field,value", [("temperature", True), ("dropout", True), ("freeze", [True])])
+def test_supcon_only_numeric_settings_also_exclude_booleans(configuration, field, value):
+    """Algorithm-specific settings use the same strict numeric conventions."""
+    with pytest.raises((ValueError, TypeError)):
+        _parse_update(configuration, (field,), value)
+
+
+@pytest.mark.parametrize("missing", ["resize", "random_resized_crop"])
+def test_missing_transform_sections_produce_configuration_errors_not_key_errors(configuration, missing):
+    """Nested input shape is checked declaratively rather than failing inside a builder."""
+    transforms = deepcopy(configuration.transforms)
+    del transforms[missing]
+    with pytest.raises((ValueError, TypeError)) as error:
+        replace(configuration, transforms=transforms)
+    assert "transforms" in str(error.value) or missing in str(error.value)
+
+
+@pytest.mark.parametrize("path", [("unknown_option",), ("mlflow", "unknown_option"), ("scheduler", "unknown_option")])
+def test_unknown_configuration_keys_remain_errors(configuration, path):
+    """Schema migration must not silently discard typos at the root or shared boundaries."""
+    configured = replace(
+        configuration, validation_dataset=configuration.train_dataset,
+        mlflow=MlflowConfiguration(tracking_uri="sqlite:///unused-validation-test.db", experiment_name="validation-test"),
+        scheduler=SchedulerConfiguration("ReduceLROnPlateau", {"mode": "min"}),
+    )
+    with pytest.raises((ValueError, TypeError)) as error:
+        _parse_update(configured, path, 1)
+    assert path[-1] in str(error.value)
+
+
+@settings(max_examples=8, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(seed=st.integers(0, 2**32 - 1), workers=st.integers(0, 8), lr=st.floats(min_value=0.0001, max_value=0.1, allow_nan=False))
+def test_valid_settings_keep_dataclass_replace_and_yaml_round_trip(configuration, tmp_path, seed, workers, lr):
+    """Preserve immutable configuration callers, meaningful numeric values, and portable paths."""
+    updated = replace(configuration, seed=seed, workers=workers, optimizer={"lr": lr})
+    document = updated.to_dict()
+    assert isinstance(updated.train_dataset, Path)
+    assert document["seed"] == seed and document["workers"] == workers
+    assert document["optimizer"]["lr"] == lr
+    assert document["class_names"] == ["rat", "mouse"]
+    assert isinstance(document["train_dataset"], str)
+    path = tmp_path / "configuration.yaml"
+    path.write_text(yaml.safe_dump(document))
+    assert type(updated).from_mapping(document).to_dict() == document
+    assert type(updated).from_yaml(path).to_dict() == document
+    assert configuration.seed == 42 and configuration.workers == 0
+    assert not configuration.output_directory.exists()
+
+
+def test_native_optimizer_and_metric_options_are_not_lost_by_schema_validation(configuration, tmp_path):
+    """Do not replace native option dictionaries with a restricted project-specific subset."""
+    optimizer = {
+        "lr": 0.001, "betas": [0.8, 0.95], "eps": 1e-6, "weight_decay": 0.02,
+        "amsgrad": True, "maximize": False, "foreach": False, "fused": False,
+    }
+    metrics = {"macro_f1": {"function": "f1_score", "average": "macro", "labels": [0, 1], "zero_division": 0}}
+    expected_optimizer, expected_metrics = deepcopy(optimizer), deepcopy(metrics)
+    updated = replace(
+        configuration, optimizer=optimizer, validation_dataset=configuration.train_dataset,
+        validation_metrics=metrics, tracked_metric="macro_f1", tracked_mode="max",
+    )
+    document = updated.to_dict()
+    path = tmp_path / "native-options.yaml"
+    path.write_text(yaml.safe_dump(document))
+    restored = [updated, type(updated).from_mapping(document), type(updated).from_yaml(path)]
+    for result in restored:
+        assert result.to_dict()["optimizer"] == expected_optimizer
+        assert result.to_dict()["validation_metrics"] == expected_metrics
+    assert optimizer == expected_optimizer and metrics == expected_metrics
+
+
+@pytest.mark.parametrize("source", ["validation_dataset", "checkpoint"])
+def test_each_standalone_configuration_protects_all_its_inputs(configuration, source):
+    """A shared safety implementation must protect both standalone APIs, not only the pipeline."""
+    if source == "validation_dataset":
+        changes = {"validation_dataset": configuration.train_dataset.parent / "val"}
+        changes["output_directory"] = changes["validation_dataset"] / "outputs"
+    elif source == "checkpoint":
+        protected = configuration.output_directory / "best.pt"
+        protected.parent.mkdir(parents=True)
+        protected.write_bytes(b"protected source checkpoint")
+        if isinstance(configuration, TrainingConfiguration):
+            changes = {"model_name": str(protected)}
+        else:
+            initialization = deepcopy(configuration.initialization)
+            initialization["encoder"]["checkpoint"] = str(protected)
+            changes = {"initialization": initialization}
+    else:
+        raise AssertionError(f"Unknown source: {source}")
+    with pytest.raises(ValueError, match="outside|collid|source|checkpoint"):
+        replace(configuration, **changes)
+    if source == "checkpoint":
+        assert protected.read_bytes() == b"protected source checkpoint"

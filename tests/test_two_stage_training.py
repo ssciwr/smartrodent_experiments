@@ -329,7 +329,7 @@ def test_configuration_round_trips_without_resolving_the_selected_source_early(
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
-def test_yaml_sweeps_expand_only_supcon_with_existing_coupled_tag_semantics(
+def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
     pipeline_api, pipeline_document, recorded_stages, tmp_path
 ):
     """Keep full-root target paths and sweep-product order from the existing loader."""
@@ -363,7 +363,6 @@ def test_yaml_sweeps_expand_only_supcon_with_existing_coupled_tag_semantics(
         (("supcon", "tracked_mode"), {"type": "sweep", "values": ["min", "max"]}, "mode|direction"),
         (("supcon", "tracked_metric"), {"type": "sweep", "values": ["balanced_accuracy", "supcon_loss_mean"]}, "metric"),
         (("classifier", "batch_size"), 0, "batch_size"),
-        (("classifier", "optimizer", "lr"), {"type": "sweep", "values": [0.001, 0.002]}, "classifier|sweep"),
         (("data", "train_dataset"), {"type": "sweep", "values": ["a", "b"]}, "data|sweep"),
         (("classifier", "initialization", "encoder"), {"source": "supcon", "checkpoint": "some.pt"}, "selected_supcon|encoder"),
         (("classifier", "initialization", "encoder", "checkpoint"), "some.pt", "encoder|checkpoint"),

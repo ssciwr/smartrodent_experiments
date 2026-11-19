@@ -258,6 +258,23 @@ def test_training_ce_uses_raw_logits_not_softmax_scores(
         torch.testing.assert_close(actual_moments[shape], expected_moments[shape], rtol=1e-5, atol=1e-8)
 
 
+def test_training_displays_epoch_progress(
+    training_api, classifier_configuration, monkeypatch
+):
+    """Each CE epoch receives a labeled progress bar."""
+    descriptions = []
+
+    def record_progress(loader, *, desc):
+        descriptions.append(desc)
+        return loader
+
+    monkeypatch.setattr(training_api, "tqdm", record_progress)
+    training_api.ClassifierExperiment(classifier_configuration).run()
+    assert descriptions == [
+        f"Epoch {epoch}" for epoch in range(1, classifier_configuration.epochs + 1)
+    ]
+
+
 @pytest.mark.parametrize("head_replace", ["linear", "full"])
 @pytest.mark.parametrize("freeze,batchnorm", [(True, "eval"), (True, "adapt"), (False, "eval"), (False, "adapt")])
 def test_real_ce_training_honors_freezing_and_starts_a_fresh_filtered_optimizer(

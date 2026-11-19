@@ -177,6 +177,7 @@ class ModelPublication:
         validated: bool,
         tags: Mapping,
         write_card: Callable[[str, dict[str, str | None]], tuple[Path, Path]],
+        promote: bool = True,
     ) -> str:
         """Register the supplied best model, attach cards, then optionally promote it.
 
@@ -187,6 +188,8 @@ class ModelPublication:
             tags: Source revisions and selected-encoder provenance.
             write_card: Callback receiving version and model identity metadata;
                 returns the completed YAML and Markdown card paths.
+            promote: Assign the alias immediately for validated models. Classifier
+                sweeps disable this until every candidate has published successfully.
 
         Returns:
             The created registry version. Remote publication is not transactional;
@@ -219,7 +222,7 @@ class ModelPublication:
                 client.set_model_version_tag(config.registered_model_name, version, key, str(value))
         cards = write_card(version, {"run_id": info.run_id, "model_id": info.model_id})
         self._attach_model_cards(client, info.model_id, version, cards)
-        if validated:
+        if validated and promote:
             client.set_registered_model_alias(config.registered_model_name, config.champion_alias, version)
         return version
 

@@ -1,4 +1,4 @@
-"""Run a SupCon sweep, select its best encoder, and train a CE classifier."""
+"""Run a SupCon sweep, select its best encoder, and train a CE classifier sweep."""
 
 import argparse
 from pathlib import Path
@@ -17,7 +17,9 @@ def main() -> None:
     parser.add_argument("configuration", type=Path)
     args = parser.parse_args()
     result = TwoStageExperiment(TwoStageConfiguration.from_yaml(args.configuration)).run()
-    print(f"Final classifier checkpoint: {result.classifier_result.last_checkpoint}")
+    for classifier in result.classifier_results:
+        print(f"Final classifier checkpoint: {classifier.last_checkpoint}")
+    print(f"Selected classifier checkpoint: {result.selected_classifier.best_checkpoint}")
 
 
 if __name__ == "__main__":
