@@ -5,11 +5,13 @@ import hashlib
 import random
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass
 from numbers import Real
 from operator import gt, lt
 from pathlib import Path
-from typing import Any
+from typing import Annotated
+
+from pydantic import ConfigDict, Field
+from pydantic.dataclasses import dataclass
 
 import mlflow
 import mlflow.pytorch
@@ -31,12 +33,18 @@ from smartrodent.experiment_support import (
     SchedulerConfiguration,
     _git_commit,
     resolve_validation_metrics,
+    validate_stopping,
+)
+from smartrodent.training_validation import (
+    CheckpointPath, ClassNames, Count, MappingInput, Mode, Name, NonnegativeInt, OptimizerSettings,
+    PositiveNumber, Probability, Seed, StoppingSettings, TransformSettings, ValidationMetrics,
+    parse_settings, settings_dict, validate_output_paths,
 )
 from smartrodent.model_card import (
     load_card_template,
     write_model_card,
 )
-from smartrodent.supcon_datasets import (
+from smartrodent.datasets import (
     ImageDataset,
     MultiViewImageDataset,
     collate_views,
@@ -46,7 +54,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class TrainingConfiguration:
     """Configure the standalone, full-precision contrastive training experiment.
 
@@ -82,108 +90,44 @@ class TrainingConfiguration:
 
     train_dataset: Path
     output_directory: Path
-    class_names: tuple[str, ...]
-    transforms: Mapping[str, Any]
-    optimizer: Mapping[str, Any]
-    model_name: str = "yolo26x-cls.pt"
-    epochs: int = 5
-    classes_per_batch: int = 4
-    samples_per_class: int = 6
-    samples_per_epoch: int = 100000
-    workers: int = 20
-    prefetch_factor: int = 4
-    seed: int = 42
-    device: str = "cuda"
-    dropout: float = 0.5
-    output_features: int = 128
-    temperature: float = 0.1
-    freeze: tuple[int, ...] = ()
-    log_every: int = 50
-    mlflow: MlflowConfiguration | None = None
+    class_names: ClassNames
+    transforms: TransformSettings
+    optimizer: OptimizerSettings
+    model_name: CheckpointPath = "yolo26x-cls.pt"
+    epochs: Count = 5
+    classes_per_batch: Annotated[Count, Field(ge=2)] = 4
+    samples_per_class: Count = 6
+    samples_per_epoch: Count = 100000
+    workers: NonnegativeInt = 20
+    prefetch_factor: Count = 4
+    seed: Seed = 42
+    device: Name = "cuda"
+    dropout: Probability = 0.5
+    output_features: Count = 128
+    temperature: PositiveNumber = 0.1
+    freeze: tuple[NonnegativeInt, ...] = ()
+    log_every: Count = 50
+    mlflow: MappingInput[MlflowConfiguration] | None = None
     validation_dataset: Path | None = None
-    validation_metrics: Mapping[str, Mapping[str, Any]] | None = None
-    tracked_metric: str | None = None
-    early_stopping: Mapping[str, Any] | None = None
-    scheduler: SchedulerConfiguration | None = None
-    model_card_template: str = "configs/model_card_template.yaml"
-    tracked_mode: str | None = None
+    validation_metrics: ValidationMetrics | None = None
+    tracked_metric: Name | None = None
+    early_stopping: StoppingSettings | None = None
+    scheduler: MappingInput[SchedulerConfiguration] | None = None
+    model_card_template: CheckpointPath = "configs/model_card_template.yaml"
+    tracked_mode: Mode | None = None
 
     def __post_init__(self):
         """Reject invalid settings before building datasets or writing outputs."""
-        integers = (
-            self.epochs,
-            self.classes_per_batch,
-            self.samples_per_class,
-            self.samples_per_epoch,
-            self.prefetch_factor,
-            self.output_features,
-            self.log_every,
-        )
-        if any(
-            not isinstance(value, int) or isinstance(value, bool) or value < 1
-            for value in integers
-        ):
-            raise ValueError(
-                "Training sizes, counts, and log_every must be positive integers"
-            )
-        if not isinstance(self.workers, int) or self.workers < 0:
-            raise ValueError("workers must be a nonnegative integer")
-        if isinstance(self.class_names, str) or not self.class_names:
-            raise ValueError("class_names must be a nonempty sequence of species names")
-        if any(not isinstance(name, str) or not name for name in self.class_names):
-            raise ValueError("class_names must contain nonempty strings")
-        if len(set(self.class_names)) != len(self.class_names):
-            raise ValueError("class_names must be unique")
-        if not 2 <= self.classes_per_batch <= len(self.class_names):
+        if self.classes_per_batch > len(self.class_names):
             raise ValueError(
                 "classes_per_batch must be between 2 and the number of species"
             )
         if self.samples_per_epoch < self.batch_size:
             raise ValueError("samples_per_epoch must contain at least one full batch")
-        if not isinstance(self.transforms, Mapping):
-            raise TypeError("transforms must be a mapping")
-        required_transforms = {
-            "image_size",
-            "resize",
-            "random_adjust_sharpness",
-            "random_grayscale",
-            "random_perspective",
-            "random_horizontal_flip",
-            "random_resized_crop",
-        }
-        missing_transforms = required_transforms.difference(self.transforms)
-        if missing_transforms:
-            raise ValueError(
-                "transforms is missing: " + ", ".join(sorted(missing_transforms))
-            )
-        image_size = self.transforms["image_size"]
-        if (
-            not isinstance(image_size, int)
-            or isinstance(image_size, bool)
-            or image_size < 1
-        ):
-            raise ValueError("transforms.image_size must be a positive integer")
-        if not isinstance(self.optimizer, Mapping):
-            raise TypeError("optimizer must be a mapping")
-        learning_rate = self.optimizer.get("lr")
-        if not isinstance(learning_rate, (int, float)) or not np.isfinite(
-            learning_rate
-        ):
-            raise ValueError("optimizer.lr must be finite and positive")
-        if learning_rate <= 0:
-            raise ValueError("optimizer.lr must be finite and positive")
-        if not np.isfinite(self.temperature) or self.temperature <= 0:
-            raise ValueError("temperature must be finite and positive")
-        if not 0 <= self.dropout <= 1:
-            raise ValueError("dropout must be between zero and one")
-        if any(not isinstance(index, int) or index < 0 for index in self.freeze):
-            raise ValueError("freeze must contain nonnegative layer indices")
-        if self.tracked_mode is not None and self.tracked_mode not in ("min", "max"):
-            raise ValueError("tracked_mode must be 'min', 'max', or null")
-        output = Path(self.output_directory).resolve()
-        source = Path(self.train_dataset).resolve()
-        if output.is_relative_to(source):
-            raise ValueError("output_directory must be outside the training dataset")
+        validate_output_paths(
+            [self.output_directory], (self.train_dataset, self.validation_dataset),
+            (self.model_name, self.model_card_template),
+        )
         if self.validation_dataset is None:
             if (
                 self.validation_metrics is not None
@@ -197,8 +141,6 @@ class TrainingConfiguration:
                     "validation_dataset"
                 )
         elif self.tracked_metric is not None:
-            if not isinstance(self.tracked_metric, str) or not self.tracked_metric:
-                raise ValueError("tracked_metric must be a nonempty metric name")
             available_metrics = {
                 "supcon_loss_min",
                 "supcon_loss_mean",
@@ -210,26 +152,7 @@ class TrainingConfiguration:
                 raise ValueError(
                     f"tracked_metric '{self.tracked_metric}' is not available"
                 )
-        stopping_mode = None
-        if self.early_stopping is not None:
-            stopper = EarlyStopping.from_mapping(self.early_stopping)
-            stopping_mode = "min" if stopper.comparison == "less" else "max"
-        if self.scheduler is not None:
-            if not isinstance(self.scheduler, SchedulerConfiguration):
-                raise TypeError("scheduler must be a SchedulerConfiguration or null")
-            if self.scheduler.parameters.get("min_lr", 0.0) > learning_rate:
-                raise ValueError(
-                    "scheduler.parameters.min_lr must not exceed optimizer.lr"
-                )
-            if stopping_mode is not None and self.scheduler.mode != stopping_mode:
-                raise ValueError(
-                    "scheduler mode must agree with early_stopping.comparison"
-                )
-        if self.tracked_mode is not None:
-            if self.scheduler is not None and self.scheduler.mode != self.tracked_mode:
-                raise ValueError("scheduler direction must agree with tracked_mode")
-            if stopping_mode is not None and stopping_mode != self.tracked_mode:
-                raise ValueError("early_stopping direction must agree with tracked_mode")
+        validate_stopping(self, self.tracked_mode)
 
     @property
     def batch_size(self) -> int:
@@ -261,32 +184,7 @@ class TrainingConfiguration:
         Raises:
             ValueError: The mapping contains an invalid class-name collection.
         """
-        if not isinstance(values, Mapping):
-            raise ValueError("Training configuration must be a YAML mapping")
-        values = dict(values)
-        values["train_dataset"] = Path(values["train_dataset"])
-        values["output_directory"] = Path(values["output_directory"])
-        if not isinstance(values["class_names"], list):
-            raise ValueError("class_names must be a YAML list")
-        values["class_names"] = tuple(values["class_names"])
-        values["freeze"] = tuple(values.get("freeze", ()))
-        for name in ("transforms", "optimizer"):
-            if not isinstance(values.get(name), Mapping):
-                raise TypeError(f"{name} must be a mapping")
-            values[name] = dict(values[name])
-        values["mlflow"] = MlflowConfiguration.from_mapping(values.get("mlflow"))
-        values["scheduler"] = SchedulerConfiguration.from_mapping(
-            values.get("scheduler")
-        )
-        validation_dataset = values.get("validation_dataset")
-        if validation_dataset is not None:
-            values["validation_dataset"] = Path(validation_dataset)
-        early_stopping = values.get("early_stopping")
-        if early_stopping is not None:
-            if not isinstance(early_stopping, Mapping):
-                raise TypeError("early_stopping must be a mapping")
-            values["early_stopping"] = dict(early_stopping)
-        return cls(**values)
+        return parse_settings(cls, values)
 
     @classmethod
     def from_yaml(cls, path: Path) -> "TrainingConfiguration":
@@ -311,14 +209,7 @@ class TrainingConfiguration:
 
     def to_dict(self) -> dict:
         """Return plain, checkpoint-safe settings suitable for YAML output."""
-        values = asdict(self)
-        values["train_dataset"] = str(self.train_dataset)
-        values["output_directory"] = str(self.output_directory)
-        values["class_names"] = list(self.class_names)
-        values["freeze"] = list(self.freeze)
-        if self.validation_dataset is not None:
-            values["validation_dataset"] = str(self.validation_dataset)
-        return values
+        return settings_dict(self)
 
     def mlflow_parameters(self) -> dict[str, str | int | float]:
         """Return concrete hyperparameters suitable for MLflow parameter logging."""
@@ -369,12 +260,25 @@ class SupConExperiment:
     """
 
     def __init__(self, configuration: TrainingConfiguration):
+        """Prepare verified transforms, scorers, templates, and dataset indices once."""
         self.configuration = configuration
+        self.document = configuration.to_dict()
         self.validation_metrics = resolve_validation_metrics(
             configuration.validation_metrics
         )
         # Fail on malformed templates before spending time on training.
         self.card_template = load_card_template(Path(configuration.model_card_template))
+        self.transforms = ImageTransforms(configuration.transforms)
+        self.training_dataset = MultiViewImageDataset(
+            configuration.train_dataset, labels=configuration.class_names,
+            transform=self.transforms.training(),
+        )
+        self.validation_dataset = (
+            ImageDataset(
+                configuration.validation_dataset, labels=self.training_dataset.label_names,
+                transform=self.transforms.validation(),
+            ) if configuration.validation_dataset is not None else None
+        )
 
     def _register_best_model(
         self,
@@ -412,19 +316,13 @@ class SupConExperiment:
     def _build_loader(self) -> tuple[MultiViewImageDataset, DataLoader]:
         """Build label-aligned P-K batches with two views per selected image."""
         config = self.configuration
-        dataset = MultiViewImageDataset(
-            Path(config.train_dataset),
-            labels=config.class_names,
-            transform=ImageTransforms(config.transforms).training(),
-            size=config.transforms["image_size"],
-        )
-        labels = [dataset.label_names[path.parent.name] for path in dataset.images]
-        if len(set(labels)) < config.classes_per_batch:
+        dataset = self.training_dataset
+        if sum(count > 0 for count in dataset.class_counts.values()) < config.classes_per_batch:
             raise ValueError(
                 "Training dataset has too few nonempty classes for the requested batch"
             )
         sampler = MPerClassSampler(
-            labels=labels,
+            labels=dataset.labels,
             m=config.samples_per_class,
             batch_size=config.batch_size,
             length_before_new_iter=config.samples_per_epoch,
@@ -447,21 +345,14 @@ class SupConExperiment:
     def _build_validation_loader(self) -> DataLoader | None:
         """Build a deterministic single-view validation loader when configured."""
         config = self.configuration
-        if config.validation_dataset is None:
+        dataset = self.validation_dataset
+        if dataset is None:
             return None
-        transform = ImageTransforms(config.transforms).validation()
-        dataset = ImageDataset(
-            config.validation_dataset,
-            labels=config.class_names,
-            transform=transform,
-            size=config.transforms["image_size"],
-        )
         if len(dataset) < config.batch_size:
             raise ValueError("Validation dataset must contain at least one full batch")
-        labels = [dataset.label_names[path.parent.name] for path in dataset.images]
         validation_length = len(dataset) - len(dataset) % config.batch_size
         sampler = MPerClassSampler(
-            labels=labels,
+            labels=dataset.labels,
             m=config.samples_per_class,
             batch_size=config.batch_size,
             length_before_new_iter=validation_length,
@@ -548,28 +439,69 @@ class SupConExperiment:
         self, model, optimizer, epoch, history, scheduler=None, *, is_best=False
     ) -> Path:
         """Assemble SupCon state and publish it through the shared checkpoint store."""
-        config = self.configuration
-        return CheckpointStore(config.output_directory).save(
+        return self.checkpoint_store.save(
             {
                 "epoch": epoch,
                 "architecture": deepcopy(model.full_model.model.yaml),
-                "model_configuration": {
-                    "dropout": config.dropout,
-                    "output_features": config.output_features,
-                    "num_classes": len(config.class_names),
-                    "freeze": list(config.freeze),
-                },
+                "model_configuration": self.model_configuration,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": (
                     scheduler.state_dict() if scheduler is not None else None
                 ),
                 "label_names": dict(model.label_names),
-                "configuration": config.to_dict(),
+                "configuration": self.document,
                 "history": list(history),
             },
             is_best=is_best,
         )
+
+    def _train_epoch(self, model, loader, optimizer, criterion, epoch: int) -> dict:
+        """Train one multiview epoch and return its finite loss statistics."""
+        config = self.configuration
+        learning_rate = optimizer.param_groups[0]["lr"]
+        losses = []
+        progress = tqdm(loader, desc=f"Epoch {epoch}")
+        for step, (labels, images) in enumerate(progress):
+            labels = labels.to(config.device, non_blocking=True)
+            images = images.to(config.device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            _, embeddings = model(images)
+            loss = criterion(embeddings, labels)
+            loss.backward()
+            optimizer.step()
+            model.embeddings = None
+            losses.append(loss.detach())
+            if step % config.log_every == 0:
+                progress.set_postfix(sc_loss=f"{loss.item():.4f}")
+        values = torch.stack(losses).float().cpu()
+        if not torch.isfinite(values).all():
+            raise FloatingPointError(f"Nonfinite loss in epoch {epoch}")
+        return {
+            "epoch": epoch, "min": values.min().item(), "mean": values.mean().item(),
+            "std": values.std(correction=1 if len(values) > 1 else 0).item(),
+            "max": values.max().item(), "learning_rate": learning_rate,
+        }
+
+    def _report_epoch(self, statistics: Mapping) -> None:
+        """Report a completed epoch to the console and optional tracking run."""
+        learning_rate = statistics["learning_rate"]
+        next_learning_rate = statistics["next_learning_rate"]
+        validation = statistics.get("validation", {})
+        print(
+            f"Epoch: {statistics['epoch']}, {statistics['min']:.6f}, "
+            f"{statistics['mean']:.6f} +/- {statistics['std']:.6f}, "
+            f"{statistics['max']:.6f}; lr={learning_rate:.6g}"
+        )
+        if next_learning_rate < learning_rate:
+            print(f"Learning rate reduced: {learning_rate:.6g} -> {next_learning_rate:.6g} for the next epoch")
+        if validation:
+            print("Validation: " + ", ".join(f"{name}={value:.6f}" for name, value in validation.items()))
+        if self.configuration.mlflow is not None:
+            metrics = {f"supcon_loss_{name}": statistics[name] for name in ("min", "mean", "std", "max")}
+            metrics.update(learning_rate=learning_rate, next_learning_rate=next_learning_rate)
+            metrics.update({f"validation/{name}": value for name, value in validation.items()})
+            mlflow.log_metrics(metrics, step=statistics["epoch"])
 
     def _run_training(
         self,
@@ -581,18 +513,14 @@ class SupConExperiment:
         torch.manual_seed(config.seed)
         dataset, loader = self._build_loader()
         validation_loader = self._build_validation_loader()
-        model = YoloSupConModel(
-            config.model_name,
-            dropout=config.dropout,
-            output_features=config.output_features,
-            num_classes=len(config.class_names),
-        ).to(config.device)
-        model.requires_grad_(True)
-        for index in config.freeze:
-            model.full_model.model.model[index].requires_grad_(False)
+        self.model_configuration = {
+            "dropout": config.dropout, "output_features": config.output_features,
+            "num_classes": len(dataset.label_names), "freeze": list(config.freeze),
+        }
+        model = YoloSupConModel(config.model_name, **self.model_configuration).to(config.device)
         model.train(True)
         model.label_names = dict(dataset.label_names)
-        model.training_configuration = config.to_dict()
+        model.training_configuration = self.document
         model.full_model.model.names = {
             index: name for name, index in model.label_names.items()
         }
@@ -608,17 +536,15 @@ class SupConExperiment:
             if config.early_stopping is not None
             else None
         )
-        output = Path(config.output_directory)
-        output.mkdir(parents=True, exist_ok=True)
-        (output / "config.yaml").write_text(
-            yaml.safe_dump(config.to_dict(), sort_keys=False)
-        )
+        self.checkpoint_store = CheckpointStore(config.output_directory)
+        output = self.checkpoint_store.output_directory
+        (output / "config.yaml").write_text(yaml.safe_dump(self.document, sort_keys=False))
         print(
             f"{len(loader)} batches/epoch; {config.batch_size} source images and "
             f"{2 * config.batch_size} views/batch on {config.device}"
         )
         history = []
-        best_checkpoint = None
+        best_checkpoint = output / "best.pt"
         tracked_metric = config.effective_tracked_metric
         tracked_mode = config.effective_tracked_mode
         is_improvement = lt if tracked_mode == "min" else gt
@@ -627,33 +553,7 @@ class SupConExperiment:
         return_live_model = False
         try:
             for epoch in range(1, config.epochs + 1):
-                learning_rate = optimizer.param_groups[0]["lr"]
-                losses = []
-                progress = tqdm(loader, desc=f"Epoch {epoch}")
-                for step, (labels, images) in enumerate(progress):
-                    labels = labels.to(config.device, non_blocking=True)
-                    images = images.to(config.device, non_blocking=True)
-                    optimizer.zero_grad(set_to_none=True)
-                    _, embeddings = model(images)
-                    loss = criterion(embeddings, labels)
-                    loss.backward()
-                    optimizer.step()
-                    model.embeddings = None
-                    losses.append(loss.detach())
-                    if step % config.log_every == 0:
-                        progress.set_postfix(sc_loss=f"{loss.item():.4f}")
-
-                values = torch.stack(losses).float().cpu()
-                if not torch.isfinite(values).all():
-                    raise FloatingPointError(f"Nonfinite loss in epoch {epoch}")
-                statistics = {
-                    "epoch": epoch,
-                    "min": values.min().item(),
-                    "mean": values.mean().item(),
-                    "std": values.std(correction=1 if len(values) > 1 else 0).item(),
-                    "max": values.max().item(),
-                    "learning_rate": learning_rate,
-                }
+                statistics = self._train_epoch(model, loader, optimizer, criterion, epoch)
                 validation = (
                     self._validate(model, validation_loader, criterion)
                     if validation_loader is not None
@@ -672,25 +572,8 @@ class SupConExperiment:
                     # Step after validation, before saving both optimizer and scheduler:
                     # the checkpoint then holds the LR ready for the next epoch.
                     scheduler.step(tracked_value)
-                next_learning_rate = optimizer.param_groups[0]["lr"]
-                statistics["next_learning_rate"] = next_learning_rate
+                statistics["next_learning_rate"] = optimizer.param_groups[0]["lr"]
                 history.append(statistics)
-                print(
-                    f"Epoch: {epoch}, {statistics['min']:.6f}, "
-                    f"{statistics['mean']:.6f} +/- {statistics['std']:.6f}, "
-                    f"{statistics['max']:.6f}; lr={learning_rate:.6g}"
-                )
-                if next_learning_rate < learning_rate:
-                    print(
-                        f"Learning rate reduced: {learning_rate:.6g} -> {next_learning_rate:.6g} for the next epoch"
-                    )
-                if validation:
-                    print(
-                        "Validation: "
-                        + ", ".join(
-                            f"{name}={value:.6f}" for name, value in validation.items()
-                        )
-                    )
                 is_best = is_improvement(tracked_value, best_metric_value)
                 checkpoint = self._save_checkpoint(
                     model, optimizer, epoch, history, scheduler, is_best=is_best
@@ -698,25 +581,9 @@ class SupConExperiment:
                 (output / "history.yaml").write_text(
                     yaml.safe_dump(history, sort_keys=False)
                 )
-                if config.mlflow is not None:
-                    mlflow_metrics = {
-                        "supcon_loss_min": statistics["min"],
-                        "supcon_loss_mean": statistics["mean"],
-                        "supcon_loss_std": statistics["std"],
-                        "supcon_loss_max": statistics["max"],
-                        "learning_rate": learning_rate,
-                        "next_learning_rate": next_learning_rate,
-                    }
-                    mlflow_metrics.update(
-                        {
-                            f"validation/{name}": value
-                            for name, value in validation.items()
-                        }
-                    )
-                    mlflow.log_metrics(mlflow_metrics, step=epoch)
+                self._report_epoch(statistics)
                 if is_best:
                     best_metric_value = tracked_value
-                    best_checkpoint = checkpoint.with_name("best.pt")
                     best_epoch = epoch
                 if early_stopping is not None and early_stopping(tracked_value):
                     print(
@@ -725,8 +592,6 @@ class SupConExperiment:
                     )
                     break
 
-            if best_checkpoint is None:
-                raise RuntimeError("Training completed without producing a checkpoint")
             return_live_model = True
             return checkpoint, best_checkpoint, best_metric_value, best_epoch, model
         finally:

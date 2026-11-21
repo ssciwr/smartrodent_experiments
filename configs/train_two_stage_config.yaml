@@ -1,0 +1,188 @@
+# Run from the repository root:
+# python scripts/train_two_stage.py configs/train_two_stage_config.yaml
+output_directory: runs/two_stage_xl_srilanka
+
+data:
+  train_dataset: datasets/stage8_yolo_classifier_srilanka/train
+  validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
+  # This shared list defines the class mapping for both SupCon and CE training.
+  class_names:
+    - Rattus rattus
+    - Rattus norvegicus
+    - Bandicota bengalensis
+    - Bandicota indica
+    - Mus booduga
+    - Mus musculus
+    - Vandeleuria oleraceus
+    - Tatera indica
+    - Suncus murinus
+    - Ptyas mucosa
+    - Python molurus
+    - Naja naja
+    - Tyto javanica
+    - Ninox scutulata
+    - Glaucidium radiatum
+    - Ketupa zeylonensis
+    - Ketupa nipalensis
+    - Glaucidium castanotum
+    - Otus thilohoffmanni
+    - Milvus migrans
+    - Accipiter virgatus
+    - Falco tinnunculus
+    - Urva edwardsii
+    - Felis catus
+    - Canis familiaris
+    - Pavo cristatus
+
+supcon:
+  model_name: ./yolo26x-cls.pt
+  epochs: 30
+  transforms:
+    image_size: &size 640
+    resize:
+      interpolation: bilinear
+      antialias: true
+    random_adjust_sharpness:
+      sharpness_factor: 0.5
+      p: 0.2
+    random_grayscale:
+      p: 0.2
+    random_perspective:
+      distortion_scale: 0.5
+      p: 0.2
+      interpolation: bilinear
+      fill: 0
+    random_horizontal_flip:
+      p: 0.2
+    random_resized_crop:
+      scale: [0.75, 1.0]
+      ratio: [0.75, 1.3333333333333333]
+      interpolation: bilinear
+      antialias: true
+  optimizer:
+    lr: 0.0001
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+    weight_decay: 0.01
+    amsgrad: false
+  classes_per_batch: 6
+  samples_per_class: 6
+  samples_per_epoch: 100000
+  workers: 20
+  prefetch_factor: 4
+  seed: 42
+  device: cuda
+  dropout: 0.0
+  output_features: 128
+  temperature: 0.1
+  freeze: []
+  log_every: 10
+  validation_metrics:
+    accuracy:
+      function: accuracy_score
+    balanced_accuracy:
+      function: balanced_accuracy_score
+    f1_macro:
+      function: f1_score
+      average: macro
+      zero_division: 0
+  tracked_metric: supcon_loss_mean
+  tracked_mode: min
+  scheduler:
+    name: ReduceLROnPlateau
+    parameters:
+      mode: min
+      factor: 0.5
+      patience: 2
+      threshold: 0.001
+      threshold_mode: abs
+      min_lr: 0.000001
+      cooldown: 0
+  early_stopping:
+    patience: 6
+    tolerance: 0.005
+    comparison: less
+
+classifier:
+  initialization:
+    encoder:
+      source: selected_supcon
+    head:
+      checkpoint: ./yolo26x-cls.pt
+      replace: !sweep
+        values:
+          - linear
+          - full
+      source: !sweep
+        values:
+          - random
+          - yolo_checkpoint
+  # Train only the new linear head; set false to fine-tune the complete encoder.
+  freeze_encoder: true
+  encoder_batchnorm: eval
+  epochs: 30
+  batch_size: 48
+  workers: 20
+  device: cuda
+  seed: 42
+  transforms:
+    image_size: *size
+    resize:
+      interpolation: bilinear
+      antialias: true
+    random_adjust_sharpness:
+      sharpness_factor: 0.5
+      p: 0.2
+    random_grayscale:
+      p: 0.2
+    random_perspective:
+      distortion_scale: 0.5
+      p: 0.2
+      interpolation: bilinear
+      fill: 0
+    random_horizontal_flip:
+      p: 0.2
+    random_resized_crop:
+      scale: [0.75, 1.0]
+      ratio: [0.75, 1.3333333333333333]
+      interpolation: bilinear
+      antialias: true
+  optimizer:
+    lr: 0.001
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+    weight_decay: 0.01
+    amsgrad: false
+  validation_metrics:
+    accuracy:
+      function: accuracy_score
+    balanced_accuracy:
+      function: balanced_accuracy_score
+    f1_macro:
+      function: f1_score
+      average: macro
+      zero_division: 0
+  tracked_metric: balanced_accuracy
+  tracked_mode: max
+  scheduler:
+    name: ReduceLROnPlateau
+    parameters:
+      mode: max
+      factor: 0.5
+      patience: 2
+      threshold: 0.0005
+      threshold_mode: abs
+      min_lr: 0.000001
+      cooldown: 0
+  early_stopping:
+    patience: 6
+    tolerance: 0.001
+    comparison: greater
+
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: two-stage-sri-lanka-xl
+  registered_model_name: species-classifier-xl
+  model_artifact_name: species-classifier-xl
+  champion_alias: champion
+  # dataset_revision: <immutable-data-revision>

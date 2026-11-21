@@ -42,6 +42,7 @@ class YoloSupConModel(torch.nn.Module):
 
         self.full_model = ultralytics.YOLO(model_name, task="classify")
         ClassificationModel.reshape_outputs(self.full_model.model, nc=num_classes)
+        self.full_model.model.requires_grad_(True)
 
         for f in freeze:
             self.full_model.model.model[f].requires_grad_(False)

@@ -4,9 +4,11 @@ import functools
 import os
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import ConfigDict, validate_call
+from pydantic.dataclasses import dataclass
 
 import mlflow
 import mlflow.pytorch
@@ -14,6 +16,9 @@ from mlflow import MlflowClient
 import numpy as np
 import sklearn.metrics
 import torch
+from smartrodent.training_validation import (
+    Count, Nonblank, NonnegativeNumber, PlateauSettings, ValidationMetrics, parse_settings,
+)
 from torchvision.transforms.v2 import (
     Compose,
     PILToTensor,
@@ -27,7 +32,7 @@ from torchvision.transforms.v2 import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class MlflowConfiguration:
     """Configure MLflow tracking for a standalone experiment.
 
@@ -40,32 +45,12 @@ class MlflowConfiguration:
         dataset_revision: Optional immutable dataset revision recorded as a tag.
     """
 
-    tracking_uri: str
-    experiment_name: str
-    registered_model_name: str | None = None
-    model_artifact_name: str = "classifier"
-    champion_alias: str = "champion"
-    dataset_revision: str | None = None
-
-    def __post_init__(self):
-        """Reject missing or blank MLflow settings before training starts."""
-        for field_name in (
-            "tracking_uri",
-            "experiment_name",
-            "model_artifact_name",
-            "champion_alias",
-        ):
-            value = getattr(self, field_name)
-            if not isinstance(value, str):
-                raise TypeError(f"mlflow.{field_name} must be a string")
-            if not value.strip():
-                raise ValueError(f"mlflow.{field_name} must not be blank")
-        for field_name in ("registered_model_name", "dataset_revision"):
-            value = getattr(self, field_name)
-            if value is not None and not isinstance(value, str):
-                raise TypeError(f"mlflow.{field_name} must be a string or null")
-            if isinstance(value, str) and not value.strip():
-                raise ValueError(f"mlflow.{field_name} must not be blank")
+    tracking_uri: Nonblank
+    experiment_name: Nonblank
+    registered_model_name: Nonblank | None = None
+    model_artifact_name: Nonblank = "classifier"
+    champion_alias: Nonblank = "champion"
+    dataset_revision: Nonblank | None = None
 
     @classmethod
     def from_mapping(cls, values: Mapping | None) -> "MlflowConfiguration | None":
@@ -78,33 +63,11 @@ class MlflowConfiguration:
             Validated MLflow settings, or ``None`` when tracking is disabled.
 
         Raises:
-            TypeError: The supplied value is not a mapping.
-            ValueError: Required keys are missing or unexpected keys are present.
+            ValueError: The schema rejects missing, unexpected, or invalid fields.
         """
         if values is None:
             return None
-        if not isinstance(values, Mapping):
-            raise TypeError("mlflow must be a mapping")
-        required = {"tracking_uri", "experiment_name"}
-        optional = {
-            "registered_model_name",
-            "model_artifact_name",
-            "champion_alias",
-            "dataset_revision",
-        }
-        supplied = set(values)
-        if not required.issubset(supplied) or not supplied.issubset(
-            required | optional
-        ):
-            missing = sorted(required.difference(supplied))
-            unexpected = sorted(supplied.difference(required | optional))
-            details = []
-            if missing:
-                details.append(f"missing keys: {', '.join(missing)}")
-            if unexpected:
-                details.append(f"unexpected keys: {', '.join(unexpected)}")
-            raise ValueError("Invalid mlflow configuration; " + "; ".join(details))
-        return cls(**values)
+        return parse_settings(cls, values)
 
     def configure(self) -> None:
         """Select the configured tracking backend and experiment."""
@@ -239,7 +202,7 @@ class ModelPublication:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class SchedulerConfiguration:
     """Configure a native PyTorch validation-driven learning-rate scheduler.
 
@@ -248,55 +211,8 @@ class SchedulerConfiguration:
         parameters: Native scheduler arguments, excluding the optimizer.
     """
 
-    name: str
-    parameters: Mapping[str, Any]
-
-    def __post_init__(self):
-        """Reject unsupported schedulers and invalid native parameters early."""
-        if self.name != "ReduceLROnPlateau":
-            raise ValueError("scheduler.name must be 'ReduceLROnPlateau'")
-        if not isinstance(self.parameters, Mapping):
-            raise TypeError("scheduler.parameters must be a mapping")
-        allowed = {
-            "mode",
-            "factor",
-            "patience",
-            "threshold",
-            "threshold_mode",
-            "cooldown",
-            "min_lr",
-            "eps",
-        }
-        if set(self.parameters).difference(allowed):
-            raise ValueError("Unsupported scheduler.parameters keys")
-        if self.mode not in ("min", "max"):
-            raise ValueError("scheduler.parameters.mode must be 'min' or 'max'")
-        if self.parameters.get("threshold_mode", "rel") not in ("rel", "abs"):
-            raise ValueError(
-                "scheduler.parameters.threshold_mode must be 'rel' or 'abs'"
-            )
-        for name in ("patience", "cooldown"):
-            value = self.parameters.get(name, 10 if name == "patience" else 0)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(
-                    f"scheduler.parameters.{name} must be a nonnegative integer"
-                )
-        defaults = {"factor": 0.1, "threshold": 0.0001, "min_lr": 0.0, "eps": 1e-8}
-        for name, default in defaults.items():
-            value = self.parameters.get(name, default)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not np.isfinite(value)
-                or value < 0
-            ):
-                raise ValueError(
-                    f"scheduler.parameters.{name} must be finite and nonnegative"
-                )
-        if not 0 < self.parameters.get("factor", 0.1) < 1:
-            raise ValueError(
-                "scheduler.parameters.factor must be between 0 and 1 exclusively"
-            )
+    name: Literal["ReduceLROnPlateau"]
+    parameters: PlateauSettings
 
     @property
     def mode(self) -> str:
@@ -315,13 +231,7 @@ class SchedulerConfiguration:
         """
         if values is None:
             return None
-        if not isinstance(values, Mapping):
-            raise TypeError("scheduler must be a mapping")
-        if set(values) != {"name", "parameters"}:
-            raise ValueError("scheduler requires exactly name and parameters")
-        if not isinstance(values["parameters"], Mapping):
-            raise TypeError("scheduler.parameters must be a mapping")
-        return cls(values["name"], dict(values["parameters"]))
+        return parse_settings(cls, values)
 
     def build(
         self, optimizer: torch.optim.Optimizer
@@ -350,20 +260,9 @@ class EarlyStopping:
         comparison: ``less`` to minimize or ``greater`` to maximize the value.
     """
 
-    def __init__(self, patience: int, tolerance: float, comparison: str):
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+    def __init__(self, patience: Count, tolerance: NonnegativeNumber, comparison: Literal["less", "greater"]):
         """Validate settings and initialize independent stopping state."""
-        if not isinstance(patience, int) or isinstance(patience, bool) or patience < 1:
-            raise ValueError("early_stopping.patience must be a positive integer")
-        if (
-            isinstance(tolerance, bool)
-            or not isinstance(tolerance, (int, float))
-            or not np.isfinite(tolerance)
-        ):
-            raise ValueError("early_stopping.tolerance must be finite")
-        if tolerance < 0:
-            raise ValueError("early_stopping.tolerance must be nonnegative")
-        if comparison not in {"less", "greater"}:
-            raise ValueError("early_stopping.comparison must be 'less' or 'greater'")
         self.patience = patience
         self.current_patience = patience
         self.tol = float(tolerance)
@@ -381,23 +280,7 @@ class EarlyStopping:
         Returns:
             An early stopper with independent state.
         """
-        if not isinstance(config, Mapping):
-            raise TypeError("early_stopping must be a mapping")
-        required = {"patience", "tolerance", "comparison"}
-        supplied = set(config)
-        if supplied != required:
-            missing = sorted(required.difference(supplied))
-            unexpected = sorted(supplied.difference(required))
-            details = []
-            if missing:
-                details.append(f"missing keys: {', '.join(missing)}")
-            if unexpected:
-                details.append(f"unexpected keys: {', '.join(unexpected)}")
-            raise ValueError(
-                "Invalid early_stopping configuration; " + "; ".join(details)
-            )
-
-        return cls(config["patience"], config["tolerance"], config["comparison"])
+        return cls(**config)
 
     def _improves(self, value: float) -> bool:
         """Return whether a value beats the best value by more than the tolerance."""
@@ -440,27 +323,29 @@ class ImageTransforms:
     """
 
     def __init__(self, settings: Mapping[str, Any]):
-        """Keep preprocessing settings separate from stage-specific data loading."""
-        self.settings = settings
+        """Prepare and verify both pipelines once for the owning experiment."""
+        size = settings["image_size"]
+        preprocessing = [
+            PILToTensor(), ToDtype(torch.float32, scale=True),
+            Resize((size, size), **settings["resize"]),
+        ]
+        self._training = Compose([
+            *preprocessing,
+            RandomAdjustSharpness(**settings["random_adjust_sharpness"]),
+            RandomGrayscale(**settings["random_grayscale"]),
+            RandomPerspective(**settings["random_perspective"]),
+            RandomHorizontalFlip(**settings["random_horizontal_flip"]),
+            RandomResizedCrop((size, size), **settings["random_resized_crop"]),
+        ])
+        self._validation = Compose(preprocessing)
 
     def training(self) -> Compose:
-        """Build independently sampled training augmentations.
+        """Return the prepared, independently sampled training pipeline.
 
         Returns:
             The existing SupCon augmentation pipeline, applicable to each view.
         """
-        settings = self.settings
-        size = settings["image_size"]
-        return Compose(
-            [
-                *self._preprocessing_steps(),
-                RandomAdjustSharpness(**settings["random_adjust_sharpness"]),
-                RandomGrayscale(**settings["random_grayscale"]),
-                RandomPerspective(**settings["random_perspective"]),
-                RandomHorizontalFlip(**settings["random_horizontal_flip"]),
-                RandomResizedCrop((size, size), **settings["random_resized_crop"]),
-            ]
-        )
+        return self._training
 
     def validation(self) -> Compose:
         """Build deterministic preprocessing without training augmentations.
@@ -468,46 +353,29 @@ class ImageTransforms:
         Returns:
             RGB tensor conversion, zero-to-one scaling, and configured resize.
         """
-        return Compose(self._preprocessing_steps())
-
-    def _preprocessing_steps(self) -> list[torch.nn.Module]:
-        """Keep conversion, scaling, and resizing identical across both pipelines."""
-        size = self.settings["image_size"]
-        return [
-            PILToTensor(),
-            ToDtype(torch.float32, scale=True),
-            Resize((size, size), **self.settings["resize"]),
-        ]
+        return self._validation
 
 
 def resolve_validation_metrics(
-    specs: Mapping[str, Mapping[str, Any]] | None,
+    specs: ValidationMetrics | None,
 ) -> dict[str, Callable[[np.ndarray, np.ndarray], float]]:
-    """Resolve configured sklearn metrics and reject invalid specs early.
+    """Prepare scorers from schema-validated specs and verify their native behavior.
 
     Args:
-        specs: Named sklearn metric functions and keyword options, or ``None``.
+        specs: Validated named sklearn functions and keyword options, or ``None``.
 
     Returns:
         Scorers accepting target and predicted label arrays.
 
     Raises:
-        TypeError: Metric specifications are not mappings.
-        ValueError: A metric name, function, or option cannot produce a scalar score.
+        ValueError: A scoring function or its options cannot produce a scalar score.
     """
     if specs is None:
         return {}
-    if not isinstance(specs, Mapping):
-        raise TypeError("validation_metrics must be a mapping")
-
     scorers = {}
     for name, spec in specs.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError("validation metric names must be nonempty strings")
-        if not isinstance(spec, Mapping):
-            raise TypeError(f"validation_metrics.{name} must be a mapping")
         options = dict(spec)
-        function_name = options.pop("function", None)
+        function_name = options.pop("function")
         function = getattr(sklearn.metrics, str(function_name), None)
         if not callable(function):
             raise ValueError(
@@ -524,6 +392,24 @@ def resolve_validation_metrics(
             ) from error
         scorers[name] = scorer
     return scorers
+
+
+def validate_stopping(configuration, mode: str | None) -> None:
+    """Check coupled learning-rate and comparison rules once for both trainers.
+
+    Args:
+        configuration: Validated training settings.
+        mode: Required tracking direction; None preserves standalone SupCon defaults.
+    """
+    modes = {mode} if mode is not None else set()
+    if configuration.early_stopping is not None:
+        modes.add("min" if configuration.early_stopping["comparison"] == "less" else "max")
+    if configuration.scheduler is not None:
+        modes.add(configuration.scheduler.mode)
+        if configuration.scheduler.parameters.get("min_lr", 0) > configuration.optimizer["lr"]:
+            raise ValueError("scheduler min_lr must not exceed optimizer.lr")
+    if len(modes) > 1:
+        raise ValueError("scheduler and early_stopping directions must agree with tracked_mode")
 
 
 class CheckpointStore:

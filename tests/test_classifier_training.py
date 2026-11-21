@@ -81,7 +81,9 @@ def classifier_assets(tmp_path):
         yolo.save(native)
         classifier = tmp_path / "classifier-source.pt"
         converted = YoloClassifierModel.initialize(
-            supcon, source_format="supcon", class_names=("mouse", "rat")
+            {"encoder": {"source": "supcon", "checkpoint": supcon},
+             "head": {"replace": "linear", "source": "random"}},
+            label_names={"mouse": 0, "rat": 1},
         )
         torch.save(converted.checkpoint_state(), classifier)
     return SimpleNamespace(

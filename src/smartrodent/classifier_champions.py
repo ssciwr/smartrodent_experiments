@@ -2,13 +2,13 @@
 
 from collections.abc import Mapping, Sequence
 import json
-import math
 
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
 
 from smartrodent.experiment_results import ExperimentResult
 from smartrodent.experiment_support import MlflowConfiguration
+from smartrodent.training_validation import FiniteNumber, parse_settings
 
 
 class ClassifierChampionRegistry:
@@ -109,9 +109,6 @@ class ClassifierChampionRegistry:
         if any(tags.get(name) != value for name, value in expected.items()):
             raise ValueError("Existing champion validation metadata is incompatible or missing; an explicit decision is required")
         try:
-            score = float(tags["best_value"])
+            return parse_settings(FiniteNumber, float(tags["best_value"]))
         except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("Existing champion has missing or invalid score metadata; an explicit decision is required") from error
-        if not math.isfinite(score):
-            raise ValueError("Existing champion score must be finite; an explicit decision is required")
-        return score
+            raise ValueError("Existing champion needs finite score metadata; an explicit decision is required") from error

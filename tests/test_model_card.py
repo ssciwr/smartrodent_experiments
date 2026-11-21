@@ -1,6 +1,7 @@
 """Focused checks for card rendering and the trainer's MLflow integration."""
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -13,6 +14,7 @@ import yaml
 
 from scripts import train_supcon
 from smartrodent.model_card import load_card_template, render_model_card, write_model_card
+from test_supcon_experiment import experiment_configuration
 
 
 def test_yaml_and_markdown_files(tmp_path):
@@ -51,7 +53,7 @@ def test_render_survives_yaml_round_trip(metrics):
 
 
 @pytest.mark.parametrize("upload_fails", [False, True])
-def test_trainer_publishes_selected_checkpoint(tmp_path, monkeypatch, upload_fails):
+def test_trainer_publishes_selected_checkpoint(tmp_path, monkeypatch, upload_fails, experiment_configuration):
     """Real MLflow stores the card and description before champion promotion."""
     client = MlflowClient(tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}")
     experiment_id = client.create_experiment("cards", artifact_location=(tmp_path / "artifacts").as_uri())
@@ -61,11 +63,13 @@ def test_trainer_publishes_selected_checkpoint(tmp_path, monkeypatch, upload_fai
     version = client.create_model_version("rodents", logged.artifact_location, run_id=run.info.run_id)
     model_info = SimpleNamespace(model_id=logged.model_id, run_id=run.info.run_id, registered_model_version=version.version)
     monkeypatch.setattr(train_supcon.mlflow.pytorch, "log_model", lambda **kwargs: model_info)
-    config = SimpleNamespace(
-        model_name="base.pt", output_directory=tmp_path,
-        model_card_template="configs/model_card_template.yaml",
-        validation_metrics=None, validation_dataset="images/val",
-        mlflow=SimpleNamespace(registered_model_name="rodents", model_artifact_name="classifier", champion_alias="champion", dataset_revision="data-v1"),
+    config = replace(
+        experiment_configuration, model_name="base.pt", output_directory=tmp_path,
+        validation_dataset=experiment_configuration.train_dataset,
+        mlflow=train_supcon.MlflowConfiguration(
+            tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}", experiment_name="cards",
+            registered_model_name="rodents", dataset_revision="data-v1",
+        ),
     )
     checkpoint = tmp_path / "epoch_0002.pt"
     torch.save({

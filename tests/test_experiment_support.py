@@ -12,6 +12,8 @@ import torch
 from hypothesis import given, strategies as st
 from PIL import Image
 
+from smartrodent.training_validation import ValidationMetrics, parse_settings
+
 
 @pytest.fixture
 def support():
@@ -286,20 +288,21 @@ def test_metric_resolution_allows_no_optional_metrics(support, settings):
 
 
 @pytest.mark.parametrize(
-    "settings,error,message",
+    "settings,message",
     [
-        ([], TypeError, "validation_metrics"),
-        ({"": {"function": "accuracy_score"}}, ValueError, "names"),
-        ({"accuracy": []}, TypeError, "accuracy"),
-        ({"accuracy": {"function": "not_a_metric"}}, ValueError, "accuracy"),
-        ({"accuracy": {"function": "accuracy_score", "invalid": True}}, ValueError, "accuracy"),
-        ({"f1": {"function": "f1_score", "average": None}}, ValueError, "f1"),
+        ([], "dictionary"),
+        ({"": {"function": "accuracy_score"}}, r"\[key\]"),
+        ({"accuracy": []}, "accuracy"),
+        ({"accuracy": {"function": "not_a_metric"}}, "accuracy"),
+        ({"accuracy": {"function": "accuracy_score", "invalid": True}}, "accuracy"),
+        ({"f1": {"function": "f1_score", "average": None}}, "f1"),
     ],
 )
-def test_invalid_metric_specs_fail_before_training(support, settings, error, message):
+def test_invalid_metric_specs_fail_before_training(support, settings, message):
     """Unknown functions, bad options, and nonscalar metrics have explicit failures."""
-    with pytest.raises(error, match=message):
-        support.resolve_validation_metrics(settings)
+    with pytest.raises(ValueError, match=message):
+        specs = parse_settings(ValidationMetrics, settings)
+        support.resolve_validation_metrics(specs)
 
 
 def test_shared_scheduler_builds_independent_native_state(support):

@@ -8,6 +8,7 @@ checks target schema gaps and the Python/YAML interface that must survive.
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 from hypothesis import HealthCheck, given, settings, strategies as st
 import pytest
@@ -15,7 +16,7 @@ import yaml
 
 from scripts.train_supcon import TrainingConfiguration
 from smartrodent.classifier_training import ClassifierConfiguration
-from smartrodent.experiment_support import MlflowConfiguration, SchedulerConfiguration
+from smartrodent.experiment_support import EarlyStopping, MlflowConfiguration, SchedulerConfiguration
 
 
 @pytest.fixture(params=["supcon", "classifier"])
@@ -78,6 +79,13 @@ def test_new_training_systems_reject_invalid_scalar_settings_consistently(config
     assert not configuration.output_directory.exists()
 
 
+@pytest.mark.parametrize("collection", [set, iter])
+def test_class_names_require_a_sequence_not_an_unordered_or_one_shot_iterable(configuration, collection):
+    """Schema coercion must not broaden the existing ordered class-name contract."""
+    with pytest.raises((ValueError, TypeError), match="class_names"):
+        _parse_update(configuration, ("class_names",), collection(["rat", "mouse"]))
+
+
 @pytest.mark.parametrize("seed", [True, -1, 2**32, "42", 0.5])
 def test_invalid_seeds_are_rejected_through_dataclass_replace_too(configuration, seed):
     """Direct Python callers must not bypass constraints enforced by mapping loaders."""
@@ -136,6 +144,39 @@ def test_valid_settings_keep_dataclass_replace_and_yaml_round_trip(configuration
     assert not configuration.output_directory.exists()
 
 
+def test_readonly_mapping_inputs_remain_supported_and_independently_owned(configuration):
+    """Public Mapping inputs need not be pickleable, and mutable children remain caller-owned."""
+    document = configuration.to_dict()
+    expected = deepcopy(document)
+    parsed = type(configuration).from_mapping(MappingProxyType(document))
+    document["transforms"]["random_resized_crop"]["scale"][0] = 0.5
+    assert parsed.to_dict() == expected
+
+
+@pytest.mark.parametrize("schema,document,attribute,expected", [
+    (MlflowConfiguration, {"tracking_uri": "sqlite:///unused.db", "experiment_name": "readonly"}, "experiment_name", "readonly"),
+    (SchedulerConfiguration, {"name": "ReduceLROnPlateau", "parameters": MappingProxyType({"mode": "max"})}, "mode", "max"),
+    (EarlyStopping, {"patience": 3, "tolerance": 0.01, "comparison": "less"}, "patience", 3),
+])
+def test_shared_setting_loaders_accept_readonly_mappings(schema, document, attribute, expected):
+    """MLflow, scheduler and stopping loaders retain their Mapping contracts too."""
+    parsed = schema.from_mapping(MappingProxyType(document))
+    assert getattr(parsed, attribute) == expected
+
+
+@pytest.mark.parametrize("field,settings", [
+    ("mlflow", {"tracking_uri": "sqlite:///unused.db", "experiment_name": "nested"}),
+    ("scheduler", {"name": "ReduceLROnPlateau", "parameters": {"mode": "min"}}),
+])
+def test_nested_configuration_mappings_accept_readonly_inputs(configuration, field, settings):
+    """Shared dataclass fields retain the Mapping contract of their standalone loaders."""
+    document = configuration.to_dict()
+    document.update(validation_dataset=document["train_dataset"], **{field: settings})
+    expected = type(configuration).from_mapping(document).to_dict()
+    document[field] = MappingProxyType(settings)
+    assert type(configuration).from_mapping(document).to_dict() == expected
+
+
 def test_native_optimizer_and_metric_options_are_not_lost_by_schema_validation(configuration, tmp_path):
     """Do not replace native option dictionaries with a restricted project-specific subset."""
     optimizer = {
@@ -147,6 +188,7 @@ def test_native_optimizer_and_metric_options_are_not_lost_by_schema_validation(c
     updated = replace(
         configuration, optimizer=optimizer, validation_dataset=configuration.train_dataset,
         validation_metrics=metrics, tracked_metric="macro_f1", tracked_mode="max",
+        model_card_template=Path("configs/model_card_template.yaml"),
     )
     document = updated.to_dict()
     path = tmp_path / "native-options.yaml"
@@ -156,6 +198,17 @@ def test_native_optimizer_and_metric_options_are_not_lost_by_schema_validation(c
         assert result.to_dict()["optimizer"] == expected_optimizer
         assert result.to_dict()["validation_metrics"] == expected_metrics
     assert optimizer == expected_optimizer and metrics == expected_metrics
+
+
+@pytest.mark.parametrize("configuration", ["classifier"], indirect=True)
+@pytest.mark.parametrize("source", ["encoder", "head"])
+@pytest.mark.parametrize("checkpoint", ["", "  "])
+def test_checkpoint_strings_cannot_bypass_nonblank_validation(configuration, source, checkpoint):
+    """A blank string must not fall through a path union and become the current directory."""
+    document = configuration.to_dict()
+    document["initialization"][source].update(source="yolo_checkpoint" if source == "head" else "supcon", checkpoint=checkpoint)
+    with pytest.raises(ValueError, match="checkpoint"):
+        type(configuration).from_mapping(document)
 
 
 @pytest.mark.parametrize("source", ["validation_dataset", "checkpoint"])

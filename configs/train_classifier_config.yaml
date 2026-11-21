@@ -1,0 +1,125 @@
+# Run from the repository root with the project virtual environment activated:
+# python scripts/train_classifier.py configs/train_classifier_config.yaml
+# This trains four classifiers from one existing SupCon encoder; no SupCon stage runs.
+output_directory: runs/classifier_xl_srilanka
+train_dataset: datasets/stage8_yolo_classifier_srilanka/train
+validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
+class_names:
+  - Rattus rattus
+  - Rattus norvegicus
+  - Bandicota bengalensis
+  - Bandicota indica
+  - Mus booduga
+  - Mus musculus
+  - Vandeleuria oleraceus
+  - Tatera indica
+  - Suncus murinus
+  - Ptyas mucosa
+  - Python molurus
+  - Naja naja
+  - Tyto javanica
+  - Ninox scutulata
+  - Glaucidium radiatum
+  - Ketupa zeylonensis
+  - Ketupa nipalensis
+  - Glaucidium castanotum
+  - Otus thilohoffmanni
+  - Milvus migrans
+  - Accipiter virgatus
+  - Falco tinnunculus
+  - Urva edwardsii
+  - Felis catus
+  - Canis familiaris
+  - Pavo cristatus
+
+initialization:
+  encoder:
+    source: supcon
+    checkpoint: /home/hmack/projects/smartrodent_experiments/runs/two_stage_xl_srilanka/supcon/run_001/best.pt
+  head:
+    replace: !sweep
+      values: [linear, full]
+    source: !sweep
+      values: [random, yolo_checkpoint]
+    # A random head must not have a donor. The existing native Sri Lanka
+    # classifier below has the exact 26 target labels in the correct order;
+    # stock yolo26x-cls.pt has 1000 ImageNet labels and is NOT a valid head donor.
+    checkpoint: !coupled-sweep
+      target: initialization.head.source
+      values:
+        - null
+        - runs/classify/training/classification/xl_speciesnames_srilanka/full_data_classifier_xl_640/weights/best.pt
+
+# Freeze everything before the selected head boundary. Set false to fine-tune.
+freeze_encoder: true
+encoder_batchnorm: eval  # eval | adapt
+# For multiple configurations, outputs are placed in run_001, run_002, etc.
+epochs: 30
+batch_size: 48
+workers: 20
+device: cuda
+seed: 42
+transforms:
+  image_size: 640
+  resize:
+    interpolation: bilinear
+    antialias: true
+  random_adjust_sharpness:
+    sharpness_factor: 0.5
+    p: 0.2
+  random_grayscale:
+    p: 0.2
+  random_perspective:
+    distortion_scale: 0.5
+    p: 0.2
+    interpolation: bilinear
+    fill: 0
+  random_horizontal_flip:
+    p: 0.2
+  random_resized_crop:
+    scale: [0.75, 1.0]
+    ratio: [0.75, 1.3333333333333333]
+    interpolation: bilinear
+    antialias: true
+optimizer:
+  lr: 0.001
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+  weight_decay: 0.01
+  amsgrad: false
+validation_metrics:
+  accuracy:
+    function: accuracy_score
+  balanced_accuracy:
+    function: balanced_accuracy_score
+  f1_macro:
+    function: f1_score
+    average: macro
+    zero_division: 0
+tracked_metric: balanced_accuracy
+tracked_mode: max
+scheduler:
+  name: ReduceLROnPlateau
+  parameters:
+    mode: max
+    factor: 0.5
+    patience: 2
+    threshold: 0.0005
+    threshold_mode: abs
+    min_lr: 0.000001
+    cooldown: 0
+early_stopping:
+  patience: 6
+  tolerance: 0.001
+  comparison: greater
+
+# Each run registers its best validation checkpoint. After all four succeed,
+# only the sweep winner is compared with the existing registered champion.
+# An incompatible/legacy champion needs an explicit decision, not an overwrite.
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: two-stage-sri-lanka-xl
+  registered_model_name: species-classifier-xl
+  model_artifact_name: species-classifier-xl
+  champion_alias: champion
+  # dataset_revision: <immutable-data-revision>

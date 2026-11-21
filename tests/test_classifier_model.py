@@ -122,14 +122,24 @@ def _initialize(api, source, **updates):
     """Use the agreed default: retain pooled features and train a fresh linear head."""
     options = {
         "source_format": source.source_format,
-        "class_names": ("rat", "mouse"),
+        "label_names": {"mouse": 0, "rat": 1},
         "head_replace": "linear",
         "head_source": "random",
         "freeze_encoder": True,
         "encoder_batchnorm": "eval",
         "device": "cpu",
     }
-    return api.YoloClassifierModel.initialize(source.path, **(options | updates))
+    options.update(updates)
+    initialization = {
+        "encoder": {"source": options["source_format"], "checkpoint": source.path},
+        "head": {"replace": options["head_replace"], "source": options["head_source"],
+                 "checkpoint": options.get("head_checkpoint")},
+    }
+    return api.YoloClassifierModel.initialize(
+        initialization, label_names=options["label_names"],
+        freeze_encoder=options["freeze_encoder"], encoder_batchnorm=options["encoder_batchnorm"],
+        device=options["device"],
+    )
 
 
 def _replacement(network, head_replace):
@@ -163,7 +173,9 @@ def test_default_initialization_is_a_fresh_linear_head_with_strictly_frozen_enco
 ):
     """Omitted options mean linear/random replacement and frozen encoder with BN eval."""
     model = classifier_api.YoloClassifierModel.initialize(
-        supcon_source.path, source_format="supcon", class_names=("rat", "mouse")
+        {"encoder": {"source": "supcon", "checkpoint": supcon_source.path},
+         "head": {"replace": "linear", "source": "random"}},
+        label_names={"mouse": 0, "rat": 1},
     )
     _assert_same_state(_encoder_state(model.network, "linear"), _encoder_state(supcon_source.network, "linear"))
     head = model.network.model[-1].linear
@@ -182,7 +194,8 @@ def test_default_initialization_is_a_fresh_linear_head_with_strictly_frozen_enco
 def test_fresh_linear_head_preserves_all_encoder_state(classifier_api, encoder_source, class_names):
     """Keep Classify.conv/pooling and reset linear even when the class count already matches."""
     expected = _encoder_state(encoder_source.network, "linear")
-    model = _initialize(classifier_api, encoder_source, class_names=class_names)
+    labels = {name: index for index, name in enumerate(sorted(class_names))}
+    model = _initialize(classifier_api, encoder_source, label_names=labels)
     _assert_same_state(_encoder_state(model.network, "linear"), expected)
     head = model.network.model[-1].linear
     assert head.out_features == len(class_names)
@@ -354,7 +367,7 @@ def test_classifier_checkpoint_round_trip_preserves_logits_state_and_policy(
 ):
     """Restore a standalone CE model without the original source checkpoint or YAML."""
     model = _initialize(
-        classifier_api, supcon_source, class_names=("shrew", "rat", "mouse"),
+        classifier_api, supcon_source, label_names={"mouse": 0, "rat": 1, "shrew": 2},
         head_replace=head_replace, freeze_encoder=freeze, encoder_batchnorm=batchnorm,
     )
     model.train()
@@ -463,31 +476,6 @@ def test_detection_checkpoint_is_not_a_classification_model(
             )
 
 
-@pytest.mark.parametrize(
-    "updates,message",
-    [
-        ({"source_format": "auto"}, "source_format"),
-        ({"head_replace": "other"}, "head_replace"),
-        ({"head_source": "other"}, "head_source"),
-        ({"head_source": "yolo_checkpoint"}, "head_checkpoint"),
-        ({"head_checkpoint": Path("unused.pt")}, "head_checkpoint"),
-        ({"freeze_encoder": 1}, "freeze_encoder"),
-        ({"encoder_batchnorm": "train"}, "encoder_batchnorm"),
-    ],
-)
-def test_invalid_initialization_options_fail_explicitly(classifier_api, supcon_source, updates, message):
-    """Contradictory or unknown options cannot silently change the initialization policy."""
-    with pytest.raises(ValueError, match=message):
-        _initialize(classifier_api, supcon_source, **updates)
-
-
-@pytest.mark.parametrize("class_names", [(), ("mouse", "mouse"), "mouse", ("", "rat")])
-def test_invalid_class_names_fail_before_training(classifier_api, supcon_source, class_names):
-    """Class identities must be explicit, nonempty, and unique."""
-    with pytest.raises(ValueError, match="class_names"):
-        _initialize(classifier_api, supcon_source, class_names=class_names)
-
-
 @pytest.mark.parametrize("wrong_format", ["ultralytics", "classifier"])
 def test_explicit_source_format_does_not_fall_back_to_another_loader(
     classifier_api, supcon_source, wrong_format
@@ -509,10 +497,10 @@ def test_restore_rejects_supcon_instead_of_reinitializing_a_head(classifier_api,
         classifier_api.YoloClassifierModel.from_checkpoint(supcon_source.path)
 
 
-def test_source_format_is_required_rather_than_guessed(classifier_api, supcon_source):
-    """The caller explicitly chooses which checkpoint format may be loaded."""
-    with pytest.raises(TypeError, match="source_format"):
-        classifier_api.YoloClassifierModel.initialize(supcon_source.path, class_names=("mouse", "rat"))
+def test_initialization_is_required_rather_than_guessed(classifier_api):
+    """Model construction requires explicit, prepared initialization settings."""
+    with pytest.raises(TypeError, match="initialization"):
+        classifier_api.YoloClassifierModel.initialize(label_names={"mouse": 0, "rat": 1})
 
 
 def test_missing_source_checkpoint_propagates_file_error(classifier_api, tmp_path):
@@ -526,12 +514,12 @@ def test_missing_source_checkpoint_propagates_file_error(classifier_api, tmp_pat
 # fresh classifier. No mutable model or optimizer is shared between examples.
 @settings(max_examples=15, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(class_names=st.lists(st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=8), min_size=2, max_size=5, unique=True))
-def test_fresh_head_label_mapping_matches_dataset_sorting(
+def test_fresh_head_preserves_supplied_label_mapping(
     classifier_api, supcon_source, class_names
 ):
-    """Arbitrary class order produces the same alphabetical IDs as ImageDataset."""
-    model = _initialize(classifier_api, supcon_source, class_names=class_names)
-    expected = {name: index for index, name in enumerate(sorted(class_names))}
+    """The model preserves supplied IDs instead of sorting and reassigning them."""
+    expected = {name: index for index, name in enumerate(class_names)}
+    model = _initialize(classifier_api, supcon_source, label_names=expected)
     assert model.label_names == expected
     assert model.network.names == {index: name for name, index in expected.items()}
     assert model.network.model[-1].linear.out_features == len(class_names)

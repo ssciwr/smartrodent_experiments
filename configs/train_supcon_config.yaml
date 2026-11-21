@@ -1,60 +1,39 @@
 # Run from the repository root:
 # python scripts/train_supcon.py configs/train_supcon_config.yaml
-train_dataset: datasets/stage8_yolo_classifier_not_oversampled/train
-validation_dataset: datasets/stage8_yolo_classifier_not_oversampled/val
-output_directory: runs/supcon_standalone_xl
-model_name: notebooks/yolo26x-cls.pt
+train_dataset: datasets/stage8_yolo_classifier_srilanka/train
+validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
+output_directory: runs/supcon_standalone_xl_srilanka_lr-00001
+model_name: ./yolo26x-cls.pt
 mlflow:
   tracking_uri: sqlite:///mlflow.db
-  experiment_name: smartrodent-standalone-supcon
-  registered_model_name: rodent-species
-  model_artifact_name: classifier
+  experiment_name: lr-tau-supcon-xl
+  registered_model_name: species-classifier-encoder-xl
+  model_artifact_name: species-classifier-encoder-xl
   champion_alias: champion
   # Set this to the immutable DVC/data revision used for the run when available.
   # dataset_revision: <revision>
 class_names:
-  - Rattus norvegicus # brown rat
-  - Rattus rattus # black rat
-  - Mus musculus # house mouse
-  - Apodemus agrarius # striped field mouse
-  - Apodemus flavicollis # yellow-necked field mouse
-  - Apodemus sylvaticus # wood mouse
-  - Arvicola amphibius #
-  - Microtus arvalis #
-  - Clethrionomys glareolus #
-  - Microtus agrestis #
-  - Crocidura leucodon #
-  - Sorex araneus #
-  - Sorex minutus #
-  - Sorex coronatus #
-  # rodents in sri lanka
-  - Suncus murinus #
+  - Rattus rattus # brown rat
+  - Bandicota bengalensis # lesser bandicot rat
   - Bandicota indica # greater bandicot rat
-  - Bandicota bengalensis # lessert bandicot rat
   - Mus booduga # little indian field mouse
-  - Vandeleuria oleraceus #
-  # snakes
-  - Vipera berus # common european adder
-  - Coronella austriaca # smooth snake
-  - Natrix natrix # grass snake
-  - Natrix helvetica # barred grass snake
-  # snakes in sri lanka
-  - Ptyas mucosa #
-  - Bungarus caeruleus #
-  - Naja naja #
-  - Daboia russelii #
-  - Coelognathus helena #
-  # predators from sri lanka
-  - Spilornis cheela
-  - Varanus bengalensis #
-  - Centropus sinensis #
-  - Pavo cristatus # peacock
-  # predators of snakes and rodents (birds, mammals )
-  - Vulpes vulpes # red fox
-  - Buteo buteo # common buzzard
-  - Meles meles # european badger
-  - Ciconia ciconia # white stork
-  - Ardea cinerea # grey heron
+  - Vandeleuria oleraceus # climbing mouse
+  - Tatera indica # indian gerbil
+  - Suncus murinus # shrew
+  - Ptyas mucosa # indian rat snake
+  - Python molurus # rock python
+  - Naja naja # indian cobra
+  - Tyto javanica # eastern barn owl
+  - Ninox scutulata # brown boobook
+  - Glaucidium radiatum # jungle owlet
+  - Ketupa zeylonensis # Brown fish owl
+  - Ketupa nipalensis # spot-bellied eagle-owl
+  - Glaucidium castanotum # chestnut-backed owlet
+  - Otus thilohoffmanni # Serendib scops-owl
+  - Milvus migrans # Black kite
+  - Accipiter virgatus # common kestrel
+  - Falco tinnunculus # besra
+  - Urva edwardsii # Indian grey mongoose
   - Felis catus # house cat
   - Canis familiaris # domestic dog
 epochs: 30
@@ -81,17 +60,13 @@ transforms:
     interpolation: bilinear
     antialias: true
 optimizer:
-  lr: !sweep
-    values:
-      - 0.0001
-      - 0.0005
-      - 0.001
+  lr: 0.0001
   betas: [0.9, 0.999]
   eps: 1.0e-08
   weight_decay: 0.01
   amsgrad: false
-classes_per_batch: 4
-samples_per_class: 4
+classes_per_batch: 8
+samples_per_class: 6
 # Matches the notebook sampler's default; rounded down to complete source batches.
 samples_per_epoch: 100000
 workers: 20
@@ -125,6 +100,6 @@ scheduler:
     min_lr: 0.000001
     cooldown: 0
 early_stopping:
-  patience: 5
-  tolerance: 0.001
+  patience: 6
+  tolerance: 0.005
   comparison: less

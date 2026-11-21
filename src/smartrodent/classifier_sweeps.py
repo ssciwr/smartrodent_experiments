@@ -11,7 +11,7 @@ from smartrodent import config_utils
 from smartrodent.classifier_champions import ClassifierChampionRegistry
 from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
-from smartrodent.model_card import load_card_template
+from smartrodent.training_validation import validate_output_paths
 
 
 @dataclass(frozen=True)
@@ -46,9 +46,6 @@ class ClassifierSweepConfiguration:
                 raise ValueError("Classifier sweep must use the same validation dataset")
             if reference.validation_dataset is not None and sorted(configuration.class_names) != sorted(reference.class_names):
                 raise ValueError("Validated classifier sweep must evaluate the same class population")
-            if configuration.seed >= 2**32:
-                raise ValueError("seed must be an integer between 0 and 2**32 - 1")
-            load_card_template(Path(configuration.model_card_template))
         self._validate_paths()
 
     @classmethod
@@ -113,34 +110,13 @@ class ClassifierSweepConfiguration:
 
     def _validate_paths(self) -> None:
         """Protect every run's inputs against every run's artifacts, including aliases."""
-        directories = [configuration.output_directory for configuration in self.configurations]
-        resolved = [directory.resolve() for directory in directories]
-        all_outputs = [self.output_directory.resolve(), *resolved]
-        for index, directory in enumerate(resolved):
-            for other in resolved[index + 1:]:
-                if directory.is_relative_to(other) or other.is_relative_to(directory):
-                    raise ValueError("Classifier output_directory paths must not overlap")
-        names = (
-            "last.pt", "best.pt", ".last.pt.tmp", ".best.pt.tmp", "config.yaml",
-            "history.yaml", "best.model_card.yaml", "best.model_card.md",
+        sources = [configuration.model_card_template for configuration in self.configurations]
+        sources.extend(node.get("checkpoint") for configuration in self.configurations for node in configuration.initialization.values())
+        validate_output_paths(
+            [configuration.output_directory for configuration in self.configurations],
+            [path for configuration in self.configurations for path in (configuration.train_dataset, configuration.validation_dataset)],
+            sources, (self.output_directory,),
         )
-        artifacts = [self.output_directory / name for name in ("config.yaml", "selection.yaml")]
-        artifacts.extend(directory / name for directory in directories for name in names)
-        sources = []
-        for configuration in self.configurations:
-            for dataset in (configuration.train_dataset, configuration.validation_dataset):
-                if dataset is None:
-                    continue
-                dataset_root = dataset.resolve()
-                if any(directory.is_relative_to(dataset_root) for directory in all_outputs):
-                    raise ValueError("Classifier output directories must be outside both input datasets")
-            sources.append(Path(configuration.model_card_template))
-            sources.extend(Path(node["checkpoint"]) for node in configuration.initialization.values() if node.get("checkpoint") is not None)
-        for source in sources:
-            for artifact in artifacts:
-                same_file = source.exists() and artifact.exists() and source.samefile(artifact)
-                if source.resolve() == artifact.resolve() or same_file:
-                    raise ValueError(f"Output artifact {artifact} collides with source checkpoint {source}")
 
 
 @dataclass(frozen=True)

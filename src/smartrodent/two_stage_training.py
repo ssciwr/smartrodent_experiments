@@ -2,12 +2,14 @@
 
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass as result_dataclass, field, replace
+
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
 import hashlib
 from pathlib import Path
 
 import mlflow
-import torch
 import yaml
 
 from scripts.train_supcon import SupConExperiment, TrainingConfiguration
@@ -15,8 +17,8 @@ from smartrodent import config_utils
 from smartrodent.classifier_training import ClassifierConfiguration
 from smartrodent.classifier_sweeps import ClassifierSweepConfiguration, ClassifierSweepExperiment
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
-from smartrodent.experiment_support import ImageTransforms, MlflowConfiguration, resolve_validation_metrics
-from smartrodent.model_card import load_card_template
+from smartrodent.experiment_support import MlflowConfiguration, validate_stopping
+from smartrodent.training_validation import MappingInput, SharedData, parse_settings, validate_output_paths
 
 
 def _plain_values(value):
@@ -31,7 +33,7 @@ def _plain_values(value):
         return deepcopy(value)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, config=ConfigDict(extra="forbid"))
 class TwoStageConfiguration:
     """Validate the entire pipeline before running any candidate or writing outputs.
 
@@ -47,31 +49,19 @@ class TwoStageConfiguration:
     """
 
     output_directory: Path
-    data: Mapping
-    supcon: Mapping
-    classifier: Mapping
-    mlflow: MlflowConfiguration | None = None
+    data: SharedData
+    supcon: dict[str, object]
+    classifier: dict[str, object]
+    mlflow: MappingInput[MlflowConfiguration] | None = None
     supcon_configurations: tuple[TrainingConfiguration, ...] = field(init=False, repr=False)
     _classifier_sweep: ClassifierSweepConfiguration = field(init=False, repr=False)
 
     def __post_init__(self):
         """Own independent settings and prevalidate all expanded stage configurations."""
-        object.__setattr__(self, "output_directory", Path(self.output_directory))
-        for name in ("data", "supcon", "classifier"):
-            values = getattr(self, name)
-            if not isinstance(values, Mapping):
-                raise ValueError(f"{name} must be a mapping")
-            object.__setattr__(self, name, deepcopy(dict(values)))
-        if self.mlflow is not None and not isinstance(self.mlflow, MlflowConfiguration):
-            raise TypeError("mlflow must be a MlflowConfiguration or null")
-        required_data = {"train_dataset", "validation_dataset", "class_names"}
-        if set(self.data) != required_data:
-            raise ValueError(f"data requires exactly {sorted(required_data)}; got {sorted(self.data)}")
-        if self.data["validation_dataset"] is None:
-            raise ValueError("Automatic SupCon selection requires validation_dataset")
+        for name in ("supcon", "classifier"):
+            object.__setattr__(self, name, deepcopy(getattr(self, name)))
         for name in ("supcon", "classifier"):
             self._validate_stage_ownership(getattr(self, name), name)
-        self._reject_sweeps(self.data, "data")
         # Expand one stage at a time: a classifier Cartesian product must never
         # multiply SupCon candidates or change which encoder is selected.
         runs = config_utils.ConfigHandler({"supcon": deepcopy(self.supcon)}).run_configs
@@ -103,7 +93,6 @@ class TwoStageConfiguration:
             initialization = settings.get("initialization")
             if not isinstance(initialization, Mapping) or initialization.get("encoder") != {"source": "selected_supcon"}:
                 raise ValueError("classifier encoder must be exactly {source: selected_supcon}, without checkpoint")
-            self._validate_seed(settings.get("seed", 42))
             candidate = {**deepcopy(settings), **shared_classifier_settings}
             # The winning file does not exist yet; this validates settings and
             # source/output relationships without loading any model weights.
@@ -134,7 +123,6 @@ class TwoStageConfiguration:
         """Build and prevalidate one expanded candidate without training or output writes."""
         # A whole-section sweep can introduce keys absent before expansion.
         self._validate_stage_ownership(settings, "supcon")
-        self._validate_seed(settings.get("seed", 42))
         values = {
             **settings,
             **self.data,
@@ -148,68 +136,21 @@ class TwoStageConfiguration:
             raise ValueError(f"Invalid supcon settings: {error}") from error
         # Standalone legacy configurations may infer direction. The pipeline
         # also enforces agreement when tracked_mode was omitted explicitly.
-        if config.scheduler is not None and config.scheduler.mode != config.effective_tracked_mode:
-            raise ValueError("SupCon scheduler direction must agree with tracked_mode")
-        if config.early_stopping is not None:
-            mode = "min" if config.early_stopping["comparison"] == "less" else "max"
-            if mode != config.effective_tracked_mode:
-                raise ValueError("SupCon early_stopping direction must agree with tracked_mode")
-        ImageTransforms(config.transforms).training()
-        torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], **config.optimizer)
-        resolve_validation_metrics(config.validation_metrics)
-        load_card_template(Path(config.model_card_template))
+        validate_stopping(config, config.effective_tracked_mode)
         return config
-
-    @staticmethod
-    def _validate_seed(seed) -> None:
-        """Use the intersection of the three trainers' Python/NumPy/PyTorch RNG ranges."""
-        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**32:
-            raise ValueError("seed must be an integer between 0 and 2**32 - 1")
-
-    @classmethod
-    def _reject_sweeps(cls, values, section: str) -> None:
-        """Reject sweeps in shared data, which must remain comparable across stages."""
-        if isinstance(values, Mapping):
-            if values.get("type") in ("sweep", "coupled-sweep", "range", "random_uniform"):
-                raise ValueError(f"{section} sweeps are not supported; sweep stage settings instead")
-            for value in values.values():
-                cls._reject_sweeps(value, section)
-        elif isinstance(values, (list, tuple)):
-            for value in values:
-                cls._reject_sweeps(value, section)
 
     def _validate_output_paths(self) -> None:
         """Protect shared datasets and model/head inputs from every generated artifact."""
-        stage_directories = [config.output_directory for config in self.supcon_configurations]
-        stage_directories.extend(config.output_directory for config in self._classifier_sweep.configurations)
-        for directory in [self.output_directory, *stage_directories]:
-            for split in ("train_dataset", "validation_dataset"):
-                if directory.resolve().is_relative_to(Path(self.data[split]).resolve()):
-                    raise ValueError("output_directory and child outputs must be outside both datasets")
-        resolved = [directory.resolve() for directory in stage_directories]
-        for index, directory in enumerate(resolved):
-            for other in resolved[index + 1:]:
-                if directory.is_relative_to(other) or other.is_relative_to(directory):
-                    raise ValueError("Stage output_directory paths must not overlap")
-        names = (
-            "config.yaml", "history.yaml", "last.pt", "best.pt",
-            ".last.pt.tmp", ".best.pt.tmp", "best.model_card.yaml", "best.model_card.md",
+        stages = (*self.supcon_configurations, *self._classifier_sweep.configurations)
+        # Selected encoder checkpoints are pipeline outputs, not external inputs.
+        sources = [config.model_name for config in self.supcon_configurations]
+        sources.extend(config.model_card_template for config in stages)
+        sources.extend(config.initialization["head"].get("checkpoint") for config in self._classifier_sweep.configurations)
+        validate_output_paths(
+            [config.output_directory for config in stages],
+            (self.data["train_dataset"], self.data["validation_dataset"]), sources,
+            (self.output_directory, self._classifier_sweep.output_directory),
         )
-        roots = (self.output_directory, self._classifier_sweep.output_directory)
-        artifacts = [root / name for root in roots for name in ("config.yaml", "selection.yaml")]
-        artifacts.extend(directory / name for directory in stage_directories for name in names)
-        sources = [Path(config.model_name) for config in self.supcon_configurations]
-        sources.extend(Path(config.model_card_template) for config in self.supcon_configurations)
-        for classifier in self._classifier_sweep.configurations:
-            sources.append(Path(classifier.model_card_template))
-            head = classifier.initialization["head"]
-            if head.get("checkpoint") is not None:
-                sources.append(Path(head["checkpoint"]))
-        for source in sources:
-            for artifact in artifacts:
-                same_file = source.exists() and artifact.exists() and source.samefile(artifact)
-                if source.resolve() == artifact.resolve() or same_file:
-                    raise ValueError(f"Output artifact {artifact} collides with source {source}")
 
     @classmethod
     def from_mapping(cls, values: Mapping) -> "TwoStageConfiguration":
@@ -224,15 +165,7 @@ class TwoStageConfiguration:
         Raises:
             ValueError: Required settings are missing, unknown, or incompatible.
         """
-        if not isinstance(values, Mapping):
-            raise ValueError("Two-stage configuration must be a mapping")
-        required = {"output_directory", "data", "supcon", "classifier"}
-        allowed = required | {"mlflow"}
-        if not required.issubset(values) or set(values) - allowed:
-            raise ValueError(f"Two-stage configuration requires {sorted(required)}; missing {sorted(required - set(values))}; unexpected {sorted(set(values) - allowed)}")
-        values = deepcopy(dict(values))
-        values["mlflow"] = MlflowConfiguration.from_mapping(values.get("mlflow"))
-        return cls(**values)
+        return parse_settings(cls, values)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TwoStageConfiguration":
@@ -284,15 +217,20 @@ class TwoStageConfiguration:
         Returns:
             The shared sweep settings with concrete encoder paths for every run.
         """
-        configurations = []
-        for configuration in self._classifier_sweep.configurations:
-            initialization = deepcopy(configuration.initialization)
-            initialization["encoder"] = {"source": "supcon", "checkpoint": str(checkpoint.resolve())}
-            configurations.append(replace(configuration, initialization=initialization))
-        return replace(self._classifier_sweep, configurations=tuple(configurations))
+        checkpoint = checkpoint.resolve()
+        sweep = deepcopy(self._classifier_sweep)
+        # All other settings were already verified. Resolve only the deferred
+        # input on an independent copy, without rerunning configuration setup.
+        for configuration in sweep.configurations:
+            configuration.initialization["encoder"]["checkpoint"] = str(checkpoint)
+        validate_output_paths(
+            [configuration.output_directory for configuration in sweep.configurations],
+            sources=(checkpoint,), roots=(sweep.output_directory,),
+        )
+        return sweep
 
 
-@dataclass(frozen=True)
+@result_dataclass(frozen=True)
 class TwoStageResult:
     """Report completed stage results without rescoring or scanning artifacts.
 

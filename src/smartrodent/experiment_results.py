@@ -1,13 +1,13 @@
 """Report completed training runs and rank their configured tracking metrics."""
 
-import math
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
-from numbers import Real
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
+from smartrodent.training_validation import FiniteNumber, Mode, Nonblank, settings_dict
 from pathlib import Path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class ExperimentResult:
     """Describe a completed run without inspecting checkpoint files.
 
@@ -28,25 +28,12 @@ class ExperimentResult:
     last_checkpoint: Path
     best_checkpoint: Path
     best_epoch: int
-    tracked_metric: str
-    tracked_mode: str
-    best_value: float
+    tracked_metric: Nonblank
+    tracked_mode: Mode
+    best_value: FiniteNumber
     validation_dataset: Path | None = None
     mlflow_run_id: str | None = None
     registered_model_version: str | None = None
-
-    def __post_init__(self):
-        """Reject unnamed metrics, ambiguous directions, and invalid tracked values."""
-        if not isinstance(self.tracked_metric, str) or not self.tracked_metric.strip():
-            raise ValueError("tracked_metric must be a nonempty metric name")
-        if self.tracked_mode not in ("min", "max"):
-            raise ValueError("tracked_mode must be 'min' or 'max'")
-        if (
-            isinstance(self.best_value, bool)
-            or not isinstance(self.best_value, Real)
-            or not math.isfinite(self.best_value)
-        ):
-            raise ValueError("best_value must be a finite metric value")
 
     def to_dict(self) -> dict:
         """Serialize result paths without changing scores or optional registry metadata.
@@ -54,7 +41,7 @@ class ExperimentResult:
         Returns:
             YAML-compatible fields retaining the original, unnormalized paths.
         """
-        return {name: str(value) if isinstance(value, Path) else value for name, value in asdict(self).items()}
+        return settings_dict(self)
 
 
 def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentResult:

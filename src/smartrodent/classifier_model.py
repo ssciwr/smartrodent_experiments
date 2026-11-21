@@ -1,6 +1,6 @@
 """Initialize portable YOLO CE classifiers with an explicit encoder freeze policy."""
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -11,17 +11,22 @@ from ultralytics.nn.modules import Classify, Conv, ConvTranspose, RepConv, RepVG
 from ultralytics.nn.tasks import ClassificationModel, load_checkpoint
 
 from smartrodent.supcon_model import YoloSupConModel
+from smartrodent.training_validation import (
+    ClassifierPolicy, EncoderBatchnorm, EncoderSource, HeadReplacement,
+    InitializationSettings, parse_settings,
+)
 
 
 class YoloClassifierModel(torch.nn.Module):
     """Wrap a YOLO classifier, returning raw logits in training and evaluation.
 
-    Retained native layers must be unfused so the embedded architecture can
-    reconstruct them. Fusion in discarded source or donor layers is harmless.
+    ``initialize()`` consumes verified settings; checkpoint loaders validate
+    external metadata. Retained native layers must be unfused so the embedded architecture
+    can reconstruct them. Fusion in discarded source or donor layers is harmless.
 
     Args:
         network: Native YOLO classification network with its initialized head.
-        label_names: Alphabetically assigned class-name-to-ID mapping.
+        label_names: Dataset-assigned class-name-to-ID mapping, preserved as supplied.
         head_replace: ``linear`` or ``full`` classifier boundary.
         freeze_encoder: Whether to disable encoder parameter updates.
         encoder_batchnorm: ``eval`` for stored statistics or ``adapt`` for updates.
@@ -32,24 +37,20 @@ class YoloClassifierModel(torch.nn.Module):
         network: ClassificationModel,
         label_names: Mapping[str, int],
         *,
-        head_replace: str = "linear",
+        head_replace: HeadReplacement = "linear",
         freeze_encoder: bool = True,
-        encoder_batchnorm: str = "eval",
+        encoder_batchnorm: EncoderBatchnorm = "eval",
     ):
-        """Own the network without registering duplicate encoder/head aliases."""
+        """Assemble factory-validated settings and check the retained network's portability."""
         super().__init__()
-        self._validate_policy(head_replace, freeze_encoder, encoder_batchnorm)
         head = self._classification_head(network)
-        expected_labels = self._label_mapping(tuple(label_names))
-        if dict(label_names) != expected_labels:
-            raise ValueError("Classifier label_names must use alphabetical contiguous IDs")
-        if head.linear.out_features != len(expected_labels):
+        if head.linear.out_features != len(label_names):
             raise ValueError("Classifier head output shape does not match class labels")
         self._reject_fused(network)
         for module in self._convolutions(network).values():
             self._activation_configuration(module.act)
         self.network = network
-        self.label_names = expected_labels
+        self.label_names = dict(label_names)
         self.head_replace = head_replace
         self.freeze_encoder = freeze_encoder
         self.encoder_batchnorm = encoder_batchnorm
@@ -65,26 +66,18 @@ class YoloClassifierModel(torch.nn.Module):
     @classmethod
     def initialize(
         cls,
-        checkpoint: str | Path,
+        initialization: InitializationSettings,
         *,
-        source_format: str,
-        class_names: Sequence[str],
-        head_replace: str = "linear",
-        head_source: str = "random",
-        head_checkpoint: str | Path | None = None,
+        label_names: Mapping[str, int],
         freeze_encoder: bool = True,
-        encoder_batchnorm: str = "eval",
+        encoder_batchnorm: EncoderBatchnorm = "eval",
         device: str | torch.device = "cpu",
     ) -> "YoloClassifierModel":
         """Start a new classifier from an explicitly identified encoder checkpoint.
 
         Args:
-            checkpoint: Local SupCon, Ultralytics, or standalone CE checkpoint.
-            source_format: ``supcon``, ``ultralytics``, or ``classifier``.
-            class_names: Target classes, sorted to assign dataset-compatible IDs.
-            head_replace: Replace ``linear`` only or the ``full`` Classify module.
-            head_source: Fresh ``random`` weights or a native ``yolo_checkpoint``.
-            head_checkpoint: Native head donor, required only for checkpoint weights.
+            initialization: Already-validated encoder and replacement-head settings.
+            label_names: Class-name-to-ID mapping supplied by the training dataset.
             freeze_encoder: Keep all parameters before the selected boundary fixed.
             encoder_batchnorm: Use stored statistics (``eval``) or adapt them.
             device: Device on which the initialized classifier should run.
@@ -98,61 +91,66 @@ class YoloClassifierModel(torch.nn.Module):
                 are incompatible. Native checkpoints must be trusted files.
             FileNotFoundError: A requested local source does not exist.
         """
-        cls._validate_policy(head_replace, freeze_encoder, encoder_batchnorm)
-        labels = cls._label_mapping(class_names)
-        if source_format not in ("supcon", "ultralytics", "classifier"):
-            raise ValueError("source_format must be 'supcon', 'ultralytics', or 'classifier'")
-        if head_source not in ("random", "yolo_checkpoint"):
-            raise ValueError("head_source must be 'random' or 'yolo_checkpoint'")
-        if head_source == "yolo_checkpoint" and head_checkpoint is None:
-            raise ValueError("head_checkpoint is required for head_source='yolo_checkpoint'")
-        if head_source == "random" and head_checkpoint is not None:
-            raise ValueError("head_checkpoint is not allowed for head_source='random'")
-        path = cls._local_checkpoint(checkpoint)
+        encoder = initialization["encoder"]
+        network = cls._load_encoder(cls._local_checkpoint(encoder["checkpoint"]), encoder["source"])
+        cls._replace_head(network, label_names, initialization["head"])
+        return cls(
+            network, label_names, head_replace=initialization["head"]["replace"],
+            freeze_encoder=freeze_encoder, encoder_batchnorm=encoder_batchnorm,
+        ).to(device)
+
+    @classmethod
+    def _load_encoder(cls, path: Path, source_format: EncoderSource) -> ClassificationModel:
+        """Dispatch only schema-approved formats; never guess a format after loader failure."""
         if source_format == "supcon":
             with cls._preserve_activation_default():
                 try:
                     source = YoloSupConModel.from_checkpoint(path)
                 except UnpicklingError as error:
                     raise ValueError("Expected a standalone SupCon checkpoint format") from error
-            # Removing the pooling hook releases its closure over the SupCon
-            # wrapper. Retain only the native network, not the projector/optimizer.
-            network = source.finalize().model
+            # Removing the hook releases its closure over the SupCon wrapper;
+            # only the native network, not the projector/optimizer, is retained.
+            return source.finalize().model
         elif source_format == "ultralytics":
-            network = cls._load_native(path)
-        else:
-            network = cls.from_checkpoint(path).network
-        original = cls._classification_head(network)
-        donor = None
-        if head_source == "yolo_checkpoint":
-            donor_network = cls._load_native(cls._local_checkpoint(head_checkpoint))
-            expected_names = {index: name for name, index in labels.items()}
-            if donor_network.names != expected_names:
+            return cls._load_native(path)
+        elif source_format == "classifier":
+            return cls.from_checkpoint(path).network
+
+    @classmethod
+    def _head_donor(cls, original: Classify, labels: Mapping[str, int], settings: Mapping) -> Classify | None:
+        """Load the optional donor and check facts that depend on its actual weights."""
+        if settings["source"] == "random":
+            return None
+        elif settings["source"] == "yolo_checkpoint":
+            network = cls._load_native(cls._local_checkpoint(settings["checkpoint"]))
+            donor = cls._classification_head(network)
+            if network.names != {index: name for name, index in labels.items()}:
                 raise ValueError("Head checkpoint class identities and label order must match")
-            donor = cls._classification_head(donor_network)
-            cls._validate_donor(original, donor, head_replace, len(labels))
-        if head_replace == "linear":
-            # reshape_outputs() deliberately preserves same-size layers; a new
-            # CE experiment must reset this layer even when the class count matches.
+            cls._validate_donor(original, donor, settings["replace"], len(labels))
+            return donor
+
+    @classmethod
+    def _replace_head(cls, network: ClassificationModel, labels: Mapping[str, int], settings: Mapping) -> None:
+        """Replace the selected component while preserving the retained model's graph."""
+        original = cls._classification_head(network)
+        donor = cls._head_donor(original, labels, settings)
+        if settings["replace"] == "linear":
+            # reshape_outputs() preserves same-size layers, but a fresh CE run
+            # must reset this layer even when the target class count is unchanged.
             original.linear = (
                 torch.nn.Linear(original.linear.in_features, len(labels))
                 if donor is None else deepcopy(donor.linear)
             )
-        elif head_replace == "full":
+        elif settings["replace"] == "full":
             replacement = (
                 Classify(original.conv.conv.in_channels, len(labels))
                 if donor is None else deepcopy(donor)
             )
-            # Prediction follows the retained model's graph, not the donor graph.
             replacement.i = original.i
             replacement.f = original.f
             replacement.type = original.type
             replacement.np = sum(parameter.numel() for parameter in replacement.parameters())
             network.model[-1] = replacement
-        return cls(
-            network, labels, head_replace=head_replace,
-            freeze_encoder=freeze_encoder, encoder_batchnorm=encoder_batchnorm,
-        ).to(device)
 
     @classmethod
     def from_checkpoint(
@@ -175,6 +173,21 @@ class YoloClassifierModel(torch.nn.Module):
             payload = torch.load(cls._local_checkpoint(path), map_location="cpu", weights_only=True)
         except UnpicklingError as error:
             raise ValueError("Expected a standalone classifier checkpoint") from error
+        return cls.from_checkpoint_state(payload, device)
+
+    @classmethod
+    def from_checkpoint_state(
+        cls, payload: Mapping, device: str | torch.device = "cpu"
+    ) -> "YoloClassifierModel":
+        """Restore a classifier from an already-loaded checkpoint snapshot.
+
+        Args:
+            payload: Portable classifier checkpoint metadata and tensors.
+            device: Device for the restored classifier.
+
+        Returns:
+            The restored classifier in evaluation mode.
+        """
         required = {"architecture", "model_configuration", "model_state_dict", "label_names"}
         if (
             not isinstance(payload, Mapping)
@@ -186,12 +199,14 @@ class YoloClassifierModel(torch.nn.Module):
         activations = configuration.pop("conv_activations")
         batchnorm = configuration.pop("batchnorm")
         dropout = configuration.pop("dropout")
+        policy = parse_settings(ClassifierPolicy, configuration)
+        labels = payload["label_names"]
         architecture = deepcopy(payload["architecture"])
         # Passing the embedded dictionary avoids reopening yaml_file.
         with cls._preserve_activation_default():
-            network = ClassificationModel(architecture, nc=len(payload["label_names"]), verbose=False)
+            network = ClassificationModel(architecture, nc=len(labels), verbose=False)
         cls._restore_behavior(network, activations, batchnorm, dropout)
-        model = cls(network, payload["label_names"], **configuration)
+        model = cls(network, labels, **policy)
         model.load_state_dict(payload["model_state_dict"], strict=True)
         return model.to(device).eval()
 
@@ -375,27 +390,6 @@ class YoloClassifierModel(torch.nn.Module):
             module.inplace = dropout[name]["inplace"]
 
     @staticmethod
-    def _validate_policy(head_replace: str, freeze_encoder: bool, encoder_batchnorm: str) -> None:
-        """Reject ambiguous replacement boundaries or freeze behavior before loading."""
-        if head_replace not in ("linear", "full"):
-            raise ValueError("head_replace must be 'linear' or 'full'")
-        if not isinstance(freeze_encoder, bool):
-            raise ValueError("freeze_encoder must be a boolean")
-        if encoder_batchnorm not in ("eval", "adapt"):
-            raise ValueError("encoder_batchnorm must be 'eval' or 'adapt'")
-
-    @staticmethod
-    def _label_mapping(class_names: Sequence[str]) -> dict[str, int]:
-        """Match ImageDataset's alphabetical IDs without silently normalizing identities."""
-        if isinstance(class_names, (str, bytes)) or not isinstance(class_names, Sequence) or not class_names:
-            raise ValueError("class_names must be a nonempty sequence")
-        if any(not isinstance(name, str) or not name for name in class_names):
-            raise ValueError("class_names must contain nonempty strings")
-        if len(set(class_names)) != len(class_names):
-            raise ValueError("class_names must be unique")
-        return {name: index for index, name in enumerate(sorted(class_names))}
-
-    @staticmethod
     def _local_checkpoint(path: str | Path) -> Path:
         """Require local files before calling loaders that may otherwise download weights."""
         checkpoint = Path(path)
@@ -428,7 +422,6 @@ class YoloClassifierModel(torch.nn.Module):
             network, _ = load_checkpoint(str(path), device="cpu", fuse=False)
         except TypeError as error:
             raise ValueError("Expected an Ultralytics classification checkpoint format") from error
-        cls._classification_head(network)
         return network
 
     @staticmethod

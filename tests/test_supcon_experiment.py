@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 import numpy as np
+from pydantic import ValidationError
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -25,7 +26,7 @@ from scripts.train_supcon import (
     SupConExperiment,
     TrainingConfiguration,
 )
-from smartrodent.supcon_datasets import (
+from smartrodent.datasets import (
     ImageDataset,
     MultiViewImageDataset,
     collate_views,
@@ -287,13 +288,13 @@ def test_interrupted_checkpoint_preserves_last_complete_state(
 @pytest.mark.parametrize(
     "updates,message",
     [
-        ({"epochs": 0}, "positive integers"),
-        ({"epochs": True}, "positive integers"),
+        ({"epochs": 0}, "epochs"),
+        ({"epochs": True}, "epochs"),
         ({"workers": -1}, "workers"),
-        ({"class_names": "mouse"}, "sequence"),
-        ({"class_names": ("", "rat")}, "nonempty strings"),
+        ({"class_names": "mouse"}, "class_names"),
+        ({"class_names": ("", "rat")}, "class_names"),
         ({"class_names": ("rat", "rat")}, "unique"),
-        ({"classes_per_batch": 1}, "between 2"),
+        ({"classes_per_batch": 1}, "classes_per_batch"),
         ({"classes_per_batch": 3}, "between 2"),
         ({"samples_per_epoch": 1}, "full batch"),
         ({"optimizer": {"lr": float("nan")}}, "optimizer.lr"),
@@ -456,27 +457,20 @@ def test_early_stopping_stops_after_patience_values_without_new_best(
 
 
 @pytest.mark.parametrize(
-    "document,error,message",
+    "document,location",
     [
-        ([], TypeError, "scheduler must be a mapping"),
-        ({"name": "ReduceLROnPlateau"}, ValueError, "exactly name and parameters"),
-        ({"name": "StepLR", "parameters": {}}, ValueError, "scheduler.name"),
-        (
-            {"name": "ReduceLROnPlateau", "parameters": []},
-            TypeError,
-            "parameters must be a mapping",
-        ),
-        (
-            {"name": "ReduceLROnPlateau", "parameters": {"unknown": 1}},
-            ValueError,
-            "Unsupported",
-        ),
+        ([], ()),
+        ({"name": "ReduceLROnPlateau"}, ("parameters",)),
+        ({"name": "StepLR", "parameters": {}}, ("name",)),
+        ({"name": "ReduceLROnPlateau", "parameters": []}, ("parameters",)),
+        ({"name": "ReduceLROnPlateau", "parameters": {"unknown": 1}}, ("parameters", "unknown")),
     ],
 )
-def test_invalid_scheduler_mapping_fails(document, error, message):
-    """Malformed scheduler settings fail before creating a training run."""
-    with pytest.raises(error, match=message):
+def test_invalid_scheduler_mapping_fails(document, location):
+    """Malformed scheduler settings identify the rejected section before training."""
+    with pytest.raises(ValidationError) as error:
         SchedulerConfiguration.from_mapping(document)
+    assert location in [item["loc"] for item in error.value.errors()]
 
 
 @pytest.mark.parametrize(
@@ -503,8 +497,9 @@ def test_invalid_scheduler_mapping_fails(document, error, message):
 )
 def test_invalid_scheduler_parameters_fail(parameters):
     """Native numeric parameters have explicit finite-value and range checks."""
-    with pytest.raises(ValueError, match="scheduler.parameters"):
+    with pytest.raises(ValidationError) as error:
         SchedulerConfiguration("ReduceLROnPlateau", parameters)
+    assert any(next(iter(parameters)) in item["loc"] for item in error.value.errors())
 
 
 def test_scheduler_training_requirements(experiment_configuration):
@@ -512,7 +507,7 @@ def test_scheduler_training_requirements(experiment_configuration):
     scheduler = SchedulerConfiguration("ReduceLROnPlateau", {"mode": "min"})
     with pytest.raises(ValueError, match="validation_dataset"):
         replace(experiment_configuration, scheduler=scheduler)
-    with pytest.raises(TypeError, match="SchedulerConfiguration"):
+    with pytest.raises(ValidationError, match="scheduler"):
         replace(
             experiment_configuration,
             validation_dataset=experiment_configuration.train_dataset,

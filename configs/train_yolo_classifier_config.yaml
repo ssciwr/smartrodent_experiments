@@ -1,43 +1,34 @@
-train_dataset: datasets/stage8_yolo_classifier
+train_dataset: datasets/stage8_yolo_classifier_srilanka
 model_name: yolo26x-cls.pt
 include_macro_f1: true
 return_format: dataframe
 mlflow:
   tracking_uri: sqlite:///mlflow.db
-  train_experiment_name: smartrodent-yolo-classifier-training-with-autoaugment-with-classweighting
+  train_experiment_name: smartrodent-yolo-classifier-training-with-autoaugment-with-classweighting-xl_speciesnames_448_reduced_augmentation
   tune_experiment_name: smartrodent-yolo-classifier-tuning
   # artifact_location: runs/classify/tuning
 train_kwargs:
   epochs: 200
-  imgsz: 220
+  imgsz: 448
   batch: 48
   device: 0
   workers: 10
   patience: 10
   warmup_epochs: 3.0
   optimizer: "auto"
-  project: ./projects/training/classification/xl_speciesnames_220
-  name: full_data_classifier_xl_220
+  project: ./training/classification/xl_speciesnames_448_reduced_augmentation
+  name: full_data_classifier_xl_speciesnames_448_reduced_augmentation
   exist_ok: true
   plots: true
   save: true
   val: true
-  scale: !sweep
-    - 0.0
-    - 0.3
-    - 0.6
-    - 0.9
-  fliplr: 0.5
-  flipud: 0.2
-  auto_augment: !sweep # randaugment, augmix, autoaugment, or null
-    - augmix
-    - randaugment
-    - autoaugment
-    - null
-  erasing: !sweep
-    - 0.0
-    - 0.3
-    - 0.6
+  # Closest YOLO classification equivalents to the SupCon transforms.
+  scale: 0.25 # RandomResizedCrop area range: [0.75, 1.0]
+  fliplr: 0.2
+  flipud: 0.0
+  # Sharpness, grayscale, and perspective cannot be configured individually for classification.
+  auto_augment: null
+  erasing: 0.0
   hsv_h: 0.
   hsv_s: 0.
   hsv_v: 0.
@@ -46,7 +37,7 @@ export_kwargs:
   format: "onnx"
 tune_kwargs:
   name: full_data_classifier_xl_220_tuning
-  project: ./projects/tuning/classification/xl_speciesnames_220
+  project: ./tuning/classification/xl_speciesnames_448
   epochs: 20
   imgsz: 220
   iterations: 100
