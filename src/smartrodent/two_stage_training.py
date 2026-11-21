@@ -12,7 +12,7 @@ from pathlib import Path
 import mlflow
 import yaml
 
-from scripts.train_supcon import SupConExperiment, TrainingConfiguration
+from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 from smartrodent import config_utils
 from smartrodent.classifier_training import ClassifierConfiguration
 from smartrodent.classifier_sweeps import ClassifierSweepConfiguration, ClassifierSweepExperiment
@@ -78,6 +78,8 @@ class TwoStageConfiguration:
             raise ValueError("SupCon sweep must use the same tracked metric")
         if any(config.effective_tracked_mode != reference.effective_tracked_mode for config in configurations):
             raise ValueError("SupCon sweep must use the same tracked mode/direction")
+        if any(config.tracked_metric_definition != reference.tracked_metric_definition for config in configurations):
+            raise ValueError("SupCon sweep must use the same tracked metric definition/function/options")
         object.__setattr__(self, "supcon_configurations", tuple(configurations))
         classifier_runs = config_utils.ConfigHandler({"classifier": deepcopy(self.classifier)}).run_configs
         classifier_root = self.output_directory / "classifier"
@@ -217,17 +219,7 @@ class TwoStageConfiguration:
         Returns:
             The shared sweep settings with concrete encoder paths for every run.
         """
-        checkpoint = checkpoint.resolve()
-        sweep = deepcopy(self._classifier_sweep)
-        # All other settings were already verified. Resolve only the deferred
-        # input on an independent copy, without rerunning configuration setup.
-        for configuration in sweep.configurations:
-            configuration.initialization["encoder"]["checkpoint"] = str(checkpoint)
-        validate_output_paths(
-            [configuration.output_directory for configuration in sweep.configurations],
-            sources=(checkpoint,), roots=(sweep.output_directory,),
-        )
-        return sweep
+        return self._classifier_sweep.with_supcon_encoder(checkpoint)
 
 
 @result_dataclass(frozen=True)
@@ -273,8 +265,10 @@ class TwoStageExperiment:
     """
 
     def __init__(self, configuration: TwoStageConfiguration):
-        """Keep training stages independent; no training or output creation happens here."""
+        """Prepare every stage's independent inputs before training or output creation."""
         self.configuration = configuration
+        self.supcon_experiments = tuple(SupConExperiment(candidate) for candidate in configuration.supcon_configurations)
+        self.classifiers = ClassifierSweepExperiment(configuration._classifier_sweep)
 
     def run(self) -> TwoStageResult:
         """Run all candidates, select best.pt, and train a fresh CE classifier.
@@ -313,8 +307,9 @@ class TwoStageExperiment:
         (root / "config.yaml").write_text(yaml.safe_dump(config.to_dict()), encoding="utf-8")
         results = []
         context = {"parent_run_id": run_id} if run_id is not None else {}
-        for candidate in config.supcon_configurations:
-            result = SupConExperiment(candidate).run_with_result(**context)
+        for experiment in self.supcon_experiments:
+            candidate = experiment.configuration
+            result = experiment.run_with_result(**context)
             if result.tracked_metric != candidate.effective_tracked_metric:
                 raise ValueError("SupCon result tracked metric does not match configuration")
             if result.tracked_mode != candidate.effective_tracked_mode:
@@ -338,9 +333,8 @@ class TwoStageExperiment:
             "encoder_tracked_mode": selected.tracked_mode, "encoder_best_value": selected.best_value,
             "pipeline_run_id": run_id,
         }
-        classifiers = ClassifierSweepExperiment(
-            config.classifier_sweep_configuration(selected.best_checkpoint), encoder_provenance=encoder_provenance,
-        ).run(**context)
+        self.classifiers.bind_supcon_encoder(selected.best_checkpoint, encoder_provenance)
+        classifiers = self.classifiers.run(**context)
         classifier_report = classifiers.to_dict()
         for name in ("classifier_results", "selected_classifier", "registered_champion_version"):
             summary[name] = classifier_report[name]

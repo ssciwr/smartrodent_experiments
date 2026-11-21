@@ -16,7 +16,7 @@ import pytest
 import torch
 import yaml
 
-from scripts.train_supcon import SupConExperiment, TrainingConfiguration
+from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 from smartrodent.classifier_model import YoloClassifierModel
 from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
 from smartrodent.experiment_support import MlflowConfiguration

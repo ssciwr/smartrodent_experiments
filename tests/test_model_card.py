@@ -12,7 +12,7 @@ import pytest
 import torch
 import yaml
 
-from scripts import train_supcon
+from smartrodent import supcon_training as train_supcon
 from smartrodent.model_card import load_card_template, render_model_card, write_model_card
 from test_supcon_experiment import experiment_configuration
 

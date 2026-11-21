@@ -14,7 +14,7 @@ from hypothesis import HealthCheck, given, settings, strategies as st
 import pytest
 import yaml
 
-from scripts.train_supcon import TrainingConfiguration
+from smartrodent.supcon_training import TrainingConfiguration
 from smartrodent.classifier_training import ClassifierConfiguration
 from smartrodent.experiment_support import EarlyStopping, MlflowConfiguration, SchedulerConfiguration
 

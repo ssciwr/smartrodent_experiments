@@ -2,12 +2,6 @@
 
 import argparse
 from pathlib import Path
-import sys
-
-# SupCon's trusted trainer still lives under scripts, outside the installed src
-# package. Make the repository importable when invoked as python scripts/... .
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from smartrodent.two_stage_training import TwoStageConfiguration, TwoStageExperiment
 
 

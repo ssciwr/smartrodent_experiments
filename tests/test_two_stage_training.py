@@ -15,7 +15,7 @@ import pytest
 import torch
 import yaml
 
-from scripts.train_supcon import SupConExperiment
+from smartrodent.supcon_training import SupConExperiment
 from smartrodent.classifier_model import YoloClassifierModel
 from smartrodent.classifier_training import ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult

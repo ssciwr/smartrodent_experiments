@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
+from functools import cached_property
 from pathlib import Path
 from pydantic import ConfigDict, StrictBool
 from pydantic.dataclasses import dataclass
@@ -37,7 +38,7 @@ from smartrodent.training_validation import (
     NonnegativeInt, OptimizerSettings, Seed, StoppingSettings, TransformSettings, ValidationMetrics,
     parse_settings, settings_dict, validate_output_paths,
 )
-from smartrodent.model_card import load_card_template, write_model_card
+from smartrodent.model_card import load_training_template, write_training_card
 from smartrodent.datasets import ImageDataset
 
 
@@ -183,13 +184,25 @@ class ClassifierExperiment:
         self.encoder_provenance = deepcopy(dict(encoder_provenance or {}))
         self.transforms = ImageTransforms(configuration.transforms)
         self.scorers = resolve_validation_metrics(configuration.validation_metrics)
-        self.card_template = load_card_template(Path(configuration.model_card_template))
-        self.document = configuration.to_dict()
+        self.card_template = load_training_template(Path(configuration.model_card_template))
         self.training_dataset = self._dataset(configuration.train_dataset, training=True)
         self.validation_dataset = (
             self._dataset(configuration.validation_dataset, training=False)
             if configuration.validation_dataset is not None else None
         )
+
+    @cached_property
+    def champion_registry(self) -> ClassifierChampionRegistry | None:
+        """Return the owned registry/client, creating it only when first needed.
+
+        Returns:
+            Registry for this classifier's comparison identity, or None when disabled.
+        """
+        config = self.configuration
+        if config.mlflow is None or config.mlflow.registered_model_name is None:
+            return None
+        else:
+            return ClassifierChampionRegistry(config.mlflow, config.tracked_metric_definition, config.class_names)
 
     def _dataset(self, path: Path, *, training: bool) -> ImageDataset:
         """Reuse the existing class mapping and single-view dataset, rejecting empty classes."""
@@ -297,8 +310,9 @@ class ClassifierExperiment:
         )
         with context as run:
             run_id = run.info.run_id if run is not None else None
+            source_tags = config.mlflow.run_tags() if config.mlflow is not None else {"git_commit": _git_commit()}
             if config.mlflow is not None:
-                mlflow.set_tags(config.mlflow.run_tags())
+                mlflow.set_tags(source_tags)
                 mlflow.log_params(
                     {
                         "tracked_metric": config.tracked_metric,
@@ -309,7 +323,7 @@ class ClassifierExperiment:
             snapshot = torch.load(result.best_checkpoint, map_location="cpu", weights_only=True)
             with result.best_checkpoint.open("rb") as stream:
                 checksum = hashlib.file_digest(stream, "sha256").hexdigest()
-            self._write_model_card(result.best_checkpoint, snapshot, run_id, checksum)
+            self._write_model_card(result.best_checkpoint, snapshot, run_id, checksum, provenance=source_tags)
             if config.mlflow is not None:
                 prefix = (
                     "best_validation_"
@@ -322,16 +336,18 @@ class ClassifierExperiment:
                     step=result.best_epoch,
                 )
                 mlflow.log_metric("best_epoch", result.best_epoch)
-                if config.mlflow.registered_model_name is not None:
-                    version = self._publish_best_model(result, snapshot, checksum)
+                if self.champion_registry is not None:
+                    version = self._publish_best_model(result, snapshot, checksum, source_tags)
                     result = replace(result, registered_model_version=version)
                     if not defer_promotion:
-                        ClassifierChampionRegistry(config.mlflow, config.tracked_metric_definition, config.class_names).promote(result)
+                        self.champion_registry.promote(result)
                 else:
                     config.mlflow.log_best_artifacts(result.best_checkpoint)
             return result
 
-    def _publish_best_model(self, result: ExperimentResult, snapshot: Mapping, checksum: str) -> str:
+    def _publish_best_model(
+        self, result: ExperimentResult, snapshot: Mapping, checksum: str, source_tags: Mapping,
+    ) -> str:
         """Restore best.pt independently of the final epoch and publish that trained classifier."""
         config = self.configuration
         checkpoint = result.best_checkpoint
@@ -340,16 +356,17 @@ class ClassifierExperiment:
         def write_card(version, identity):
             """Complete local and run-level cards before registry alias promotion."""
             paths = self._write_model_card(
-                checkpoint, snapshot, result.mlflow_run_id, checksum, version=version, provenance=identity,
+                checkpoint, snapshot, result.mlflow_run_id, checksum, version=version,
+                provenance={**source_tags, **identity},
             )
             config.mlflow.log_best_artifacts(checkpoint)
             return paths
 
-        registry = ClassifierChampionRegistry(config.mlflow, config.tracked_metric_definition, config.class_names)
-        return ModelPublication(config.mlflow).publish(
+        registry = self.champion_registry
+        return ModelPublication(config.mlflow, registry.client).publish(
             model, best_epoch=result.best_epoch,
             validated=config.validation_dataset is not None,
-            tags={**snapshot["provenance"], **config.mlflow.run_tags(), **registry.comparison_tags(result)},
+            tags={**snapshot["provenance"], **source_tags, **registry.comparison_tags(result)},
             write_card=write_card, promote=False,
         )
 
@@ -364,11 +381,12 @@ class ClassifierExperiment:
             labels, images = labels.to(device), images.to(device)
             optimizer.zero_grad(set_to_none=True)
             loss = torch.nn.functional.cross_entropy(model(images), labels)
-            if not torch.isfinite(loss):
+            loss_value = loss.item()
+            if not math.isfinite(loss_value):
                 raise FloatingPointError("Training CE loss must be finite")
             loss.backward()
             optimizer.step()
-            total += loss.item() * len(labels)
+            total += loss_value * len(labels)
             count += len(labels)
         return total / count
 
@@ -419,7 +437,7 @@ class ClassifierExperiment:
                 else None
             )
             store = CheckpointStore(config.output_directory)
-            document = self.document
+            document = config.to_dict()
             (store.output_directory / "config.yaml").write_text(
                 yaml.safe_dump(document), encoding="utf-8"
             )
@@ -490,33 +508,18 @@ class ClassifierExperiment:
     ) -> tuple[Path, Path]:
         """Describe the selected snapshot rather than the last completed epoch."""
         config = self.configuration
-        card = deepcopy(self.card_template)
-        card["model"].update(
-            name=(config.mlflow.registered_model_name if config.mlflow else None) or Path(config.output_directory).name,
-            registry_version=version,
-            base_model=str(config.initialization["encoder"]["checkpoint"]),
-            task="image-classification",
+        return write_training_card(
+            self.card_template, checkpoint, snapshot,
+            model_details={
+                "name": (config.mlflow.registered_model_name if config.mlflow else None) or config.output_directory.name,
+                "registry_version": version,
+                "base_model": str(config.initialization["encoder"]["checkpoint"]),
+                "task": "image-classification",
+            },
+            validation_dataset=config.validation_dataset,
+            provenance={
+                **snapshot["provenance"], "checkpoint_sha256": checksum, "run_id": run_id,
+                "dataset_revision": config.mlflow.dataset_revision if config.mlflow else None,
+                **(provenance or {}),
+            },
         )
-        card["classes"] = {
-            index: name for name, index in snapshot["label_names"].items()
-        }
-        metrics = snapshot["history"][-1].get("validation", {})
-        card["validation"].update(
-            status="evaluated" if metrics else "not_validated",
-            dataset=str(config.validation_dataset)
-            if config.validation_dataset
-            else None,
-            epoch=snapshot["epoch"],
-            metrics=metrics,
-        )
-        card["provenance"].update(
-            **snapshot["provenance"],
-            checkpoint=checkpoint.name,
-            checkpoint_sha256=checksum,
-            epoch=snapshot["epoch"],
-            run_id=run_id,
-            git_commit=_git_commit(),
-            dataset_revision=config.mlflow.dataset_revision if config.mlflow else None,
-        )
-        card["provenance"].update(provenance or {})
-        return write_model_card(card, checkpoint)

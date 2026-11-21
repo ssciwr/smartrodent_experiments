@@ -8,7 +8,6 @@ from pathlib import Path
 import yaml
 
 from smartrodent import config_utils
-from smartrodent.classifier_champions import ClassifierChampionRegistry
 from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
 from smartrodent.training_validation import validate_output_paths
@@ -103,6 +102,25 @@ class ClassifierSweepConfiguration:
                 raise ValueError(f"Invalid classifier settings: {error}") from error
         return cls(output_directory, tuple(configurations), document)
 
+    def with_supcon_encoder(self, checkpoint: Path) -> "ClassifierSweepConfiguration":
+        """Resolve a selected encoder without reconstructing verified stage settings.
+
+        Args:
+            checkpoint: Winning SupCon candidate's best checkpoint.
+
+        Returns:
+            Independent settings with only their encoder input changed.
+        """
+        checkpoint = checkpoint.resolve()
+        sweep = deepcopy(self)
+        for configuration in sweep.configurations:
+            configuration.initialization["encoder"] = {"source": "supcon", "checkpoint": str(checkpoint)}
+        validate_output_paths(
+            [configuration.output_directory for configuration in sweep.configurations],
+            sources=(checkpoint,), roots=(sweep.output_directory,),
+        )
+        return sweep
+
     @staticmethod
     def _validation_path(path: Path | None) -> Path | None:
         """Treat aliases of the same validation directory as the same input."""
@@ -161,6 +179,23 @@ class ClassifierSweepExperiment:
         """Retain preparation separately from expensive training and filesystem writes."""
         self.configuration = configuration
         self.encoder_provenance = deepcopy(dict(encoder_provenance or {}))
+        self.experiments = tuple(
+            ClassifierExperiment(candidate, encoder_provenance=self.encoder_provenance)
+            for candidate in configuration.configurations
+        )
+
+    def bind_supcon_encoder(self, checkpoint: Path, encoder_provenance: Mapping) -> None:
+        """Bind the deferred input while retaining all prepared classifier resources.
+
+        Args:
+            checkpoint: Winning SupCon candidate's best checkpoint.
+            encoder_provenance: Selected encoder and parent-run metadata.
+        """
+        self.configuration = self.configuration.with_supcon_encoder(checkpoint)
+        self.encoder_provenance = deepcopy(dict(encoder_provenance))
+        for experiment, configuration in zip(self.experiments, self.configuration.configurations, strict=True):
+            experiment.configuration = configuration
+            experiment.encoder_provenance = deepcopy(self.encoder_provenance)
 
     def run(self, *, parent_run_id: str | None = None) -> ClassifierSweepResult:
         """Train every variant, save all results, and compare the validated winner.
@@ -184,22 +219,21 @@ class ClassifierSweepExperiment:
         self._write_summary(summary_path, ClassifierSweepResult(root, (), None))
         (root / "config.yaml").write_text(yaml.safe_dump(dict(configuration.document)), encoding="utf-8")
         results = []
-        for candidate in configuration.configurations:
+        for experiment in self.experiments:
+            candidate = experiment.configuration
             context = {"parent_run_id": parent_run_id} if parent_run_id is not None else {}
             if candidate.mlflow is not None and candidate.mlflow.registered_model_name is not None:
                 context["defer_promotion"] = True
-            result = ClassifierExperiment(candidate, encoder_provenance=self.encoder_provenance).run_with_result(**context)
+            result = experiment.run_with_result(**context)
             self._validate_result(candidate, result)
             results.append(result)
             self._write_summary(summary_path, ClassifierSweepResult(root, tuple(results), None))
         selected = select_best_experiment(results) if results[0].validation_dataset is not None else None
         champion_version = None
         if selected is not None:
-            candidate = configuration.configurations[results.index(selected)]
-            if candidate.mlflow is not None and candidate.mlflow.registered_model_name is not None:
-                champion_version = ClassifierChampionRegistry(
-                    candidate.mlflow, candidate.tracked_metric_definition, candidate.class_names,
-                ).promote(selected)
+            registry = self.experiments[results.index(selected)].champion_registry
+            if registry is not None:
+                champion_version = registry.promote(selected)
         report = ClassifierSweepResult(root, tuple(results), selected, champion_version)
         self._write_summary(summary_path, report)
         return report

@@ -48,7 +48,6 @@ class YoloSupConModel(torch.nn.Module):
             self.full_model.model.model[f].requires_grad_(False)
 
         self.head = self.full_model.model.model[-1]
-        self.handle = self.head.pool.register_forward_hook(capture_pool_output)
         self.projector = torch.nn.Sequential(
             torch.nn.Dropout(p=dropout, inplace=True),
             torch.nn.Linear(
@@ -57,6 +56,8 @@ class YoloSupConModel(torch.nn.Module):
                 bias=True,
             ),
         )
+        # Acquire the hook only after all model components were constructed.
+        self.handle = self.head.pool.register_forward_hook(capture_pool_output)
 
     def train(self, mode: bool = True):
         """Set the network, projector, and wrapper training mode.

@@ -20,8 +20,8 @@ from PIL import Image
 from pytorch_metric_learning.losses import SupConLoss
 from torchvision.transforms.v2 import Compose, PILToTensor, ToDtype
 
-from scripts import train_supcon
-from scripts.train_supcon import (
+from smartrodent import supcon_training as train_supcon
+from smartrodent.supcon_training import (
     SchedulerConfiguration,
     SupConExperiment,
     TrainingConfiguration,
