@@ -1,10 +1,10 @@
-# Run from the repository root with the project virtual environment activated:
 # python scripts/train_classifier.py configs/train_classifier_config.yaml
-# This trains four classifiers from one existing SupCon encoder; no SupCon stage runs.
-output_directory: runs/classifier_xl_srilanka
-train_dataset: datasets/stage8_yolo_classifier_srilanka/train
-validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
-class_names:
+# Sweepable values: scalar | !sweep {values: [...]}.
+# !coupled-sweep pairs values with another sweep identified by its full dotted path.
+output_directory: runs/classifier_xl_srilanka  # Directory path.
+train_dataset: datasets/stage8_yolo_classifier_srilanka/train  # Class-folder split path.
+validation_dataset: datasets/stage8_yolo_classifier_srilanka/val  # Split path | null.
+class_names:  # List of unique species-directory names.
   - Rattus rattus
   - Rattus norvegicus
   - Bandicota bengalensis
@@ -34,92 +34,88 @@ class_names:
 
 initialization:
   encoder:
+    # supcon (SupCon checkpoint) | ultralytics (native YOLO) | classifier (portable CE)
     source: supcon
+    # Local checkpoint path; format selected by source.
     checkpoint: /home/hmack/projects/smartrodent_experiments/runs/two_stage_xl_srilanka/supcon/run_001/best.pt
   head:
-    replace: !sweep
+    replace: !sweep  # linear (final Linear layer) | full (entire Classify block)
       values: [linear, full]
-    source: !sweep
+    source: !sweep  # random (fresh weights) | yolo_checkpoint (donor weights)
       values: [random, yolo_checkpoint]
-    # A random head must not have a donor. The existing native Sri Lanka
-    # classifier below has the exact 26 target labels in the correct order;
-    # stock yolo26x-cls.pt has 1000 ImageNet labels and is NOT a valid head donor.
-    checkpoint: !coupled-sweep
-      target: initialization.head.source
+    checkpoint: !coupled-sweep  # null (random) | native YOLO classifier checkpoint path
+      target: initialization.head.source  # Full dotted path of the paired sweep.
       values:
         - null
         - runs/classify/training/classification/xl_speciesnames_srilanka/full_data_classifier_xl_640/weights/best.pt
 
-# Freeze everything before the selected head boundary. Set false to fine-tune.
-freeze_encoder: true
-encoder_batchnorm: eval  # eval | adapt
-# For multiple configurations, outputs are placed in run_001, run_002, etc.
-epochs: 30
-batch_size: 48
-workers: 20
-device: cuda
-seed: 42
-transforms:
-  image_size: 640
+freeze_encoder: true  # true (freeze encoder parameters) | false (fine-tune).
+encoder_batchnorm: eval  # eval (fixed statistics) | adapt (update statistics).
+epochs: 30  # Integer >0.
+batch_size: 48  # Integer >0; single-view CE batch size.
+workers: 20  # Integer >=0; 0=main process, >0=worker processes.
+device: cuda  # cpu | cuda | cuda:N | another available PyTorch device.
+seed: 42  # Integer in [0, 2**32).
+transforms:  # torchvision v2 keyword arguments.
+  image_size: 640  # Integer >0; square image size.
   resize:
-    interpolation: bilinear
-    antialias: true
+    interpolation: bilinear  # nearest | nearest-exact | bilinear | bicubic
+    antialias: true  # true | false
   random_adjust_sharpness:
-    sharpness_factor: 0.5
-    p: 0.2
+    sharpness_factor: 0.5  # >=0: 0=blur, 1=unchanged, >1=sharpen.
+    p: 0.2  # Probability in [0, 1]: 0=off, 1=always.
   random_grayscale:
-    p: 0.2
+    p: 0.2  # Probability in [0, 1].
   random_perspective:
-    distortion_scale: 0.5
-    p: 0.2
-    interpolation: bilinear
-    fill: 0
+    distortion_scale: 0.5  # Float in [0, 1].
+    p: 0.2  # Probability in [0, 1].
+    interpolation: bilinear  # nearest | bilinear
+    fill: 0  # Scalar or per-channel fill values.
   random_horizontal_flip:
-    p: 0.2
+    p: 0.2  # Probability in [0, 1].
   random_resized_crop:
-    scale: [0.75, 1.0]
-    ratio: [0.75, 1.3333333333333333]
-    interpolation: bilinear
-    antialias: true
-optimizer:
-  lr: 0.001
-  betas: [0.9, 0.999]
-  eps: 1.0e-08
-  weight_decay: 0.01
-  amsgrad: false
-validation_metrics:
+    scale: [0.75, 1.0]  # [min, max] crop-area fractions.
+    ratio: [0.75, 1.3333333333333333]  # [min, max] aspect ratios.
+    interpolation: bilinear  # nearest | nearest-exact | bilinear | bicubic
+    antialias: true  # true | false
+optimizer:  # AdamW keyword arguments; also accepts native options such as foreach/fused.
+  lr: 0.001  # Float >0.
+  betas: [0.9, 0.999]  # Two moment-decay rates, each in [0, 1).
+  eps: 1.0e-08  # Nonnegative numerical-stability term.
+  weight_decay: 0.01  # Float >=0.
+  amsgrad: false  # true | false
+validation_metrics:  # Named sklearn scorer specifications | null (CE loss only).
   accuracy:
-    function: accuracy_score
+    function: accuracy_score  # sklearn.metrics function returning a scalar from labels.
   balanced_accuracy:
     function: balanced_accuracy_score
   f1_macro:
     function: f1_score
-    average: macro
-    zero_division: 0
-tracked_metric: balanced_accuracy
-tracked_mode: max
-scheduler:
-  name: ReduceLROnPlateau
+    average: macro  # binary | micro | macro | weighted
+    zero_division: 0  # warn | 0 | 1 | .nan
+tracked_metric: balanced_accuracy  # ce_loss_mean | a validation_metrics alias.
+tracked_mode: max  # min | max | null (infer direction).
+scheduler:  # Scheduler settings | null (constant learning rate).
+  name: ReduceLROnPlateau  # Supported scheduler: ReduceLROnPlateau.
   parameters:
-    mode: max
-    factor: 0.5
-    patience: 2
-    threshold: 0.0005
-    threshold_mode: abs
-    min_lr: 0.000001
-    cooldown: 0
-early_stopping:
-  patience: 6
-  tolerance: 0.001
-  comparison: greater
+    mode: max  # min | max
+    factor: 0.5  # Float strictly between 0 and 1.
+    patience: 2  # Integer >=0; bad epochs tolerated.
+    threshold: 0.0005  # Float >=0; improvement threshold.
+    threshold_mode: abs  # abs | rel
+    min_lr: 0.000001  # Float >=0; learning-rate floor.
+    cooldown: 0  # Integer >=0; cooldown epochs.
+    # eps: 1.0e-08  # Optional float >=0; minimum learning-rate change.
+early_stopping:  # Stopping settings | null (disabled).
+  patience: 6  # Integer >0; consecutive insufficient improvements.
+  tolerance: 0.001  # Float >=0; absolute improvement tolerance.
+  comparison: greater  # less (minimize) | greater (maximize)
+# model_card_template: configs/model_card_template.yaml  # Optional template path.
 
-# Each run registers its best validation checkpoint. After all four succeed,
-# only the sweep winner is compared with the existing registered champion.
-# An incompatible/legacy champion needs an explicit decision, not an overwrite.
-mlflow:
-  tracking_uri: sqlite:///mlflow.db
-  experiment_name: two-stage-sri-lanka-xl
-  registered_model_name: species-classifier-xl
-  model_artifact_name: species-classifier-xl
-  champion_alias: champion
-  # dataset_revision: <immutable-data-revision>
+mlflow:  # Tracking settings | null (disabled).
+  tracking_uri: sqlite:///mlflow.db  # MLflow tracking URI, e.g. SQLite or HTTP(S).
+  experiment_name: two-stage-sri-lanka-xl  # Nonempty experiment-name string.
+  registered_model_name: species-classifier-xl  # Nonempty model name | null (no registration).
+  model_artifact_name: species-classifier-xl  # Nonempty logged-model name.
+  champion_alias: champion  # Nonempty registered-model alias.
+  # dataset_revision: <immutable-data-revision>  # Optional nonempty revision string | null.

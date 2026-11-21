@@ -1,18 +1,18 @@
-# Run from the repository root:
 # python scripts/train_supcon.py configs/train_supcon_config.yaml
-train_dataset: datasets/stage8_yolo_classifier_srilanka/train
-validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
-output_directory: runs/supcon_standalone_xl_srilanka_lr-00001
-model_name: ./yolo26x-cls.pt
-mlflow:
-  tracking_uri: sqlite:///mlflow.db
-  experiment_name: lr-tau-supcon-xl
-  registered_model_name: species-classifier-encoder-xl
-  model_artifact_name: species-classifier-encoder-xl
-  champion_alias: champion
-  # Set this to the immutable DVC/data revision used for the run when available.
-  # dataset_revision: <revision>
-class_names:
+# Sweepable values: scalar | !sweep {values: [...]}.
+# !coupled-sweep pairs values with another sweep identified by its full dotted path.
+train_dataset: datasets/stage8_yolo_classifier_srilanka/train  # Class-folder split path.
+validation_dataset: datasets/stage8_yolo_classifier_srilanka/val  # Split path | null.
+output_directory: runs/supcon_standalone_xl_srilanka_lr-00001  # Directory path.
+model_name: ./yolo26x-cls.pt  # YOLO classification checkpoint (.pt) or architecture YAML.
+mlflow:  # Tracking settings | null (disabled).
+  tracking_uri: sqlite:///mlflow.db  # MLflow tracking URI, e.g. SQLite or HTTP(S).
+  experiment_name: lr-tau-supcon-xl  # Nonempty experiment-name string.
+  registered_model_name: species-classifier-encoder-xl  # Nonempty model name | null (no registration).
+  model_artifact_name: species-classifier-encoder-xl  # Nonempty logged-model name.
+  champion_alias: champion  # Nonempty registered-model alias.
+  # dataset_revision: <revision>  # Optional nonempty revision string | null.
+class_names:  # List of unique species-directory names.
   - Rattus rattus # brown rat
   - Bandicota bengalensis # lesser bandicot rat
   - Bandicota indica # greater bandicot rat
@@ -36,70 +36,73 @@ class_names:
   - Urva edwardsii # Indian grey mongoose
   - Felis catus # house cat
   - Canis familiaris # domestic dog
-epochs: 30
-transforms:
-  image_size: 448
+epochs: 30  # Integer >0.
+transforms:  # torchvision v2 keyword arguments.
+  image_size: 448  # Integer >0; square image size.
   resize:
-    interpolation: bilinear
-    antialias: true
+    interpolation: bilinear  # nearest | nearest-exact | bilinear | bicubic
+    antialias: true  # true | false
   random_adjust_sharpness:
-    sharpness_factor: 0.5
-    p: 0.2
+    sharpness_factor: 0.5  # >=0: 0=blur, 1=unchanged, >1=sharpen.
+    p: 0.2  # Probability in [0, 1]: 0=off, 1=always.
   random_grayscale:
-    p: 0.2
+    p: 0.2  # Probability in [0, 1].
   random_perspective:
-    distortion_scale: 0.5
-    p: 0.2
-    interpolation: bilinear
-    fill: 0
+    distortion_scale: 0.5  # Float in [0, 1].
+    p: 0.2  # Probability in [0, 1].
+    interpolation: bilinear  # nearest | bilinear
+    fill: 0  # Scalar or per-channel fill values.
   random_horizontal_flip:
-    p: 0.2
+    p: 0.2  # Probability in [0, 1].
   random_resized_crop:
-    scale: [0.75, 1.0]
-    ratio: [0.75, 1.3333333333333333]
-    interpolation: bilinear
-    antialias: true
-optimizer:
-  lr: 0.0001
-  betas: [0.9, 0.999]
-  eps: 1.0e-08
-  weight_decay: 0.01
-  amsgrad: false
-classes_per_batch: 8
-samples_per_class: 6
-# Matches the notebook sampler's default; rounded down to complete source batches.
-samples_per_epoch: 100000
-workers: 20
-prefetch_factor: 4
-seed: 42
-device: cuda
-dropout: 0.0
-output_features: 128
-temperature: 0.1
-freeze: []
-log_every: 10
-validation_metrics:
+    scale: [0.75, 1.0]  # [min, max] crop-area fractions.
+    ratio: [0.75, 1.3333333333333333]  # [min, max] aspect ratios.
+    interpolation: bilinear  # nearest | nearest-exact | bilinear | bicubic
+    antialias: true  # true | false
+optimizer:  # AdamW keyword arguments; also accepts native options such as foreach/fused.
+  lr: 0.0001  # Float >0.
+  betas: [0.9, 0.999]  # Two moment-decay rates, each in [0, 1).
+  eps: 1.0e-08  # Nonnegative numerical-stability term.
+  weight_decay: 0.01  # Float >=0.
+  amsgrad: false  # true | false
+classes_per_batch: 8  # Integer >=2; distinct classes per batch (P).
+samples_per_class: 6  # Integer >=1; source images per class (M).
+samples_per_epoch: 100000  # Integer >=P*M; source-image selections per epoch.
+workers: 20  # Integer >=0; 0=main process, >0=worker processes.
+prefetch_factor: 4  # Integer >0; batches prefetched per worker.
+seed: 42  # Integer in [0, 2**32).
+device: cuda  # cpu | cuda | cuda:N | another available PyTorch device.
+dropout: 0.0  # Projection-head dropout probability in [0, 1].
+output_features: 128  # Integer >0; projection dimension.
+temperature: 0.1  # Float >0; SupCon temperature.
+freeze: []  # List of layer indices: []=none frozen, e.g. [0, 1].
+log_every: 10  # Integer >0; progress-log interval in steps.
+validation_metrics:  # Named sklearn scorer specifications | null (native losses only).
   accuracy:
-    function: accuracy_score
+    function: accuracy_score  # sklearn.metrics function returning a scalar from labels.
   balanced_accuracy:
     function: balanced_accuracy_score
   f1_macro:
     function: f1_score
-    average: macro
-    zero_division: 0
-tracked_metric: supcon_loss_mean # not defined means track supcon_loss
-scheduler:
-  name: ReduceLROnPlateau
+    average: macro  # binary | micro | macro | weighted
+    zero_division: 0  # warn | 0 | 1 | .nan
+# Options: supcon_loss_min | supcon_loss_mean | supcon_loss_std |
+# supcon_loss_max | a validation_metrics alias | null (default: supcon_loss_mean).
+tracked_metric: supcon_loss_mean
+# tracked_mode: null  # Optional: min | max | null (infer direction).
+scheduler:  # Scheduler settings | null (constant learning rate).
+  name: ReduceLROnPlateau  # Supported scheduler: ReduceLROnPlateau.
   parameters:
-    mode: min
-    factor: 0.5
-    # PyTorch reduces after patience + 1 non-improving epochs.
-    patience: 2
-    threshold: 0.001
-    threshold_mode: abs
-    min_lr: 0.000001
-    cooldown: 0
-early_stopping:
-  patience: 6
-  tolerance: 0.005
-  comparison: less
+    mode: min  # min | max
+    factor: 0.5  # Float strictly between 0 and 1.
+    patience: 2  # Integer >=0; bad epochs tolerated.
+    threshold: 0.001  # Float >=0; improvement threshold.
+    threshold_mode: abs  # abs | rel
+    min_lr: 0.000001  # Float >=0; learning-rate floor.
+    cooldown: 0  # Integer >=0; cooldown epochs.
+    # eps: 1.0e-08  # Optional float >=0; minimum learning-rate change.
+early_stopping:  # Stopping settings | null (disabled).
+  patience: 6  # Integer >0; consecutive insufficient improvements.
+  tolerance: 0.005  # Float >=0; absolute improvement tolerance.
+  comparison: less  # less (minimize) | greater (maximize)
+# model_card_template: configs/model_card_template.yaml  # Optional template path.
