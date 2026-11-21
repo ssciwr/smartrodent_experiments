@@ -64,7 +64,9 @@ compromising functionality or best practices and without violating the requireme
     - liskov substitution: derived- or child classes must be able to replace their parent classes, i.e., child classes should extend the parent classes without breaking the behavioral contract
     - interface segregation: A client should not be forced to depend on parts of an interface that is not relevant to it
     - dependency inversion: Higher-level elements of the code should not depend on lower-level elements of the code, both should depend on abstractions that define behavior, not restrict implementation.
-- keep control flow and data flow as flat as possible. Go with the minimum amount of hierarchical dept that solves the problem at hand.
+- Use the DRY principle. Avoid repetition.
+- Use the KISS principle. Avoid complexity and complicated structures wherever possible, keep things simple.
+- keep control flow and data flow as flat as possible. Go with the minimum amount of hierarchical depth that solves the problem at hand.
 - avoid module-level variables
 - use classes as soon as data and functions work together to create a functionality
 - avoid deeply nested branching
