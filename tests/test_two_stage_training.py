@@ -16,7 +16,7 @@ import torch
 import yaml
 
 from smartrodent.supcon_training import SupConExperiment
-from smartrodent.classifier_model import YoloClassifierModel
+from ultralytics import YOLO
 from smartrodent.classifier_training import ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult
 
@@ -80,9 +80,12 @@ def pipeline_document(tmp_path):
                 "encoder": {"source": "selected_supcon"},
                 "head": {"replace": "linear", "source": "random"},
             },
-            "freeze_encoder": True, "encoder_batchnorm": "eval",
+            "encoder_batchnorm": "eval",
             "epochs": 2, "batch_size": 3, "workers": 0, "device": "cpu", "seed": 29,
-            "transforms": classifier_transforms, "optimizer": {"lr": 0.004},
+            "transforms": classifier_transforms,
+            "train_kwargs": {"optimizer": "AdamW", "lr0": 0.004, "lrf": 1.0,
+                             "warmup_epochs": 0.0, "nbs": 1, "patience": 0,
+                             "amp": False, "plots": False},
             "tracked_metric": "ce_loss_mean", "tracked_mode": "min",
         },
     }
@@ -129,9 +132,10 @@ def recorded_stages(monkeypatch):
             raise RuntimeError("deliberate classifier failure")
         directory = Path(config.output_directory)
         directory.mkdir(parents=True, exist_ok=True)
-        best, last = directory / "best.pt", directory / "last.pt"
-        torch.save({"checkpoint_type": "classifier", "epoch": 1}, best)
-        torch.save({"checkpoint_type": "classifier", "epoch": 2}, last)
+        (directory / "weights").mkdir(exist_ok=True)
+        best, last = directory / "weights/best.pt", directory / "weights/last.pt"
+        torch.save({"epoch": 1}, best)
+        torch.save({"epoch": 2}, last)
         return ExperimentResult(
             output_directory=directory, last_checkpoint=last, best_checkpoint=best,
             best_epoch=1, best_value=0.4, tracked_metric=config.tracked_metric,
@@ -182,12 +186,7 @@ def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
     document["supcon"]["early_stopping"] = {
         "patience": 5, "tolerance": 0.01, "comparison": "less" if mode == "min" else "greater",
     }
-    document["classifier"]["scheduler"] = {
-        "name": "ReduceLROnPlateau", "parameters": {"mode": "min", "patience": 3, "factor": 0.2},
-    }
-    document["classifier"]["early_stopping"] = {
-        "patience": 4, "tolerance": 0.02, "comparison": "less",
-    }
+    document["classifier"]["train_kwargs"].update(patience=4, cos_lr=True, lrf=0.2)
     recorded_stages.values = values
     config = _configuration(pipeline_api, document)
     before = deepcopy(config.to_dict())
@@ -215,16 +214,19 @@ def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
     assert result.classifier_result.best_value == 0.4
     assert [item.optimizer["lr"] for item in recorded_stages.supcon] == [0.001, 0.002, 0.003]
     assert all(item.seed == 11 and item.temperature == 0.1 for item in recorded_stages.supcon)
-    assert classifier.seed == 29 and classifier.optimizer == {"lr": 0.004}
-    assert classifier.batch_size == 3 and classifier.freeze_encoder
+    assert classifier.seed == 29 and classifier.train_kwargs == document["classifier"]["train_kwargs"]
+    assert classifier.batch_size == 3
     assert classifier.encoder_batchnorm == "eval"
     assert classifier.initialization["head"] == document["classifier"]["initialization"]["head"]
     for stage in [*recorded_stages.supcon, classifier]:
         stage_settings = document["classifier"] if stage is classifier else document["supcon"]
         assert stage.transforms == stage_settings["transforms"]
-        assert stage.scheduler.name == stage_settings["scheduler"]["name"]
-        assert stage.scheduler.parameters == stage_settings["scheduler"]["parameters"]
-        assert stage.early_stopping == stage_settings["early_stopping"]
+        if stage is classifier:
+            assert stage.train_kwargs == stage_settings["train_kwargs"]
+        else:
+            assert stage.scheduler.name == stage_settings["scheduler"]["name"]
+            assert stage.scheduler.parameters == stage_settings["scheduler"]["parameters"]
+            assert stage.early_stopping == stage_settings["early_stopping"]
         assert stage.train_dataset == Path(document["data"]["train_dataset"])
         assert stage.validation_dataset == Path(document["data"]["validation_dataset"])
         assert stage.class_names == ("rat", "mouse")
@@ -264,6 +266,26 @@ def test_failed_supcon_candidate_stops_without_selecting_a_partial_sweep(
     assert not (root / "selection.yaml").exists()
     for index in range(fail_at):
         assert torch.load(root / "supcon" / f"run_{index + 1:03d}" / "best.pt", weights_only=True)["candidate"] == index
+
+
+def test_non_yolo_head_is_rejected_before_any_supcon_candidate(
+    pipeline_api, pipeline_document, recorded_stages, tmp_path
+):
+    """Even a later unsupported head must fail during preparation, not after training."""
+    valid = tmp_path / "valid-head.pt"
+    YOLO(pipeline_document["supcon"]["model_name"], task="classify").save(valid)
+    unsupported = tmp_path / "unsupported-head.pt"
+    model = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(3 * 16 * 16, 2))
+    model.names = {0: "mouse", 1: "rat"}
+    torch.save({"model": model, "train_args": {"task": "classify"}}, unsupported)
+    pipeline_document["classifier"]["initialization"]["head"] = {
+        "replace": "full", "source": "yolo_checkpoint",
+        "checkpoint": {"type": "sweep", "values": [str(valid), str(unsupported)]},
+    }
+    with pytest.raises(NotImplementedError, match="YOLO|support"):
+        pipeline_api.TwoStageExperiment(_configuration(pipeline_api, pipeline_document)).run()
+    assert recorded_stages.events == []
+    assert not Path(pipeline_document["output_directory"]).exists()
 
 
 def test_classifier_failure_is_not_reported_as_a_completed_pipeline(
@@ -368,7 +390,7 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
         (("classifier", "initialization", "encoder", "checkpoint"), "some.pt", "encoder|checkpoint"),
         (("classifier", "initialization", "head", "replace"), "other", "replace"),
         (("classifier", "initialization", "head"), {"replace": "linear", "source": "yolo_checkpoint"}, "checkpoint"),
-        (("classifier", "scheduler"), {"name": "ReduceLROnPlateau", "parameters": {"mode": "max"}}, "direction|tracked_mode"),
+        (("classifier", "train_kwargs", "resume"), True, "resume"),
         (("supcon", "scheduler"), {"name": "ReduceLROnPlateau", "parameters": {"mode": "min"}}, "direction|tracked_mode"),
     ],
 )
@@ -442,7 +464,7 @@ def test_pipeline_tracking_settings_are_owned_by_the_root(
     [
         ("model", "config.yaml"), ("model", "selection.yaml"),
         ("model", "supcon/run_001/best.pt"),
-        ("head", "classifier/best.pt"),
+        ("head", "classifier/weights/best.pt"),
     ],
 )
 def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
@@ -470,21 +492,21 @@ def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
 @given(
     rates=st.lists(st.sampled_from([0.001, 0.002, 0.003]), min_size=1, max_size=4),
     mode=st.sampled_from(["min", "max"]),
-    freeze=st.booleans(),
+    batchnorm=st.sampled_from(["eval", "adapt"]),
 )
 def test_configuration_round_trip_preserves_sweep_order_and_classifier_policy(
-    pipeline_api, pipeline_document, rates, mode, freeze
+    pipeline_api, pipeline_document, rates, mode, batchnorm
 ):
-    """Repeated candidates and user-controlled direction/freeze settings survive serialization."""
+    """Repeated candidates, scoring direction, and BN policy survive serialization."""
     document = deepcopy(pipeline_document)
     document["supcon"]["optimizer"]["lr"]["values"] = rates
     document["supcon"]["tracked_mode"] = mode
-    document["classifier"]["freeze_encoder"] = freeze
+    document["classifier"]["encoder_batchnorm"] = batchnorm
     config = _configuration(pipeline_api, document)
     saved = config.to_dict()
     assert saved["supcon"]["optimizer"]["lr"]["values"] == rates
     assert saved["supcon"]["tracked_mode"] == mode
-    assert saved["classifier"]["freeze_encoder"] == freeze
+    assert saved["classifier"]["encoder_batchnorm"] == batchnorm
     assert pipeline_api.TwoStageConfiguration.from_mapping(saved).to_dict() == saved
 
 
@@ -522,25 +544,21 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
     source_state = torch.load(source, weights_only=True)
     assert source_state["epoch"] == 2
     assert torch.load(result.selected_supcon.last_checkpoint, weights_only=True)["epoch"] == 3
-    classifier = torch.load(result.classifier_result.last_checkpoint, weights_only=True)
-    assert classifier["checkpoint_type"] == "classifier" and classifier["epoch"] == 2
-    assert classifier["label_names"] == source_state["label_names"] == {"mouse": 0, "rat": 1}
-    assert classifier["provenance"]["encoder_checkpoint"] == str(source.resolve())
-    assert classifier["provenance"]["encoder_checkpoint_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
-    assert all(int(state["step"]) == 6 for state in classifier["optimizer_state_dict"]["state"].values())
-    boundary = f"network.model.{len(source_state['architecture']['backbone'])}.linear."
-    assert any(not name.startswith(boundary) for name in classifier["model_state_dict"])
-    # SupCon's native network prefix changes during conversion; compare every retained
-    # encoder tensor by its model-state suffix rather than assuming parameter IDs.
-    for name, tensor in classifier["model_state_dict"].items():
-        if name.startswith(boundary):
-            continue
-        source_name = name.replace("network.", "full_model.model.", 1)
-        assert torch.equal(tensor, source_state["model_state_dict"][source_name]), name
-    restored = YoloClassifierModel.from_checkpoint(result.classifier_result.best_checkpoint)
+    classifier = YOLO(str(result.classifier_result.last_checkpoint), task="classify").model
+    assert classifier.names == {index: name for name, index in source_state["label_names"].items()}
+    assert classifier.provenance["encoder_checkpoint"] == str(source.resolve())
+    assert classifier.provenance["encoder_checkpoint_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    boundary = f"model.{len(source_state['architecture']['backbone'])}.linear."
+    for name, tensor in classifier.state_dict().items():
+        if not name.startswith(boundary):
+            # Native checkpoint saving uses FP16, unlike the source SupCon snapshot.
+            expected = source_state["model_state_dict"]["full_model.model." + name]
+            torch.testing.assert_close(tensor.float(), expected.float(), rtol=0.001, atol=0.0001)
+    restored = YOLO(str(result.classifier_result.best_checkpoint), task="classify").model.eval()
     with torch.inference_mode():
-        assert restored(torch.rand(2, 3, 16, 16)).shape == (2, 2)
-    assert (result.classifier_result.output_directory / "best.model_card.yaml").is_file()
+        output = restored(torch.rand(2, 3, 32, 32))
+        assert output[0].shape == (2, 2)
+    assert result.classifier_result.best_checkpoint.with_suffix(".model_card.yaml").is_file()
     assert all(hashlib.sha256(path.read_bytes()).hexdigest() == checksum for path, checksum in images.items())
 
 
@@ -561,8 +579,8 @@ def test_two_stage_cli_runs_the_actual_cpu_pipeline(pipeline_api, pipeline_docum
     root = Path(document["output_directory"])
     assert (root / "supcon" / "run_001" / "best.pt").is_file()
     assert (root / "selection.yaml").is_file()
-    restored = YoloClassifierModel.from_checkpoint(root / "classifier" / "best.pt")
-    assert restored.label_names == {"mouse": 0, "rat": 1}
+    restored = YOLO(str(root / "classifier" / "weights" / "best.pt"), task="classify").model
+    assert restored.names == {0: "mouse", 1: "rat"}
 
 
 @pytest.mark.parametrize("key", ["mlflow", "train_dataset", "validation_dataset", "class_names", "output_directory"])

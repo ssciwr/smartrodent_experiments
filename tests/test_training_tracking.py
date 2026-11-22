@@ -17,7 +17,8 @@ import torch
 import yaml
 
 from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
-from smartrodent.classifier_model import YoloClassifierModel
+from ultralytics import YOLO
+from ultralytics.models.yolo.classify.val import ClassificationValidator
 from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
 from smartrodent.experiment_support import MlflowConfiguration
 from smartrodent.two_stage_training import TwoStageConfiguration, TwoStageExperiment
@@ -80,16 +81,22 @@ def scripted_validation(monkeypatch):
             values = [[0.7, 0.2, 0.5], [0.8, 0.1, 0.4]]
         return {"balanced_accuracy": values[index][epoch], "supcon_loss_mean": [0.1, 0.2, 0.3][epoch]}
 
-    def classifier_validate(self, model, loader):
-        """Choose CE epoch two using classification score while CE loss prefers epoch one."""
-        observed.classifier.append(self.configuration.output_directory)
+    original = ClassificationValidator.__call__
+
+    def classifier_validate(self, trainer=None, model=None):
+        """Control returned epoch metrics after actual native classification validation."""
+        metrics = original(self, trainer=trainer, model=model)
+        if trainer is None:
+            return metrics
+        observed.classifier.append(Path(trainer.save_dir))
         if observed.failure == "classifier":
             raise RuntimeError("deliberate classifier validation failure")
-        epoch = len(observed.classifier) - 1
-        return {"balanced_accuracy": [0.1, 0.9, 0.4][epoch], "ce_loss_mean": [0.1, 0.2, 0.3][epoch]}
+        epoch = trainer.epoch
+        metrics.update(balanced_accuracy=[0.1, 0.9, 0.4][epoch], ce_loss_mean=[0.1, 0.2, 0.3][epoch])
+        return metrics
 
     monkeypatch.setattr(SupConExperiment, "_validate", supcon_validate)
-    monkeypatch.setattr(ClassifierExperiment, "_validate", classifier_validate)
+    monkeypatch.setattr(ClassificationValidator, "__call__", classifier_validate)
     return observed
 
 
@@ -166,7 +173,7 @@ def _assert_registered_classifier(store, result):
     assert version.tags["best_epoch"] == str(result.best_epoch)
     assert version.tags["dataset_revision"] == store.configuration["dataset_revision"]
     assert version.tags["git_commit"]
-    card_path = result.output_directory / "best.model_card.yaml"
+    card_path = result.best_checkpoint.with_suffix(".model_card.yaml")
     card = yaml.safe_load(card_path.read_text())
     assert card["model"]["name"] == store.registry_name
     assert str(card["model"]["registry_version"]) == str(version.version)
@@ -182,16 +189,18 @@ def _assert_registered_classifier(store, result):
             artifact_uri=f"{logged_model.artifact_location}/{filename}",
             dst_path=str(store.downloads),
         )
-        assert Path(downloaded).read_bytes() == (result.output_directory / filename).read_bytes()
+        assert Path(downloaded).read_bytes() == (result.best_checkpoint.parent / filename).read_bytes()
     registered = mlflow.pytorch.load_model(f"models:/{store.registry_name}/{version.version}")
-    portable = YoloClassifierModel.from_checkpoint(result.best_checkpoint)
-    images = torch.rand(2, 3, 16, 16)
+    portable = YOLO(str(result.best_checkpoint), task="classify").model.eval()
+    images = torch.rand(2, 3, 32, 32)
     with torch.inference_mode():
         expected = portable(images)
         actual = registered(images)
-    assert actual.shape == expected.shape == (2, 2)
-    torch.testing.assert_close(actual, expected)
-    assert registered.label_names == portable.label_names == {"mouse": 0, "rat": 1}
+    assert isinstance(actual, tuple) and isinstance(expected, tuple)
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        assert actual_tensor.shape == expected_tensor.shape == (2, 2)
+        torch.testing.assert_close(actual_tensor, expected_tensor)
+    assert registered.names == portable.names == {0: "mouse", 1: "rat"}
     return version
 
 
@@ -256,9 +265,9 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
     assert tracking_store.client.get_run(ce_run_id).data.metrics["best_validation_balanced_accuracy"] == 0.9
     provenance = _expected_encoder_provenance(result)
     for checkpoint in (result.classifier_result.best_checkpoint, result.classifier_result.last_checkpoint):
-        snapshot = torch.load(checkpoint, weights_only=True)
-        assert provenance.items() <= snapshot["provenance"].items()
-    card = yaml.safe_load((result.classifier_result.output_directory / "best.model_card.yaml").read_text())
+        model = YOLO(str(checkpoint), task="classify").model
+        assert provenance.items() <= model.provenance.items()
+    card = yaml.safe_load(result.classifier_result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
     assert provenance.items() <= card["provenance"].items()
     assert card["model"]["task"] == "image-classification"
     assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
@@ -268,7 +277,7 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
     for child in (*result.supcon_results, result.classifier_result):
         for filename in ("best.pt", "best.model_card.yaml", "best.model_card.md"):
             downloaded = _download(tracking_store, child.mlflow_run_id, f"best_model/{filename}")
-            assert downloaded.read_bytes() == (child.output_directory / filename).read_bytes()
+            assert downloaded.read_bytes() == (child.best_checkpoint.parent / filename).read_bytes()
     for filename in ("config.yaml", "selection.yaml"):
         assert _download(tracking_store, result.mlflow_run_id, filename).read_bytes() == (result.output_directory / filename).read_bytes()
     summary = yaml.safe_load((result.output_directory / "selection.yaml").read_text())
@@ -300,8 +309,8 @@ def test_untracked_pipeline_keeps_selected_provenance_without_touching_callers_t
         assert all(item.mlflow_run_id is None for item in (*result.supcon_results, result.classifier_result))
         provenance = _expected_encoder_provenance(result)
         for checkpoint in (result.classifier_result.best_checkpoint, result.classifier_result.last_checkpoint):
-            assert provenance.items() <= torch.load(checkpoint, weights_only=True)["provenance"].items()
-        card = yaml.safe_load((result.classifier_result.output_directory / "best.model_card.yaml").read_text())
+            assert provenance.items() <= YOLO(str(checkpoint), task="classify").model.provenance.items()
+        card = yaml.safe_load(result.classifier_result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
         assert provenance.items() <= card["provenance"].items()
         assert mlflow.active_run().info.run_id == caller.info.run_id
         after = tracking_store.client.get_run(caller.info.run_id)
@@ -350,7 +359,7 @@ def test_standalone_ce_registers_its_best_classifier_and_only_promotes_validated
         _assert_registered_classifier(tracking_store, result)
         expected_alias = version.version
     else:
-        card = yaml.safe_load((result.output_directory / "best.model_card.yaml").read_text())
+        card = yaml.safe_load(result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
         assert card["validation"]["status"] == "not_validated"
         assert str(card["model"]["registry_version"]) == str(version.version)
         expected_alias = previous_version

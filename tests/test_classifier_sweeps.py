@@ -11,11 +11,13 @@ from pathlib import Path
 import shutil
 import sys
 from types import SimpleNamespace
+import warnings
 
 from hypothesis import HealthCheck, given, settings, strategies as st
 import pytest
 import torch
 import yaml
+from ultralytics import YOLO
 
 from scripts import train_classifier
 from smartrodent.classifier_training import ClassifierExperiment
@@ -103,11 +105,12 @@ def recorded_classifiers(recorded_stages, monkeypatch):
             raise RuntimeError("deliberate classifier sweep failure")
         directory = configuration.output_directory
         directory.mkdir(parents=True, exist_ok=True)
-        best, last = directory / "best.pt", directory / "last.pt"
+        (directory / "weights").mkdir(exist_ok=True)
+        best, last = directory / "weights/best.pt", directory / "weights/last.pt"
         torch.save({"run": index, "epoch": 2}, best)
         torch.save({"run": index, "epoch": 3}, last)
         (directory / "config.yaml").write_text(yaml.safe_dump(configuration.to_dict()))
-        (directory / "history.yaml").write_text(yaml.safe_dump([{"run": index}]))
+        (directory / "results.csv").write_text(f"epoch,score\n2,{index}\n")
         result = ExperimentResult(
             output_directory=directory, last_checkpoint=last, best_checkpoint=best,
             best_epoch=2, best_value=observed.values[index] if observed.values else 0.4,
@@ -190,10 +193,71 @@ def test_classifier_cartesian_and_coupled_sweeps_reuse_one_encoder(
     assert len({c.best_checkpoint.read_bytes() for c in recorded_classifiers.results}) == 4
 
 
+@pytest.fixture
+def thousand_class_head(classifier_assets, tmp_path):
+    """Use a real local native checkpoint with the stock checkpoint's output count."""
+    yolo = YOLO(str(classifier_assets.ultralytics), task="classify")
+    yolo.model.model[-1].linear = torch.nn.Linear(yolo.model.model[-1].linear.in_features, 1000)
+    yolo.model.names = {index: f"imagenet_{index}" for index in range(1000)}
+    path = tmp_path / "thousand-class.pt"
+    yolo.save(path)
+    return path
+
+
+def test_redundant_linear_initialization_is_flagged_before_training_without_deduplication(
+    sweep_case, recorded_classifiers, recorded_stages, thousand_class_head, monkeypatch
+):
+    """Warn before SupCon/CE starts, but preserve all explicitly configured variants."""
+    case = sweep_case
+    case.stage["initialization"]["head"] = {
+        "replace": {"type": "sweep", "values": ["linear", "full"]},
+        "source": {"type": "sweep", "values": ["random", "yolo_checkpoint"]},
+        "checkpoint": {
+            "type": "coupled-sweep",
+            "target": (["classifier"] if case.entrypoint == "two_stage" else []) + ["initialization", "head", "source"],
+            "values": [None, str(thousand_class_head)],
+        },
+    }
+    original = ClassifierExperiment.run_with_result
+    with pytest.warns(UserWarning, match="(?i)linear.*random|random.*linear") as caught:
+        def run(self, **kwargs):
+            assert any("1000" in str(warning.message) and "2" in str(warning.message) for warning in caught)
+            return original(self, **kwargs)
+
+        monkeypatch.setattr(ClassifierExperiment, "run_with_result", run)
+        if case.entrypoint == "two_stage":
+            from smartrodent.supcon_training import SupConExperiment
+
+            original_supcon = SupConExperiment.run_with_result
+
+            def run_supcon(self, **kwargs):
+                assert caught, "The redundant-head warning arrived only after SupCon training"
+                return original_supcon(self, **kwargs)
+
+            monkeypatch.setattr(SupConExperiment, "run_with_result", run_supcon)
+        case.run()
+    assert len(recorded_classifiers.results) == 4
+    assert len(_summary(case.document)["classifier_results"]) == 4
+
+
+@pytest.mark.parametrize("boundary,source_count", [("linear", 2), ("full", 1000)])
+def test_distinct_head_initializations_are_not_flagged_as_redundant(
+    sweep_case, classifier_assets, thousand_class_head, boundary, source_count
+):
+    """A same-size linear donor or a transferred full head retains meaningful pretrained weights."""
+    checkpoint = classifier_assets.ultralytics if source_count == 2 else thousand_class_head
+    sweep_case.stage["initialization"]["head"] = {
+        "replace": boundary, "source": "yolo_checkpoint", "checkpoint": str(checkpoint),
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        sweep_case.run()
+    assert not any("linear" in str(w.message).lower() and "random" in str(w.message).lower() for w in caught)
+
+
 @pytest.mark.parametrize(
     "field,values",
     [
-        ("freeze_encoder", [True, False]),
         ("encoder_batchnorm", ["eval", "adapt"]),
         ("batch_size", [2, 4]),
         ("seed", [11, 29]),
@@ -209,18 +273,18 @@ def test_classifier_sweeps_are_not_limited_to_head_parameters(sweep_case, record
 def test_custom_yaml_tags_and_full_document_coupled_targets(sweep_case, recorded_classifiers):
     """Use actual YAML tags, not only the equivalent preconstructed mapping nodes."""
     case = sweep_case
-    case.stage["optimizer"]["lr"] = "SWEEP_LEARNING_RATE"
+    case.stage["train_kwargs"]["lr0"] = "SWEEP_LEARNING_RATE"
     case.stage["batch_size"] = "COUPLED_BATCH_SIZE"
-    target = "classifier.optimizer.lr" if case.entrypoint == "two_stage" else "optimizer.lr"
+    target = "classifier.train_kwargs.lr0" if case.entrypoint == "two_stage" else "train_kwargs.lr0"
     indent = "  " if case.entrypoint == "two_stage" else ""
     text = yaml.safe_dump(case.document).replace(
-        "lr: SWEEP_LEARNING_RATE", f"lr: !sweep\n{indent}    values: [0.001, 0.002]"
+        "lr0: SWEEP_LEARNING_RATE", f"lr0: !sweep\n{indent}    values: [0.001, 0.002]"
     ).replace(
         "batch_size: COUPLED_BATCH_SIZE",
         f"batch_size: !coupled-sweep\n{indent}  target: {target}\n{indent}  values: [2, 4]",
     )
     case.run(text=text)
-    assert [(c.optimizer["lr"], c.batch_size) for c in recorded_classifiers.configurations] == [(0.001, 2), (0.002, 4)]
+    assert [(c.train_kwargs["lr0"], c.batch_size) for c in recorded_classifiers.configurations] == [(0.001, 2), (0.002, 4)]
     summary = _summary(case.document)
     assert len(summary["classifier_results"]) == 2
 
@@ -239,7 +303,7 @@ def test_sweep_champion_uses_best_validation_result_and_stable_ties(
 ):
     """Choose a best checkpoint by the configured objective, never the last run/epoch."""
     case = sweep_case
-    case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002, 0.003]}
+    case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002, 0.003]}
     case.stage["tracked_mode"] = mode
     recorded_classifiers.values = values
     result = case.run()
@@ -264,7 +328,7 @@ def test_single_classifier_keeps_existing_output_path_and_singular_result(
     """A non-sweep or singleton sweep must not introduce a gratuitous run subdirectory."""
     case = sweep_case
     if tagged_singleton:
-        case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.004]}
+        case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.004]}
     result = case.run()
     assert len(recorded_classifiers.results) == 1
     selected = recorded_classifiers.results[0]
@@ -280,7 +344,7 @@ def test_all_classifier_variants_are_validated_before_any_training(
     sweep_case, recorded_classifiers, recorded_stages, values
 ):
     """An empty sweep or invalid later variant must not waste a SupCon/CE run."""
-    sweep_case.stage["optimizer"]["lr"] = {"type": "sweep", "values": values}
+    sweep_case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": values}
     with pytest.raises(ValueError, match="empty|sweep|candidate|optimizer|learning|lr"):
         sweep_case.run()
     assert recorded_classifiers.configurations == []
@@ -391,13 +455,13 @@ def test_incompatible_reported_classifier_results_are_not_ranked(
 ):
     """Check results against configuration, not merely against other candidates' metadata."""
     if reported_pattern == "singleton":
-        sweep_case.stage["optimizer"]["lr"] = 0.001
+        sweep_case.stage["train_kwargs"]["lr0"] = 0.001
         recorded_classifiers.overrides[0] = override
     elif reported_pattern == "all":
-        sweep_case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002]}
+        sweep_case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002]}
         recorded_classifiers.overrides.update({0: override, 1: override})
     elif reported_pattern == "second":
-        sweep_case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002]}
+        sweep_case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002]}
         recorded_classifiers.overrides[1] = override
     else:
         raise AssertionError(f"Unknown result pattern: {reported_pattern}")
@@ -414,7 +478,7 @@ def test_classifier_failure_stops_the_sweep_without_selecting_a_partial_champion
 ):
     """Retain completed artifacts, propagate failure, and never rank a partial sweep."""
     case = sweep_case
-    case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002, 0.003]}
+    case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002, 0.003]}
     recorded_classifiers.fail_at = fail_at
     with pytest.raises(RuntimeError, match="classifier sweep failure"):
         case.run()
@@ -432,7 +496,7 @@ def test_sweep_artifacts_cannot_overwrite_any_input_checkpoint(
     """Protect inputs against every generated artifact, not just the current variant's files."""
     case = sweep_case
     if location == "classifier_run":
-        protected = case.classifier_root / "run_002" / "best.pt"
+        protected = case.classifier_root / "run_002" / "weights" / "best.pt"
     elif location == "summary":
         protected = case.root / "selection.yaml"
     elif location == "root_config":
@@ -444,14 +508,14 @@ def test_sweep_artifacts_cannot_overwrite_any_input_checkpoint(
     protected.write_bytes(original)
     head = case.stage["initialization"]["head"]
     head.update(source="yolo_checkpoint", checkpoint=str(protected))
-    case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002]}
+    case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002]}
     if location == "classifier_run":
         # Neither variant collides with its own outputs: run one reads run two's
         # future best.pt, while run two reads an external donor. Per-run guards
         # alone cannot detect the required cross-variant protection.
         head["checkpoint"] = {
             "type": "coupled-sweep",
-            "target": (["classifier"] if case.entrypoint == "two_stage" else []) + ["optimizer", "lr"],
+            "target": (["classifier"] if case.entrypoint == "two_stage" else []) + ["train_kwargs", "lr0"],
             "values": [str(protected), str(classifier_assets.ultralytics)],
         }
     with pytest.raises(ValueError, match="collid|checkpoint|source|artifact"):
@@ -464,10 +528,10 @@ def test_sweep_artifacts_cannot_overwrite_any_input_checkpoint(
 def test_mismatched_coupled_sweeps_fail_before_training(sweep_case, recorded_classifiers, recorded_stages):
     """A malformed coupling must not truncate runs through zip-like behavior."""
     case = sweep_case
-    case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002]}
+    case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002]}
     case.stage["batch_size"] = {
         "type": "coupled-sweep",
-        "target": (["classifier"] if case.entrypoint == "two_stage" else []) + ["optimizer", "lr"],
+        "target": (["classifier"] if case.entrypoint == "two_stage" else []) + ["train_kwargs", "lr0"],
         "values": [2],
     }
     with pytest.raises(ValueError, match="length|coupl"):
@@ -481,7 +545,7 @@ def test_failed_rerun_invalidates_an_old_classifier_champion_summary(
 ):
     """An earlier successful invocation must not masquerade as the failed invocation's winner."""
     case = sweep_case
-    case.stage["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002]}
+    case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002]}
     case.run()
     assert _summary(case.document)["selected_classifier"] is not None
     first = recorded_classifiers.results[0]
@@ -506,7 +570,7 @@ def test_standalone_training_only_sweeps_do_not_declare_a_validation_champion(
 ):
     """Training without validation remains supported without promoting training-loss winners."""
     standalone_document.update(validation_dataset=None, validation_metrics=None)
-    standalone_document["optimizer"]["lr"] = {"type": "sweep", "values": [0.001, 0.002]}
+    standalone_document["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002]}
     _invoke("standalone", standalone_document, tmp_path / "config.yaml", monkeypatch)
     summary = _summary(standalone_document)
     assert len(recorded_classifiers.results) == 2
@@ -525,12 +589,12 @@ def test_standalone_cartesian_expansion_preserves_every_configuration(
     """Arbitrary finite valid sweep values must not be dropped, merged, or reordered."""
     document = deepcopy(standalone_document)
     document["output_directory"] = str(tmp_path / "property-sweep")
-    document["optimizer"]["lr"] = {"type": "sweep", "values": learning_rates}
+    document["train_kwargs"]["lr0"] = {"type": "sweep", "values": learning_rates}
     document["batch_size"] = {"type": "sweep", "values": batch_sizes}
     recorded_classifiers.configurations.clear()
     recorded_classifiers.results.clear()
     _invoke("standalone", document, tmp_path / "property.yaml", monkeypatch)
-    # safe_dump sorts keys: batch_size is encountered before optimizer.lr.
+    # safe_dump sorts keys: batch_size is encountered before train_kwargs.lr0.
     expected = list(product(batch_sizes, learning_rates))
-    assert [(c.batch_size, c.optimizer["lr"]) for c in recorded_classifiers.configurations] == expected
+    assert [(c.batch_size, c.train_kwargs["lr0"]) for c in recorded_classifiers.configurations] == expected
     assert len({c.output_directory for c in recorded_classifiers.configurations}) == len(expected)

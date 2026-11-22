@@ -7,8 +7,6 @@ and an isolated SQLite registry. Only epoch validation scores are controlled.
 from copy import deepcopy
 import json
 from pathlib import Path
-from types import SimpleNamespace
-
 import mlflow
 import mlflow.pytorch
 from mlflow import MlflowClient
@@ -17,15 +15,15 @@ import pytest
 import torch
 import yaml
 
-from smartrodent.classifier_training import ClassifierExperiment
+from ultralytics import YOLO
 from test_classifier_sweeps import _invoke, _summary, sweep_pipeline_document
-from test_classifier_training import classifier_assets, classifier_configuration, training_api
+from test_classifier_training import classifier_assets, classifier_configuration, controlled_scores, training_api
 from test_training_tracking import tracking_store
 
 
 @pytest.fixture(params=["standalone", "two_stage"])
 def classifier_trial(
-    request, classifier_configuration, sweep_pipeline_document, tracking_store, tmp_path, monkeypatch
+    request, classifier_configuration, sweep_pipeline_document, tracking_store, tmp_path, monkeypatch, controlled_scores
 ):
     """Configure two real CE runs whose first run/second epoch wins the sweep."""
     entrypoint = request.param
@@ -45,27 +43,12 @@ def classifier_trial(
     stage.update(
         epochs=3, tracked_metric="balanced_accuracy", tracked_mode="max",
         validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
-        optimizer={"lr": {"type": "sweep", "values": [0.001, 0.002]}},
+        train_kwargs={**stage["train_kwargs"], "lr0": {"type": "sweep", "values": [0.001, 0.002]}},
     )
-    observed = SimpleNamespace(
-        document=document, stage=stage, entrypoint=entrypoint,
-        score_sets={0.001: [0.2, 0.9, 0.3], 0.002: [0.1, 0.8, 0.4]},
-        epochs={}, validations=[], promotions=[], fail_at=None,
-    )
-
-    def validate(self, model, loader):
-        """Select an earlier checkpoint without replacing any optimization/model code."""
-        configuration = self.configuration
-        directory = str(configuration.output_directory)
-        epoch = observed.epochs.get(directory, 0)
-        observed.epochs[directory] = epoch + 1
-        observed.validations.append((directory, epoch + 1))
-        if observed.fail_at == (configuration.optimizer["lr"], epoch + 1):
-            raise RuntimeError("deliberate later classifier failure")
-        return {
-            "balanced_accuracy": observed.score_sets[configuration.optimizer["lr"]][epoch],
-            "ce_loss_mean": [0.1, 0.2, 0.3][epoch],
-        }
+    observed = controlled_scores
+    observed.document, observed.stage, observed.entrypoint = document, stage, entrypoint
+    observed.score_sets = {0.001: [0.2, 0.9, 0.3], 0.002: [0.1, 0.8, 0.4]}
+    observed.promotions = []
 
     original_set_alias = MlflowClient.set_registered_model_alias
 
@@ -79,7 +62,6 @@ def classifier_trial(
         return _invoke(entrypoint, document, tmp_path / "trial.yaml", monkeypatch)
 
     observed.run = run
-    monkeypatch.setattr(ClassifierExperiment, "_validate", validate)
     monkeypatch.setattr(MlflowClient, "set_registered_model_alias", set_alias)
     return observed
 
@@ -181,13 +163,17 @@ def test_register_all_classifiers_and_promote_only_the_sweep_winner_after_comple
         assert version.tags["validation_dataset"] == str(Path(candidate["validation_dataset"]).resolve())
         assert version.tags["dataset_revision"] == tracking_store.configuration["dataset_revision"]
         checkpoint = Path(candidate["best_checkpoint"])
-        snapshot = torch.load(checkpoint, weights_only=True)
-        assert snapshot["epoch"] == candidate["best_epoch"] == 2
+        snapshot = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        # Native finalization gives best.pt the complete run history, not just its epoch.
+        assert snapshot["train_results"]["epoch"][-1] == 3
+        assert candidate["best_epoch"] == 2
+        assert snapshot["train_metrics"]["balanced_accuracy"] == candidate["best_value"]
+        native_model = YOLO(str(checkpoint), task="classify").model
         if trial.entrypoint == "two_stage":
             encoder_checkpoint = result.selected_supcon.best_checkpoint
         elif trial.entrypoint == "standalone":
             encoder_checkpoint = Path(trial.stage["initialization"]["encoder"]["checkpoint"])
-        assert snapshot["provenance"]["encoder_checkpoint"] == str(encoder_checkpoint.resolve())
+        assert native_model.provenance["encoder_checkpoint"] == str(encoder_checkpoint.resolve())
         for suffix in ("yaml", "md"):
             card = checkpoint.with_suffix(f".model_card.{suffix}")
             assert card.is_file()
@@ -339,7 +325,7 @@ def test_single_classifier_invocation_also_compares_against_the_historical_champ
 ):
     """Cross-invocation champion protection must not apply only to multi-run sweeps."""
     trial = classifier_trial
-    trial.stage["optimizer"] = {"lr": 0.001}
+    trial.stage["train_kwargs"]["lr0"] = 0.001
     previous = _seed_champion(trial, tracking_store, tmp_path, value=0.95)
     result = trial.run()
     summary = _summary(trial.document)

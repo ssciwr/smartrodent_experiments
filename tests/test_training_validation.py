@@ -43,6 +43,8 @@ def configuration(request, tmp_path):
         values.update(model_name=str(tmp_path / "model.yaml"), classes_per_batch=2, samples_per_class=2)
         return TrainingConfiguration.from_mapping(values)
     elif request.param == "classifier":
+        values.pop("optimizer")
+        values["train_kwargs"] = {"optimizer": "AdamW", "lr0": 0.001}
         values["initialization"] = {
             "encoder": {"source": "supcon", "checkpoint": str(tmp_path / "encoder.pt")},
             "head": {"replace": "linear", "source": "random"},
@@ -55,6 +57,8 @@ def configuration(request, tmp_path):
 def _parse_update(configuration, path, value):
     """Change one input only, so a failure cannot be explained by another missing field."""
     document = deepcopy(configuration.to_dict())
+    if path == ("learning_rate",):
+        path = ("optimizer", "lr") if isinstance(configuration, TrainingConfiguration) else ("train_kwargs", "lr0")
     node = document
     for name in path[:-1]:
         node = node[name]
@@ -67,9 +71,9 @@ def _parse_update(configuration, path, value):
     (("workers",), True), (("workers",), "0"), (("workers",), 0.5),
     (("seed",), True), (("seed",), -1), (("seed",), 2**32),
     (("seed",), "42"), (("seed",), 0.5),
-    (("optimizer", "lr"), True), (("optimizer", "lr"), "0.001"),
-    (("optimizer", "lr"), 0), (("optimizer", "lr"), float("nan")),
-    (("optimizer", "lr"), float("inf")),
+    (("learning_rate",), True), (("learning_rate",), "0.001"),
+    (("learning_rate",), 0), (("learning_rate",), float("nan")),
+    (("learning_rate",), float("inf")),
     (("transforms", "image_size"), True), (("transforms", "image_size"), 0),
 ])
 def test_new_training_systems_reject_invalid_scalar_settings_consistently(configuration, path, value):
@@ -115,12 +119,17 @@ def test_missing_transform_sections_produce_configuration_errors_not_key_errors(
 @pytest.mark.parametrize("path", [("unknown_option",), ("mlflow", "unknown_option"), ("scheduler", "unknown_option")])
 def test_unknown_configuration_keys_remain_errors(configuration, path):
     """Schema migration must not silently discard typos at the root or shared boundaries."""
-    configured = replace(
-        configuration, validation_dataset=configuration.train_dataset,
-        mlflow=MlflowConfiguration(tracking_uri="sqlite:///unused-validation-test.db", experiment_name="validation-test"),
-        scheduler=SchedulerConfiguration("ReduceLROnPlateau", {"mode": "min"}),
-    )
-    with pytest.raises((ValueError, TypeError)) as error:
+    options = {
+        "validation_dataset": configuration.train_dataset,
+        "mlflow": MlflowConfiguration(tracking_uri="sqlite:///unused-validation-test.db", experiment_name="validation-test"),
+    }
+    if path[0] == "scheduler":
+        if isinstance(configuration, ClassifierConfiguration):
+            path = ("train_kwargs", path[-1])
+        else:
+            options["scheduler"] = SchedulerConfiguration("ReduceLROnPlateau", {"mode": "min"})
+    configured = replace(configuration, **options)
+    with pytest.raises((ValueError, TypeError, SyntaxError)) as error:
         _parse_update(configured, path, 1)
     assert path[-1] in str(error.value)
 
@@ -129,11 +138,13 @@ def test_unknown_configuration_keys_remain_errors(configuration, path):
 @given(seed=st.integers(0, 2**32 - 1), workers=st.integers(0, 8), lr=st.floats(min_value=0.0001, max_value=0.1, allow_nan=False))
 def test_valid_settings_keep_dataclass_replace_and_yaml_round_trip(configuration, tmp_path, seed, workers, lr):
     """Preserve immutable configuration callers, meaningful numeric values, and portable paths."""
-    updated = replace(configuration, seed=seed, workers=workers, optimizer={"lr": lr})
+    field, rate_key = ("optimizer", "lr") if isinstance(configuration, TrainingConfiguration) else ("train_kwargs", "lr0")
+    options = {**getattr(configuration, field), rate_key: lr}
+    updated = replace(configuration, seed=seed, workers=workers, **{field: options})
     document = updated.to_dict()
     assert isinstance(updated.train_dataset, Path)
     assert document["seed"] == seed and document["workers"] == workers
-    assert document["optimizer"]["lr"] == lr
+    assert document[field][rate_key] == lr
     assert document["class_names"] == ["rat", "mouse"]
     assert isinstance(document["train_dataset"], str)
     path = tmp_path / "configuration.yaml"
@@ -170,6 +181,8 @@ def test_shared_setting_loaders_accept_readonly_mappings(schema, document, attri
 ])
 def test_nested_configuration_mappings_accept_readonly_inputs(configuration, field, settings):
     """Shared dataclass fields retain the Mapping contract of their standalone loaders."""
+    if field == "scheduler" and isinstance(configuration, ClassifierConfiguration):
+        field, settings = "train_kwargs", {"optimizer": "AdamW", "lr0": 0.001, "cos_lr": True}
     document = configuration.to_dict()
     document.update(validation_dataset=document["train_dataset"], **{field: settings})
     expected = type(configuration).from_mapping(document).to_dict()
@@ -184,9 +197,15 @@ def test_native_optimizer_and_metric_options_are_not_lost_by_schema_validation(c
         "amsgrad": True, "maximize": False, "foreach": False, "fused": False,
     }
     metrics = {"macro_f1": {"function": "f1_score", "average": "macro", "labels": [0, 1], "zero_division": 0}}
+    field = "optimizer"
+    if isinstance(configuration, ClassifierConfiguration):
+        field = "train_kwargs"
+        optimizer = {"optimizer": "AdamW", "lr0": 0.001, "momentum": 0.8,
+                     "weight_decay": 0.02, "cos_lr": True, "lrf": 0.01,
+                     "patience": 3, "warmup_epochs": 0.0, "amp": False}
     expected_optimizer, expected_metrics = deepcopy(optimizer), deepcopy(metrics)
     updated = replace(
-        configuration, optimizer=optimizer, validation_dataset=configuration.train_dataset,
+        configuration, **{field: optimizer}, validation_dataset=configuration.train_dataset,
         validation_metrics=metrics, tracked_metric="macro_f1", tracked_mode="max",
         model_card_template=Path("configs/model_card_template.yaml"),
     )
@@ -195,7 +214,7 @@ def test_native_optimizer_and_metric_options_are_not_lost_by_schema_validation(c
     path.write_text(yaml.safe_dump(document))
     restored = [updated, type(updated).from_mapping(document), type(updated).from_yaml(path)]
     for result in restored:
-        assert result.to_dict()["optimizer"] == expected_optimizer
+        assert result.to_dict()[field] == expected_optimizer
         assert result.to_dict()["validation_metrics"] == expected_metrics
     assert optimizer == expected_optimizer and metrics == expected_metrics
 
@@ -218,7 +237,8 @@ def test_each_standalone_configuration_protects_all_its_inputs(configuration, so
         changes = {"validation_dataset": configuration.train_dataset.parent / "val"}
         changes["output_directory"] = changes["validation_dataset"] / "outputs"
     elif source == "checkpoint":
-        protected = configuration.output_directory / "best.pt"
+        relative = "best.pt" if isinstance(configuration, TrainingConfiguration) else "weights/best.pt"
+        protected = configuration.output_directory / relative
         protected.parent.mkdir(parents=True)
         protected.write_bytes(b"protected source checkpoint")
         if isinstance(configuration, TrainingConfiguration):
