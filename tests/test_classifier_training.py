@@ -545,6 +545,36 @@ def test_training_without_validation_is_explicit_and_still_reports_a_result(
     assert result.best_value == pytest.approx(min(losses), rel=0.0001)
     card = yaml.safe_load(result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
     assert card["validation"]["status"] == "not_validated"
+    restored = YOLO(str(result.best_checkpoint), task="classify").model
+    assert restored.transforms(Image.new("RGB", (51, 19))).shape == (3, 32, 32)
+
+
+def test_training_only_native_selection_and_stopping_compare_every_epoch(
+    training_api, classifier_configuration, native_runs, monkeypatch
+):
+    """A worsening native training loss must retain the first best epoch and stop early."""
+    original = ClassificationTrainer.train
+    losses = [0.2, 0.4, 0.5, 0.6, 0.7]
+    completed = []
+
+    def train(self, *args, **kwargs):
+        def set_epoch_loss(trainer):
+            completed.append(trainer.epoch + 1)
+            trainer.tloss["loss"] = torch.tensor(losses[trainer.epoch], device=trainer.device)
+        self.add_callback("on_train_epoch_end", set_epoch_loss)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ClassificationTrainer, "train", train)
+    config = replace(classifier_configuration, validation_dataset=None, epochs=5,
+                     train_kwargs={**classifier_configuration.train_kwargs, "patience": 1})
+    result = training_api.ClassifierExperiment(config).run_with_result()
+    assert result.best_epoch == 1 and result.best_value == pytest.approx(0.2)
+    assert completed == [1, 2]
+    assert result.validation_dataset is None
+    snapshot = torch.load(result.best_checkpoint, map_location="cpu", weights_only=False)
+    assert snapshot["train_metrics"]["ce_loss_mean"] == pytest.approx(0.2)
+    card = yaml.safe_load(result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
+    assert card["validation"]["status"] == "not_validated"
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), None])
@@ -618,12 +648,31 @@ def test_invalid_classifier_configuration_fails_early(classifier_configuration, 
     ("freeze", 0), ("resume", True), ("pretrained", False), ("save", False),
     ("epochs", 999), ("batch", 999), ("imgsz", 999), ("workers", 10),
     ("device", "cuda:1"), ("seed", 99), ("val", False), ("classes", [0]), ("single_cls", True),
+    ("auto_augment", "randaugment"), ("erasing", 0.2), ("fraction", 0.5), ("tile", True),
 ])
 def test_native_kwargs_cannot_override_owned_model_data_outputs_or_policy(classifier_configuration, key, value):
     """One owner controls shared inputs, output layout, frozen boundary, and run state."""
     with pytest.raises(ValueError, match=key):
         replace(classifier_configuration, train_kwargs={**classifier_configuration.train_kwargs, key: value})
     assert not classifier_configuration.output_directory.exists()
+
+
+@pytest.mark.parametrize("replacement", ["linear", "full"])
+def test_native_dropout_only_changes_the_trainable_full_head(
+    training_api, classifier_configuration, native_runs, replacement
+):
+    """Never silently change or ignore Dropout belonging to a frozen encoder."""
+    initialization = deepcopy(classifier_configuration.initialization)
+    initialization["head"]["replace"] = replacement
+    options = {**classifier_configuration.train_kwargs, "dropout": 0.25}
+    if replacement == "linear":
+        with pytest.raises(ValueError, match="dropout.*full"):
+            replace(classifier_configuration, initialization=initialization, train_kwargs=options)
+        assert not classifier_configuration.output_directory.exists()
+    else:
+        config = replace(classifier_configuration, epochs=1, initialization=initialization, train_kwargs=options)
+        training_api.ClassifierExperiment(config).run()
+        assert native_runs[0].trainer.model.model[-1].drop.p == 0.25
 
 
 def test_unknown_native_training_options_fail_before_execution(classifier_configuration):
@@ -637,6 +686,97 @@ def test_unknown_native_training_options_fail_before_execution(classifier_config
 def test_output_cannot_be_inside_either_input_split(classifier_configuration, split):
     with pytest.raises(ValueError, match="outside|output_directory"):
         replace(classifier_configuration, output_directory=getattr(classifier_configuration, split) / "output")
+
+
+@pytest.mark.parametrize("split", ["train_dataset", "validation_dataset"])
+@pytest.mark.parametrize("artifact", ["weights", "args.yaml"])
+def test_native_output_aliases_cannot_redirect_writes_into_input_splits(classifier_configuration, split, artifact):
+    """Protect split contents even when the run root itself is outside both datasets."""
+    config = classifier_configuration
+    dataset = getattr(config, split)
+    protected = dataset / "protected.yaml"
+    protected.write_bytes(b"read-only dataset metadata")
+    config.output_directory.mkdir()
+    target = dataset if artifact == "weights" else protected
+    (config.output_directory / artifact).symlink_to(target, target_is_directory=artifact == "weights")
+    with pytest.raises(ValueError, match="outside|dataset"):
+        replace(config)
+    assert protected.read_bytes() == b"read-only dataset metadata"
+    assert not (dataset / "best.pt").exists()
+    assert not (dataset / "last.pt").exists()
+
+
+@pytest.mark.parametrize("split", ["train_dataset", "validation_dataset"])
+@pytest.mark.parametrize("artifact", ["args.yaml", "config.yaml", "selection.yaml", "weights/last.pt", "weights/epoch0.pt", "train_batch0.jpg"])
+def test_existing_output_hardlinks_cannot_truncate_dataset_images(classifier_configuration, split, artifact):
+    """Check output inode ownership without scanning every image in large input datasets."""
+    config = classifier_configuration
+    protected = next(getattr(config, split).rglob("*.png"))
+    before = protected.read_bytes()
+    destination = config.output_directory / artifact
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.link(protected, destination)
+    with pytest.raises(ValueError, match="hardlink|source|dataset"):
+        if artifact == "selection.yaml":
+            from smartrodent.classifier_sweeps import ClassifierSweepConfiguration
+            ClassifierSweepConfiguration.from_mapping(config.to_dict())
+        else:
+            replace(config)
+    assert protected.read_bytes() == before
+    assert destination.samefile(protected)
+
+
+def test_native_output_directory_symlink_keeps_the_validated_destination(
+    training_api, classifier_configuration, native_runs, tmp_path
+):
+    """Native args, weights and our config must share the same resolved run directory."""
+    actual = tmp_path / "native-parent" / "actual-run"
+    actual.mkdir(parents=True)
+    link = tmp_path / "requested-link"
+    link.symlink_to(actual, target_is_directory=True)
+    unrelated = actual.parent / link.name
+    unrelated.mkdir()
+    marker = unrelated / "args.yaml"
+    marker.write_text("protected: unrelated run\n")
+    config = replace(classifier_configuration, epochs=1, output_directory=link)
+    result = training_api.ClassifierExperiment(config).run_with_result()
+    assert native_runs[0].trainer.save_dir.resolve() == actual
+    assert result.best_checkpoint.resolve() == actual / "weights/best.pt"
+    assert (actual / "config.yaml").is_file() and (actual / "results.csv").is_file()
+    assert marker.read_text() == "protected: unrelated run\n"
+    assert not (unrelated / "weights").exists()
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("alias", ["val/loss", "fitness", "metrics/accuracy_top1", "metrics/accuracy_top5",
+                                  "train/loss", "lr/pg0", "lr/pg1", "lr/pg99", "epoch", "time"])
+def test_native_reserved_metric_aliases_are_rejected_before_outputs(classifier_configuration, alias, tracked):
+    """Configured sklearn aliases must never be overwritten by native diagnostics or fitness."""
+    with pytest.raises(ValueError, match="reserved|override"):
+        replace(classifier_configuration, validation_metrics={alias: {"function": "balanced_accuracy_score"}},
+                tracked_metric=alias if tracked else "ce_loss_mean")
+    assert not classifier_configuration.output_directory.exists()
+
+
+def test_native_csv_preserves_bookkeeping_training_loss_and_configured_scores(
+    training_api, classifier_configuration, native_runs
+):
+    """Native history must keep unique native fields alongside independent sklearn scores."""
+    import csv
+
+    config = replace(classifier_configuration, epochs=2, tracked_metric="balanced_accuracy", tracked_mode="max",
+                     validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}})
+    result = training_api.ClassifierExperiment(config).run_with_result()
+    with (config.output_directory / "results.csv").open() as stream:
+        reader = csv.DictReader(stream)
+        fields, rows = reader.fieldnames, list(reader)
+    assert len(fields) == len(set(fields))
+    assert [int(row["epoch"]) for row in rows] == [1, 2]
+    assert all(float(row["time"]) >= 0 for row in rows)
+    trainer = native_runs[0].trainer
+    assert float(rows[-1]["train/loss"]) == pytest.approx(float(trainer.tloss["loss"]), abs=0.00005)
+    assert float(rows[-1]["lr/pg0"]) == pytest.approx(trainer.lr["lr/pg0"])
+    assert float(rows[result.best_epoch - 1]["balanced_accuracy"]) == pytest.approx(result.best_value)
 
 
 @pytest.mark.parametrize("initialization,message", [

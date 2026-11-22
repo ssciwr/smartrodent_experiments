@@ -152,6 +152,7 @@ class TwoStageConfiguration:
             [config.output_directory for config in stages],
             (self.data["train_dataset"], self.data["validation_dataset"]), sources,
             (self.output_directory, self._classifier_sweep.output_directory),
+            native_directories=[config.output_directory for config in self._classifier_sweep.configurations],
         )
 
     @classmethod

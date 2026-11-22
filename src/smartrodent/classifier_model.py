@@ -5,10 +5,12 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from pickle import UnpicklingError
+import warnings
 
 import torch
 from ultralytics.nn.modules import Classify, Conv, ConvTranspose, RepConv, RepVGGDW
 from ultralytics.nn.tasks import ClassificationModel, load_checkpoint
+from ultralytics.utils.torch_utils import initialize_weights, intersect_dicts
 
 from smartrodent.supcon_model import YoloSupConModel
 from smartrodent.training_validation import (
@@ -72,6 +74,7 @@ class YoloClassifierModel(torch.nn.Module):
         freeze_encoder: bool = True,
         encoder_batchnorm: EncoderBatchnorm = "eval",
         device: str | torch.device = "cpu",
+        head_donor: Classify | None = None,
     ) -> "YoloClassifierModel":
         """Start a new classifier from an explicitly identified encoder checkpoint.
 
@@ -81,19 +84,23 @@ class YoloClassifierModel(torch.nn.Module):
             freeze_encoder: Keep all parameters before the selected boundary fixed.
             encoder_batchnorm: Use stored statistics (``eval``) or adapt them.
             device: Device on which the initialized classifier should run.
+            head_donor: Already prepared native head, avoiding a second checkpoint read.
 
         Returns:
             A newly initialized classifier in evaluation mode. No optimizer or
             scheduler state is resumed from either source checkpoint.
 
         Raises:
-            ValueError: Options, checkpoint format, head dimensions, or labels
-                are incompatible. Native checkpoints must be trusted files.
+            ValueError: Checkpoint format or model metadata is invalid, or a
+                retained component is fused. Native checkpoints must be trusted.
+            NotImplementedError: A model is not a YOLO classification model.
             FileNotFoundError: A requested local source does not exist.
         """
         encoder = initialization["encoder"]
         network = cls._load_encoder(cls._local_checkpoint(encoder["checkpoint"]), encoder["source"])
-        cls._replace_head(network, label_names, initialization["head"])
+        if initialization["head"]["source"] == "yolo_checkpoint" and head_donor is None:
+            head_donor = cls.prepare_head(initialization["head"], label_names)
+        cls._replace_head(network, label_names, initialization["head"], head_donor)
         return cls(
             network, label_names, head_replace=initialization["head"]["replace"],
             freeze_encoder=freeze_encoder, encoder_batchnorm=encoder_batchnorm,
@@ -117,40 +124,58 @@ class YoloClassifierModel(torch.nn.Module):
             return cls.from_checkpoint(path).network
 
     @classmethod
-    def _head_donor(cls, original: Classify, labels: Mapping[str, int], settings: Mapping) -> Classify | None:
-        """Load the optional donor and check facts that depend on its actual weights."""
+    def prepare_head(cls, settings: Mapping, labels: Mapping[str, int], *, cache: dict | None = None) -> Classify | None:
+        """Load a read-only YOLO head before training and flag equivalent linear initialization.
+
+        Args:
+            settings: Verified head source/replacement settings.
+            labels: Target dataset mapping.
+            cache: Optional sweep-owned checkpoint cache; never global.
+
+        Returns:
+            Native donor head, or None for random initialization.
+
+        Raises:
+            NotImplementedError: The checkpoint does not contain a YOLO classifier.
+        """
         if settings["source"] == "random":
             return None
-        elif settings["source"] == "yolo_checkpoint":
-            network = cls._load_native(cls._local_checkpoint(settings["checkpoint"]))
-            donor = cls._classification_head(network)
-            if network.names != {index: name for name, index in labels.items()}:
-                raise ValueError("Head checkpoint class identities and label order must match")
-            cls._validate_donor(original, donor, settings["replace"], len(labels))
-            return donor
+        path = cls._local_checkpoint(settings["checkpoint"])
+        heads = {} if cache is None else cache
+        if path not in heads:
+            heads[path] = cls._classification_head(cls._load_native(path))
+        donor = heads[path]
+        selected = donor.linear if settings["replace"] == "linear" else donor
+        cls._reject_fused(selected)
+        if settings["replace"] == "linear" and donor.linear.out_features != len(labels):
+            warnings.warn(
+                f"Linear head {path}: {donor.linear.out_features} -> {len(labels)} classes; "
+                "no output weights transfer. This is equivalent to random linear initialization "
+                "for the same encoder and training settings; configured variants are not deduplicated.",
+                UserWarning, stacklevel=2,
+            )
+        return donor
 
     @classmethod
-    def _replace_head(cls, network: ClassificationModel, labels: Mapping[str, int], settings: Mapping) -> None:
-        """Replace the selected component while preserving the retained model's graph."""
+    def _replace_head(cls, network: ClassificationModel, labels: Mapping[str, int], settings: Mapping, donor=None) -> None:
+        """Use native constructors/shape intersection, never transplant a donor backbone."""
         original = cls._classification_head(network)
-        donor = cls._head_donor(original, labels, settings)
         if settings["replace"] == "linear":
-            # reshape_outputs() preserves same-size layers, but a fresh CE run
-            # must reset this layer even when the target class count is unchanged.
-            original.linear = (
-                torch.nn.Linear(original.linear.in_features, len(labels))
-                if donor is None else deepcopy(donor.linear)
-            )
+            # Always create a fresh target, even if the SupCon output count already
+            # matches: an incompatible donor must not retain the old output map.
+            target = torch.nn.Linear(original.linear.in_features, len(labels))
+            original.linear = target
+            source = donor.linear if donor is not None else None
         elif settings["replace"] == "full":
-            replacement = (
-                Classify(original.conv.conv.in_channels, len(labels))
-                if donor is None else deepcopy(donor)
-            )
-            replacement.i = original.i
-            replacement.f = original.f
-            replacement.type = original.type
-            replacement.np = sum(parameter.numel() for parameter in replacement.parameters())
-            network.model[-1] = replacement
+            conv = original.conv.conv
+            target = Classify(conv.in_channels, len(labels), conv.kernel_size, conv.stride, conv.padding, conv.groups)
+            initialize_weights(target)
+            target.i, target.f, target.type = original.i, original.f, original.type
+            target.np = sum(parameter.numel() for parameter in target.parameters())
+            network.model[-1] = target
+            source = donor
+        if source is not None:
+            target.load_state_dict(intersect_dicts(source.state_dict(), target.state_dict()), strict=False)
 
     @classmethod
     def from_checkpoint(
@@ -412,7 +437,7 @@ class YoloClassifierModel(torch.nn.Module):
     def _classification_head(network: ClassificationModel) -> Classify:
         """Reject detection networks and other non-YOLO-classifier structures early."""
         if not isinstance(network, ClassificationModel) or not isinstance(network.model[-1], Classify):
-            raise ValueError("Expected a YOLO classification model with a Classify head")
+            raise NotImplementedError("Only YOLO classification models with a Classify head are supported")
         return network.model[-1]
 
     @classmethod
@@ -423,13 +448,3 @@ class YoloClassifierModel(torch.nn.Module):
         except TypeError as error:
             raise ValueError("Expected an Ultralytics classification checkpoint format") from error
         return network
-
-    @staticmethod
-    def _validate_donor(original: Classify, donor: Classify, boundary: str, num_classes: int) -> None:
-        """Validate the transferred component's interface, not unrelated donor backbone layers."""
-        if donor.linear.out_features != num_classes:
-            raise ValueError("Head checkpoint output shape is incompatible with target classes")
-        if boundary == "linear" and donor.linear.in_features != original.linear.in_features:
-            raise ValueError("Head checkpoint linear input features are incompatible")
-        if boundary == "full" and donor.conv.conv.in_channels != original.conv.conv.in_channels:
-            raise ValueError("Head checkpoint Classify input channels are incompatible")

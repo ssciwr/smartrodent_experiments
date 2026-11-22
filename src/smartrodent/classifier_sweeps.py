@@ -118,6 +118,7 @@ class ClassifierSweepConfiguration:
         validate_output_paths(
             [configuration.output_directory for configuration in sweep.configurations],
             sources=(checkpoint,), roots=(sweep.output_directory,),
+            native_directories=[configuration.output_directory for configuration in sweep.configurations],
         )
         return sweep
 
@@ -134,6 +135,7 @@ class ClassifierSweepConfiguration:
             [configuration.output_directory for configuration in self.configurations],
             [path for configuration in self.configurations for path in (configuration.train_dataset, configuration.validation_dataset)],
             sources, (self.output_directory,),
+            native_directories=[configuration.output_directory for configuration in self.configurations],
         )
 
 
@@ -179,8 +181,9 @@ class ClassifierSweepExperiment:
         """Retain preparation separately from expensive training and filesystem writes."""
         self.configuration = configuration
         self.encoder_provenance = deepcopy(dict(encoder_provenance or {}))
+        head_cache = {}
         self.experiments = tuple(
-            ClassifierExperiment(candidate, encoder_provenance=self.encoder_provenance)
+            ClassifierExperiment(candidate, encoder_provenance=self.encoder_provenance, head_cache=head_cache)
             for candidate in configuration.configurations
         )
 

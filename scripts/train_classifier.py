@@ -1,4 +1,4 @@
-"""Train a standalone CE classifier sweep from one YAML configuration."""
+"""Train a native Ultralytics head-only classifier sweep from one YAML configuration."""
 
 import argparse
 from pathlib import Path
