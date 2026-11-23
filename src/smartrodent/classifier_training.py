@@ -179,7 +179,6 @@ class _HeadValidator(ClassificationValidator):
         """Initialize native metrics and full-split unweighted CE accumulation."""
         super().init_metrics(model)
         self.ce_total = torch.zeros((), device=self.device)
-        self.ce_count = 0
 
     def postprocess(self, preds):
         """Keep raw logits until the matching batch targets reach update_metrics."""
@@ -192,7 +191,6 @@ class _HeadValidator(ClassificationValidator):
         # Native val/loss averages batch means (and can use class weights).
         # Preserve ce_loss_mean's existing, unweighted whole-split definition.
         self.ce_total += torch.nn.functional.cross_entropy(self.raw_logits, batch["cls"], reduction="sum")
-        self.ce_count += len(batch["cls"])
         self.raw_logits = None
 
     def get_stats(self):
@@ -200,7 +198,7 @@ class _HeadValidator(ClassificationValidator):
         metrics = super().get_stats()
         actual = torch.cat(self.targets).numpy()
         predicted = torch.cat(self.pred)[:, 0].numpy()
-        return {**metrics, "ce_loss_mean": self.ce_total.item() / self.ce_count,
+        return {**metrics, "ce_loss_mean": self.ce_total.item() / len(actual),
                 **{name: float(scorer(actual, predicted)) for name, scorer in self.experiment.scorers.items()}}
 
 
@@ -236,7 +234,7 @@ class _HeadTrainer(ClassificationTrainer):
             self.model.model[-1].drop.p = self.args.dropout
         for event, callbacks in self.callbacks.items():
             self.callbacks[event] = [fn for fn in callbacks if fn.__module__ != "ultralytics.utils.callbacks.mlflow"]
-        self.best_epoch, self.best_value, self.best_metrics = 0, None, {}
+        self.best_epoch, self.best_metrics = 0, {}
         self.add_callback("on_fit_epoch_end", self._log_epoch)
 
     def get_dataset(self):
@@ -281,7 +279,7 @@ class _HeadTrainer(ClassificationTrainer):
         # Match native checkpoint publication, which also retains the latest epoch on an exact tie.
         if self.best_fitness is None or fitness >= self.best_fitness:
             self.best_fitness = fitness
-            self.best_epoch, self.best_value, self.best_metrics = self.epoch + 1, value, dict(metrics)
+            self.best_epoch, self.best_metrics = self.epoch + 1, dict(metrics)
         return metrics, fitness
 
     def _log_epoch(self, trainer):
@@ -295,7 +293,12 @@ class _HeadTrainer(ClassificationTrainer):
     def final_eval(self):
         """Finalize native files without rescoring or rediscovering shared dataset paths."""
         last = strip_optimizer(self.last)
-        strip_optimizer(self.best, updates={"train_results": last.get("train_results")})
+        best = strip_optimizer(self.best, updates={"train_results": last.get("train_results")})
+        if not best:
+            raise ValueError(f"Native best checkpoint could not be finalized: {self.best}")
+        model = best["model"]
+        self.best_metadata = {"label_names": {name: index for index, name in model.names.items()},
+                              "provenance": model.provenance}
         self.metrics = self.best_metrics
 
 
@@ -361,7 +364,7 @@ class ClassifierExperiment:
             if config.mlflow:
                 mlflow.set_tags(source_tags)
                 mlflow.log_params({"tracked_metric": config.tracked_metric, "tracked_mode": config.effective_tracked_mode})
-            result, model, snapshot = self._run_training(run_id)
+            result, snapshot = self._run_training(run_id)
             with result.best_checkpoint.open("rb") as stream:
                 checksum = hashlib.file_digest(stream, "sha256").hexdigest()
             self._write_model_card(result, snapshot, checksum, source_tags)
@@ -370,7 +373,7 @@ class ClassifierExperiment:
                 mlflow.log_metric(prefix + config.tracked_metric, result.best_value, step=result.best_epoch)
                 mlflow.log_metric("best_epoch", result.best_epoch)
                 if self.champion_registry is not None:
-                    version = self._publish_best_model(result, model, snapshot, checksum, source_tags)
+                    version = self._publish_best_model(result, snapshot, checksum, source_tags)
                     result = replace(result, registered_model_version=version)
                     if not defer_promotion:
                         self.champion_registry.promote(result)
@@ -399,20 +402,18 @@ class ClassifierExperiment:
         result = ExperimentResult(
             output_directory=config.output_directory,
             last_checkpoint=config.output_directory / "weights/last.pt", best_checkpoint=config.output_directory / "weights/best.pt",
-            best_epoch=trainer.best_epoch, best_value=trainer.best_value,
+            best_epoch=trainer.best_epoch, best_value=float(trainer.best_metrics[config.tracked_metric]),
             tracked_metric=config.tracked_metric, tracked_mode=config.effective_tracked_mode,
             validation_dataset=config.validation_dataset, mlflow_run_id=run_id,
         )
-        # Native files contain the complete module; keep this one restored best model for publication.
-        best = YoloClassifierModel._load_native(result.best_checkpoint.resolve()).eval()
-        snapshot = {"epoch": result.best_epoch, "label_names": {name: index for index, name in best.names.items()},
-                    "history": [{"validation": trainer.best_metrics if config.validation_dataset is not None else {}}],
-                    "provenance": best.provenance}
-        return result, best, snapshot
+        # Native finalization already read the selected file; retain metadata, not another model.
+        return result, {"epoch": result.best_epoch, **trainer.best_metadata,
+                        "history": [{"validation": trainer.best_metrics if config.validation_dataset is not None else {}}]}
 
-    def _publish_best_model(self, result, model, snapshot, checksum, source_tags):
-        """Publish best.pt without changing aliases until every sweep candidate succeeds."""
+    def _publish_best_model(self, result, snapshot, checksum, source_tags):
+        """Restore best weights only for registry publication, without premature promotion."""
         config = self.configuration
+        model = YoloClassifierModel._load_native(result.best_checkpoint.resolve()).eval()
 
         def write_card(version, identity):
             self._write_model_card(result, snapshot, checksum, {**source_tags, **identity}, version=version)

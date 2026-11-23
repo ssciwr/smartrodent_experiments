@@ -204,6 +204,67 @@ def _assert_registered_classifier(store, result):
     return version
 
 
+@pytest.mark.parametrize("tracking", [False, True])
+def test_artifact_only_runs_retain_selected_metadata_without_extra_model_restore(
+    standalone_configuration, tracking_store, scripted_validation, monkeypatch, tracking
+):
+    """Cards reuse native-finalized metadata without another model reconstruction."""
+    import smartrodent.classifier_model as classifier_models
+
+    restores = []
+    original = classifier_models.load_checkpoint
+
+    def restore(weight, *args, **kwargs):
+        restores.append(Path(weight).resolve())
+        return original(weight, *args, **kwargs)
+
+    monkeypatch.setattr(classifier_models, "load_checkpoint", restore)
+    config = replace(standalone_configuration, mlflow=MlflowConfiguration(**tracking_store.configuration) if tracking else None)
+    result = ClassifierExperiment(config, encoder_provenance={"encoder_run_id": "selected-encoder-run"}).run_with_result()
+    assert restores == []
+    assert result.best_epoch == 2 and result.best_value == 0.9
+    card = yaml.safe_load(result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
+    assert card["classes"] == {0: "mouse", 1: "rat"}
+    assert card["validation"]["epoch"] == 2
+    assert card["validation"]["metrics"]["balanced_accuracy"] == 0.9
+    assert card["provenance"]["encoder_run_id"] == "selected-encoder-run"
+    assert card["provenance"]["checkpoint_sha256"] == hashlib.sha256(result.best_checkpoint.read_bytes()).hexdigest()
+    checkpoint = YOLO(str(result.best_checkpoint), task="classify").model
+    assert checkpoint.names == card["classes"]
+    assert checkpoint.provenance["encoder_run_id"] == "selected-encoder-run"
+    if tracking:
+        run = tracking_store.client.get_run(result.mlflow_run_id)
+        assert run.info.status == "FINISHED" and run.data.metrics["best_epoch"] == 2
+        downloaded = _download(tracking_store, result.mlflow_run_id, "best_model/best.model_card.yaml")
+        assert downloaded.read_bytes() == result.best_checkpoint.with_suffix(".model_card.yaml").read_bytes()
+    else:
+        assert result.mlflow_run_id is None
+
+
+def test_corrupt_native_best_checkpoint_cannot_be_reported_or_published(
+    standalone_configuration, monkeypatch
+):
+    """Skipping unnecessary model reconstruction must not hide a corrupt selected file."""
+    from pickle import UnpicklingError
+    from ultralytics.models.yolo.classify.train import ClassificationTrainer
+
+    original = ClassificationTrainer.save_model
+    writes = []
+
+    def save(self):
+        original(self)
+        writes.append(self.best)
+        self.best.write_bytes(b"corrupt native best checkpoint")
+
+    monkeypatch.setattr(ClassificationTrainer, "save_model", save)
+    config = replace(standalone_configuration, epochs=1)
+    with pytest.raises((ValueError, UnpicklingError), match="checkpoint|finaliz|pickle"):
+        ClassifierExperiment(config).run_with_result()
+    assert writes == [config.output_directory / "weights/best.pt"]
+    assert not (config.output_directory / "weights/best.model_card.yaml").exists()
+    assert not (config.output_directory / "weights/best.model_card.md").exists()
+
+
 @pytest.mark.parametrize("register", [False, True])
 def test_shared_tracking_configuration_round_trips_before_training(
     tracking_document, tracking_store, tmp_path, register

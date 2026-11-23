@@ -199,8 +199,9 @@ def validate_output_paths(directories: Sequence[Path], datasets=(), sources=(), 
     for index, directory in enumerate(outputs):
         if any(directory.is_relative_to(other) or other.is_relative_to(directory) for other in outputs[index + 1:]):
             raise ValueError("output_directory paths must not overlap")
-    for dataset in datasets:
-        if dataset is not None and any(output.is_relative_to(Path(dataset).resolve()) for output in [*outputs, *roots]):
+    inputs = [Path(dataset).resolve() for dataset in datasets if dataset is not None]
+    for dataset in inputs:
+        if any(output.is_relative_to(dataset) for output in [*outputs, *roots]):
             raise ValueError("output_directory must be outside both input datasets")
     names = ("config.yaml", "history.yaml", "last.pt", "best.pt", ".last.pt.tmp", ".best.pt.tmp", "best.model_card.yaml", "best.model_card.md")
     artifacts = [directory / name for directory in outputs for name in names]
@@ -217,8 +218,8 @@ def validate_output_paths(directories: Sequence[Path], datasets=(), sources=(), 
         native_artifacts.extend(directory.glob("*.png"))
         native_artifacts.extend(path for path in (directory / "weights").glob("*") if path.is_file())
     artifacts.extend(native_artifacts)
-    for dataset in datasets:
-        if dataset is not None and any(artifact.resolve().is_relative_to(Path(dataset).resolve()) for artifact in artifacts):
+    for dataset in inputs:
+        if any(artifact.resolve().is_relative_to(dataset) for artifact in artifacts):
             raise ValueError("Output artifacts must remain outside both input datasets, including aliases")
     # Native writers truncate existing files. Reject shared inodes rather than
     # scanning large datasets; SupCon's intentional checkpoint hardlinks remain valid.

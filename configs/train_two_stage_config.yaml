@@ -38,7 +38,7 @@ supcon:
   model_name: ./yolo26x-cls.pt  # YOLO classification checkpoint (.pt) or architecture YAML.
   epochs: 30  # Integer >0.
   transforms: &tf  # torchvision v2 keyword arguments.
-    image_size:  # Integer >0; square image size.
+    image_size: 640 # Integer >0; square image size.
     resize:
       interpolation: bilinear  # nearest | nearest-exact | bilinear | bicubic
       antialias: true  # true | false
@@ -110,7 +110,7 @@ supcon:
 classifier:
   initialization:
     encoder:
-      source: selected_supcon  # Option: selected_supcon (selected SupCon checkpoint).
+      source: selected_supcon
     head:
       replace: !sweep  # linear (final Linear layer) | full (entire Classify block)
         values:
@@ -125,7 +125,6 @@ classifier:
         values:
           - null
           - ./yolo26x-cls.pt
-  freeze_encoder: true  # true (freeze encoder parameters) | false (fine-tune).
   encoder_batchnorm: eval  # eval (fixed statistics) | adapt (update statistics).
   epochs: 30  # Integer >0.
   batch_size: 48  # Integer >0; single-view CE batch size.
@@ -133,12 +132,17 @@ classifier:
   device: cuda  # cpu | cuda | cuda:N | another available PyTorch device.
   seed: 42  # Integer in [0, 2**32).
   transforms: *tf
-  optimizer:  # AdamW keyword arguments; also accepts native options such as foreach/fused.
-    lr: 0.0005  # Float >0.
-    betas: [0.9, 0.999]  # Two moment-decay rates, each in [0, 1).
-    eps: 1.0e-08  # Nonnegative numerical-stability term.
-    weight_decay: 0.01  # Float >=0.
-    amsgrad: false  # true | false
+  train_kwargs:  # Native Ultralytics options; shared paths/batch/device/seed stay outside this mapping.
+    optimizer: AdamW  # auto | Adam | Adamax | AdamW | NAdam | RAdam | RMSprop | SGD | MuSGD
+    lr0: 0.0005  # Positive initial learning rate; auto chooses its own rate.
+    momentum: 0.9  # SGD momentum / Adam first-moment decay.
+    weight_decay: 0.01  # Nonnegative native weight decay.
+    cos_lr: false  # false=linear LR schedule; true=cosine.
+    lrf: 0.01  # Final learning rate as a fraction of lr0; 1 keeps it constant after warmup.
+    warmup_epochs: 0.0  # Nonnegative warmup duration; fractional epochs are supported.
+    patience: 6  # Native early-stopping patience; 0 disables stopping.
+    amp: false  # false/fp32=FP32; true/fp16=AMP; bf16=BF16 AMP.
+    plots: false  # true writes native diagnostic plots.
   validation_metrics:  # Named sklearn scorer specifications | null (CE loss only).
     accuracy:
       function: accuracy_score  # sklearn.metrics function returning a scalar from labels.
@@ -150,21 +154,6 @@ classifier:
       zero_division: 0  # warn | 0 | 1 | .nan
   tracked_metric: balanced_accuracy  # ce_loss_mean | a validation_metrics alias.
   tracked_mode: max  # min | max | null (infer direction).
-  scheduler:  # Scheduler settings | null (constant learning rate).
-    name: ReduceLROnPlateau  # Supported scheduler: ReduceLROnPlateau.
-    parameters:
-      mode: max  # min | max
-      factor: 0.5  # Float strictly between 0 and 1.
-      patience: 2  # Integer >=0; bad epochs tolerated.
-      threshold: 0.0005  # Float >=0; improvement threshold.
-      threshold_mode: abs  # abs | rel
-      min_lr: 0.000001  # Float >=0; learning-rate floor.
-      cooldown: 0  # Integer >=0; cooldown epochs.
-      # eps: 1.0e-08  # Optional float >=0; minimum learning-rate change.
-  early_stopping:  # Stopping settings | null (disabled).
-    patience: 6  # Integer >0; consecutive insufficient improvements.
-    tolerance: 0.001  # Float >=0; absolute improvement tolerance.
-    comparison: greater  # less (minimize) | greater (maximize)
   # model_card_template: configs/model_card_template.yaml  # Optional template path.
 
 mlflow:  # Tracking settings | null (disabled).

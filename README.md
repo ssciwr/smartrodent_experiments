@@ -111,7 +111,7 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`training_validation.py`](src/smartrodent/training_validation.py) | Shared configuration schemas, parsing, serialization, and output/input path protections. |
 | [`training.py`](src/smartrodent/training.py) | `YoloDetectionTrainer`, `YoloClassificationTrainer`: wrappers around Ultralytics train/tune/export. |
 | [`supcon_model.py`](src/smartrodent/supcon_model.py), [`supcon_training.py`](src/smartrodent/supcon_training.py) | `YoloSupConModel`, `TrainingConfiguration`, `SupConExperiment`, `load_training_configurations()`, `run_training()`. |
-| [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierModel`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and fresh CE training. |
+| [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierModel`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and native Ultralytics head training. |
 | [`classifier_sweeps.py`](src/smartrodent/classifier_sweeps.py) | `ClassifierSweepConfiguration`, `ClassifierSweepExperiment`: prepare/run candidates and select the validated winner. |
 | [`two_stage_training.py`](src/smartrodent/two_stage_training.py) | `TwoStageConfiguration`, `TwoStageExperiment`: SupCon selection followed by a classifier sweep. |
 | [`experiment_support.py`](src/smartrodent/experiment_support.py), [`experiment_results.py`](src/smartrodent/experiment_results.py) | Transforms, schedulers, stopping, checkpoint storage, tracking/publication, and structured results. |
@@ -229,7 +229,7 @@ the files merely because both workflows train a YOLO-based classifier.
 | Review materialization/reconciliation | Input/output paths, rejection-column prefix or corrected partition/column lists, accepted image suffixes. |
 | Splitting/sampling/downsampling | Input/output metadata roots, record discovery, split/sampling rules, seeds, or per-class caps. |
 | YOLO dataset creators | Exactly one key under `data`: `YoloDetectorDatasetCreatorFromSpeciesnet` or `YoloClassifierDatasetCreatorFromSpeciesnet`. |
-| Modern standalone training | Top-level data/output settings plus transforms, AdamW options, validation, tracking, and model/initialization settings. |
+| Modern standalone training | Top-level data/output, transforms, validation, tracking, and model/initialization settings; SupCon uses AdamW options, CE uses native `train_kwargs`. |
 | Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, and optional shared `mlflow`. |
 | Ultralytics wrappers | Dataset/model, trainer options, native train/tune/export kwargs, and optional wrapper-specific MLflow settings. |
 | Model cards | [`model_card_template.yaml`](configs/model_card_template.yaml): model, classes, validation, provenance, and editable narrative. |
@@ -274,38 +274,46 @@ project loader.
 | Node | Choices/meaning |
 | --- | --- |
 | `transforms` | torchvision v2 keyword dictionaries; `image_size` is a positive square size. Augmentation `p` values range from 0 to 1. |
-| `optimizer` | Native AdamW kwargs, including a positive `lr`; this is not an optimizer-name selector. |
+| SupCon `optimizer` | AdamW kwargs, including a positive `lr`; this is not an optimizer-name selector. |
+| CE `train_kwargs` | Native Ultralytics training options such as `optimizer`, `lr0`, `lrf`, `cos_lr`, `warmup_epochs`, `patience`, and `amp`. Shared model/data/output/batch/device/seed and frozen-encoder policy cannot be overridden here. |
 | `epochs`, `workers`, `seed`, `device` | Maximum epoch count, nonnegative loader worker count, integer seed in `[0, 2**32)`, and PyTorch device such as `cpu`/`cuda:0`. |
 | `validation_dataset` | Existing class-folder validation split, or `null` for standalone training-only operation. Two-stage selection uses validation. |
 | `validation_metrics` | Named sklearn metric specifications, or `null`. Each receives true/predicted labels, not probabilities. `function` names the metric; other entries are native kwargs. |
 | `tracked_metric` | SupCon native loss statistic/custom alias, or CE's `ce_loss_mean`/custom alias. SupCon defaults to `supcon_loss_mean`; CE defaults to `ce_loss_mean`. |
 | `tracked_mode` | `min`, `max`, or `null`/omitted for inferred loss-min/score-max direction. |
-| `scheduler` | `null`/omitted for constant LR, or `name: ReduceLROnPlateau` with `parameters`. |
-| `early_stopping` | `null`/omitted, or positive `patience`, nonnegative absolute `tolerance`, and `comparison: less`/`greater`. |
+| SupCon `scheduler` | `null`/omitted for constant LR, or `name: ReduceLROnPlateau` with `parameters`. |
+| SupCon `early_stopping` | `null`/omitted, or positive `patience`, nonnegative absolute `tolerance`, and `comparison: less`/`greater`. |
 | `mlflow` | `null`/omitted, or tracking/registry settings described below. |
 | `model_card_template` | Optional template path; defaults to `configs/model_card_template.yaml`. |
 
 Native SupCon validation statistics are `supcon_loss_min`,
 `supcon_loss_mean`, `supcon_loss_std`, and `supcon_loss_max`; custom aliases
-cannot replace them. CE reserves `ce_loss_mean`. Metric specs can include, for
-example, `function: f1_score`, `average: macro`, and `zero_division: 0`.
+cannot replace them. CE reserves `ce_loss_mean` and native names `fitness`,
+`val/loss`, `metrics/accuracy_top1`, `metrics/accuracy_top5`, `train/loss`, `epoch`,
+`time`, and native learning-rate fields `lr/pgN` (integer group index). Sklearn
+aliases cannot overwrite these fields. Metric specs can include `function: f1_score`,
+`average: macro`, and `zero_division: 0`.
 
-Use `min`/`less` for loss and `max`/`greater` for scores where larger is better.
-Align scheduler mode and early-stopping comparison with the selected direction.
-Scheduler `patience: 2` tolerates two bad epochs and reduces LR after the third;
-early-stopping patience counts consecutive insufficient improvements. Scheduler
-thresholds and stopping tolerance are independent. Reducing LR does not reset
-early-stopping patience. Best-checkpoint selection uses strict improvement;
-tolerance controls stopping, not whether a slightly better checkpoint is saved.
+Use `min` for losses and `max` for scores where larger is better. SupCon's
+scheduler mode and stopping `comparison: less`/`greater` must agree with that
+direction. Its scheduler patience, stopping tolerance, and strictly improving
+best-checkpoint selection retain their existing meanings. Without SupCon
+validation, disable validation metrics/scheduling/stopping and leave
+`tracked_metric`/`tracked_mode` omitted or null.
 
-Validation-driven metrics, scheduling, and stopping need a validation split.
-For standalone training without validation, disable custom validation metrics,
-scheduling, and stopping. SupCon also leaves `tracked_metric`/`tracked_mode`
-omitted or null; CE uses `ce_loss_mean` rather than a custom validation alias.
+CE uses the configured objective as native fitness, including for native
+stopping and best selection; it does not silently substitute top-1 accuracy.
+`train_kwargs.patience: 0` disables stopping. Native best weights retain the
+latest tied epoch within a run; sweep selection still keeps the first tied
+candidate. Training-only CE uses `ce_loss_mean`, not a validation metric alias.
+CE `ce_loss_mean` on validation remains unweighted full-split mean cross-entropy,
+separate from native `val/loss` batch aggregation or optional class weighting.
 
-Both modern training loops use FP32 and start fresh optimizer state; their
-scripts do not expose AMP or training resumption. Saved optimizer/scheduler
-state does not imply that a resume CLI exists.
+SupCon remains FP32. CE accepts native `amp` settings; the examples explicitly
+use FP32. Both start fresh optimizer state. The scripts do not expose training
+resumption, and CE rejects `train_kwargs.resume`. CE's former `optimizer`,
+`scheduler`, `early_stopping`, and `freeze_encoder` nodes are no longer accepted;
+use native `train_kwargs` and the fixed head-only boundary instead.
 
 ### Inspect configuration without training
 
@@ -438,19 +446,29 @@ The encoder format is explicit:
 | `ultralytics` | Local native Ultralytics classification checkpoint. |
 | `classifier` | Portable SmartRodent CE classifier checkpoint. |
 
-`head.replace: linear` replaces only the final linear layer.
-`head.replace: full` replaces the whole native `Classify` block, including its
-convolution/BatchNorm, pooling, dropout, and linear layer. `head.source: random`
-creates fresh head weights; `yolo_checkpoint` transfers them from an explicit
-native classifier donor. A random head accepts an omitted/null donor; transfer
-needs compatible dimensions and the exact target class names/IDs. A stock
-ImageNet head is not a species-matched donor, even if its backbone is a valid
-starting encoder.
+All supported encoder formats contain YOLO classification models, not arbitrary
+Torch modules. Unsupported non-YOLO models raise `NotImplementedError`.
+`head.replace: linear` replaces/trains only the final linear layer; everything
+before it, including the head convolution/BatchNorm, is encoder.
+`head.replace: full` replaces/trains the entire native `Classify` block.
 
-`freeze_encoder: true` freezes parameters before the chosen head boundary;
-`false` enables fine-tuning. `encoder_batchnorm: eval` fixes encoder running
-statistics, while `adapt` updates them during training, including when encoder
-parameters are frozen. The selected trainable head follows normal train mode.
+`head.source: random` uses native constructors, not a custom initialization
+scheme. `yolo_checkpoint` copies only shape-compatible tensors from an explicit
+native classifier donor into that fresh target head. It never transfers the
+donor backbone. Class-name equality is not required, and rows are copied by
+shape, not remapped semantically. A 1,000→26 full head can transfer its compatible
+convolution/BatchNorm while leaving the output linear fresh. A linear-only
+1,000→26 donor transfers no output weights: a warning before training flags its
+equivalence to random linear initialization. All configured variants still run.
+A random head accepts an omitted/null donor checkpoint.
+
+Encoder parameters are always frozen. `encoder_batchnorm: eval` fixes encoder
+running statistics; `adapt` updates only those statistics during training.
+Frozen encoder Dropout stays in eval mode. The selected head trains normally;
+`train_kwargs.dropout` can configure Dropout only for `replace: full`.
+Configured torchvision augmentations remain the actual training transforms;
+validation uses deterministic, unaugmented preprocessing. Dataset/cache-writing
+native discovery and conflicting augmentation options are not used.
 
 CE uses ordinary shuffled, single-view batches and retains the final partial
 batch. Validation traverses the full split, computes sample-weighted mean CE,
@@ -459,8 +477,9 @@ optimizer. With validation, candidates are ranked by the configured objective;
 first-in-expansion-order wins a local tie. Without validation, standalone
 training is allowed but no validated sweep winner/champion is selected.
 
-A single candidate writes checkpoints at the output root; multiple candidates
-use `run_001`, etc. The sweep also writes root `config.yaml` and `selection.yaml`.
+A single candidate uses the output root; multiple candidates use `run_001`, etc.
+Each run writes native `weights/best.pt`, `weights/last.pt`, and `results.csv`.
+The sweep also writes root `config.yaml` and `selection.yaml`.
 
 ### Two-stage SupCon → CE
 
@@ -470,8 +489,8 @@ python scripts/train_two_stage.py configs/train_two_stage_config.yaml
 
 The root owns shared data, output root, and MLflow settings. `supcon` and
 `classifier` contain their respective stage settings rather than copies of the
-shared paths/classes. The classifier encoder source in this schema is the
-placeholder `selected_supcon`, not the three standalone encoder-format choices.
+shared paths/classes. Two-stage orchestration owns classifier encoder binding;
+standalone encoder source/path choices cannot override the selected winner.
 
 Execution:
 
@@ -505,23 +524,22 @@ classifier champion-comparison workflow.
 
 ### Modern experiment artifacts
 
-Each SupCon/CE run stores:
+| Artifact | SupCon | Native CE |
+| --- | --- | --- |
+| Concrete owned configuration | `config.yaml` | `config.yaml` plus native `args.yaml` |
+| Epoch history | `history.yaml` | `results.csv` and checkpoint `train_results` |
+| Latest weights | `last.pt` | `weights/last.pt` |
+| Selected best weights | `best.pt` | `weights/best.pt` |
+| Selected snapshot cards | `best.model_card.yaml` / `.md` | `weights/best.model_card.yaml` / `.md` |
 
-| File | Meaning |
-| --- | --- |
-| `config.yaml` | Concrete configuration for that run. |
-| `history.yaml` | Completed-epoch loss/validation history and available learning-rate fields. |
-| `last.pt` | Latest completed epoch. Replaced after each completed epoch. |
-| `best.pt` | Best epoch by strict improvement of the tracked objective. |
-| `best.model_card.yaml`, `best.model_card.md` | Selected best snapshot's metadata, validation results, and provenance. |
-
-There are no automatically retained `epoch_0001.pt`, `epoch_0002.pt`, etc.
-Checkpoints embed architecture, model state, label mapping, configuration,
-optimizer state, and optional scheduler state; CE also records encoder
-provenance. The scheduler steps before saving, so saved optimizer/scheduler
-state reflects the next epoch's learning rate. SupCon history/tracking exposes
-`learning_rate` and `next_learning_rate`; CE history records
-`next_learning_rate`.
+SupCon checkpoints embed architecture/state, label mapping, configuration,
+optimizer and optional scheduler state. Its history exposes `learning_rate`
+and `next_learning_rate`. CE saves complete native classification modules with
+native `.names` and encoder-selection `.provenance`. Native finalization strips
+optimizer state and sets checkpoint `epoch` to `-1`; use the selected result,
+selection summary or card for the best epoch, not the full history length.
+Periodic CE snapshots are available through native `train_kwargs.save_period`.
+Saved optimizer metadata does not imply a supported resume CLI.
 
 For a two-stage experiment with multiple classifier candidates:
 
@@ -541,7 +559,14 @@ For a two-stage experiment with multiple classifier candidates:
     config.yaml
     selection.yaml
     run_001/                 # Numbered for multiple CE candidates
-      ...                    # Same per-run artifact names
+      config.yaml
+      args.yaml
+      results.csv
+      weights/
+        best.pt
+        last.pt
+        best.model_card.yaml
+        best.model_card.md
     run_002/
       ...
 ```
@@ -553,36 +578,35 @@ old checkpoints to infer a winner. Completed artifacts/registry versions may
 remain after a later failure. Use a fresh output root for a new experiment and
 do not write concurrently to one run directory.
 
-Checkpoint publication is atomic per file, not a transaction across all
-artifacts. The storage implementation uses hard links for `best.pt`; the
-filesystem must support them. It does not prune arbitrary old outputs or provide
-power-loss durability guarantees.
+SupCon publishes checkpoints atomically per file and uses hard links for
+`best.pt`; its filesystem must support them. CE uses the native checkpoint
+writer/finalization. Neither is a transaction across all artifacts or provides
+power-loss durability guarantees; arbitrary old outputs are not pruned.
 
 ### Reloading without the original starting weights
 
-Portable checkpoints reconstruct their architecture and trained state without
-the original pretrained file or notebook session:
+SupCon and new native CE checkpoints reload without the original starting
+weights or notebook session:
 
 ```python
+from ultralytics import YOLO
 from smartrodent.supcon_model import YoloSupConModel
-from smartrodent.classifier_model import YoloClassifierModel
 
 supcon = YoloSupConModel.from_checkpoint(
     "runs/supcon_standalone_xl_srilanka_lr-00001/best.pt", device="cpu"
 )
-classifier = YoloClassifierModel.from_checkpoint(
-    "runs/classifier_xl_srilanka/run_001/best.pt", device="cpu"
-)
-print(classifier.label_names)  # Species name -> integer ID.
-# classifier(images) returns raw logits, including in evaluation mode.
-# Release the SupCon feature hook when finished using that wrapper:
-supcon.finalize()
+classifier = YOLO("runs/classifier_xl_srilanka/run_001/weights/best.pt", task="classify").to("cpu")
+print(classifier.names)  # Integer ID -> species name.
+# classifier(...) uses the native prediction API.
+# classifier.model in eval mode returns (probabilities, logits).
+supcon.finalize()  # Release the SupCon feature hook when finished.
 ```
 
-Use the appropriate loader for each format. In particular, a modern portable
-CE checkpoint is not a native YOLO head-donor checkpoint. Native Ultralytics
-and logged pickled models must come from trusted sources. Portability does not
-remove the need for compatible installed PyTorch/Ultralytics/library versions.
+`YoloClassifierModel.from_checkpoint()` remains a reader for older portable CE
+artifacts; those inputs use encoder `source: classifier`. New CE weights use
+`source: ultralytics` and can serve as native head donors. Both native and
+portable pickled checkpoints must come from trusted sources. Portability still
+requires compatible installed PyTorch/Ultralytics/library versions.
 
 For library-driven execution, use `SupConExperiment(configuration).run_with_result()`,
 `ClassifierExperiment(configuration).run_with_result()`,
@@ -753,7 +777,7 @@ Runs record stage-specific parameters and epoch metrics, selected best values
 and epochs, source Git/data tags, and best checkpoint/cards. CE metrics use
 `training/ce_loss_mean` and `validation/<metric>`; SupCon records native training
 loss statistics, validation metrics, and current/next learning rates. Local
-`config.yaml` and `history.yaml` remain useful independently of the tracking UI.
+`config.yaml` and SupCon `history.yaml` / CE `results.csv` remain useful independently of the tracking UI.
 
 Modern experiments own their MLflow run contexts. An unrelated active run or
 `MLFLOW_RUN_ID` requesting implicit resumption is rejected rather than silently
