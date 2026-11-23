@@ -379,6 +379,17 @@ FREEZE_CASES = [
 ]
 
 
+def _mode_dependent_modules(model):
+    """Yield modules whose behavior depends on train/eval mode.
+
+    Stateless modules such as Ultralytics' shared default SiLU are excluded: one
+    instance may belong to frozen and trainable layers but is listed only once.
+    """
+    for name, module in model.named_modules():
+        if isinstance(module, (torch.nn.Dropout, torch.nn.BatchNorm2d)):
+            yield name, module
+
+
 def _is_frozen(name, frozen_prefixes):
     """Match a module/parameter name to layer prefixes without confusing layer 1 with 10."""
     return any(f"{name}.".startswith(prefix) for prefix in frozen_prefixes)
@@ -433,10 +444,10 @@ def test_configured_freeze_controls_native_gradients_modes_and_updates(
         elif name.endswith(".weight"):
             assert not torch.equal(record.before[name], record.after[name]), name
     # Frozen layers are fully in eval mode (including Dropout); only their
-    # BatchNorm statistics may adapt. Every other module trains natively.
+    # BatchNorm statistics may adapt. Every other Dropout/BatchNorm trains natively.
     assert record.modes
     for modes in record.modes:
-        for name, module in model.named_modules():
+        for name, module in _mode_dependent_modules(model):
             if _is_frozen(name, frozen):
                 expected = (
                     isinstance(module, torch.nn.BatchNorm2d) and batchnorm == "adapt"
@@ -1033,7 +1044,7 @@ def test_freeze_index_prefixes_do_not_capture_later_layers(
                 "nc": 2,
                 "backbone": [
                     [-1, 1, "Conv", [8, 3, 2]],
-                    *([[-1, 1, "nn.Dropout", [0.1]]] * 9),
+                    *([-1, 1, "nn.Dropout", [0.1]] for _ in range(9)),
                     [-1, 1, "Conv", [8, 3, 1]],
                 ],
                 "head": [[-1, 1, "Classify", [2]]],
@@ -1060,7 +1071,7 @@ def test_freeze_index_prefixes_do_not_capture_later_layers(
         assert not modes["model.1"]
         assert all(
             modes[name]
-            for name, _ in network.named_modules()
+            for name, _ in _mode_dependent_modules(network)
             if not _is_frozen(name, ("model.1.",))
         )
 
