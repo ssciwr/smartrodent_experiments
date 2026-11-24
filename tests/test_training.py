@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
 from hypothesis import given, strategies as st
-import numpy as np
 import pytest
 import yaml
 
@@ -159,41 +158,6 @@ def test_mlflow_uses_configured_uri_and_operation_experiments(
     assert ultralytics_settings.update.call_count == 2
 
 
-def test_classifier_uses_classification_task_and_dataset_root(tmp_path, fake_yolo):
-    dataset = tmp_path / "classifier"
-    (dataset / "train" / "mouse").mkdir(parents=True)
-
-    trainer = training.YoloClassificationTrainer(dataset, model_name="custom.pt")
-
-    assert trainer.data_yaml() == dataset
-    assert fake_yolo[-1].model_name == "custom.pt"
-    assert fake_yolo[-1].init_kwargs == {"task": "classify"}
-
-
-def test_classifier_config_without_injected_trainer_keeps_stock_path(
-    tmp_path, fake_yolo
-):
-    """Normal classifier configuration retains Ultralytics trainer selection."""
-    dataset = tmp_path / "classifier"
-    (dataset / "train" / "mouse").mkdir(parents=True)
-    config = tmp_path / "trainer.yaml"
-    config.write_text(
-        f"""train_dataset: {dataset}
-train_kwargs:
-  epochs: 2
-"""
-    )
-    trainer = training.YoloClassificationTrainer.from_config(config)
-
-    trainer.train()
-
-    train_arguments = fake_yolo[-1].train_kwargs
-    assert train_arguments["trainer"] is None
-    assert train_arguments["epochs"] == 2
-    assert "batch" not in train_arguments
-    assert "supcon" not in train_arguments
-
-
 def test_detector_collects_per_class_metrics(fake_yolo):
     trainer = training.YoloDetectionTrainer("dataset")
     box = SimpleNamespace(
@@ -276,59 +240,6 @@ def test_detector_rejects_unknown_return_format(tmp_path, fake_yolo):
 
     with pytest.raises(ValueError, match="return_format"):
         trainer.train(return_format="records")
-
-
-def test_classifier_resolves_relative_yaml_root(tmp_path, fake_yolo):
-    dataset = tmp_path / "images"
-    (dataset / "train").mkdir(parents=True)
-    metadata = tmp_path / "data.yaml"
-    metadata.write_text("path: images\n")
-
-    trainer = training.YoloClassificationTrainer(metadata)
-
-    assert trainer.data_yaml() == dataset
-
-
-@pytest.mark.parametrize(
-    ("metadata_name", "metadata", "message"),
-    [
-        ("data.yaml", "names: [mouse]\n", "No 'path' entry"),
-        ("data.txt", "images\n", "expects a dataset directory"),
-    ],
-)
-def test_classifier_rejects_invalid_metadata(
-    tmp_path, fake_yolo, metadata_name, metadata, message
-):
-    metadata_path = tmp_path / metadata_name
-    metadata_path.write_text(metadata)
-    trainer = training.YoloClassificationTrainer(metadata_path)
-
-    with pytest.raises(ValueError, match=message):
-        trainer.data_yaml()
-
-
-def test_classifier_collects_confusion_matrix_metrics(fake_yolo):
-    trainer = training.YoloClassificationTrainer("dataset")
-    validator_metrics = SimpleNamespace(top1=0.9, top5=1.0)
-    validator = SimpleNamespace(
-        names=["mouse", "rat"],
-        metrics=validator_metrics,
-        confusion_matrix=SimpleNamespace(matrix=np.array([[3, 1], [2, 4]])),
-    )
-    callback_trainer = SimpleNamespace(
-        epoch=0,
-        epochs=2,
-        metrics={},
-        validator=validator,
-        model=SimpleNamespace(names={0: "mouse", 1: "rat"}),
-    )
-
-    trainer.collect_metrics(callback_trainer)
-
-    assert trainer.history[1]["accuracy_top1"] == pytest.approx(0.9)
-    assert trainer.history[1]["classes"]["mouse"]["precision"] == pytest.approx(0.75)
-    assert trainer.history[1]["classes"]["mouse"]["recall"] == pytest.approx(0.6)
-    assert trainer.history[1]["macro_f1"] is not None
 
 
 def test_custom_yaml_tags_and_config_expansion():

@@ -30,7 +30,7 @@ def classifier_api():
 
 @pytest.fixture
 def tiny_architecture(tmp_path):
-    """Create a tiny classifier with backbone dropout to exercise strict freezing."""
+    """Create a tiny classifier whose backbone Dropout must survive head replacement."""
     torch.set_num_threads(2)
     path = tmp_path / "tiny-cls.yaml"
     path.write_text(
@@ -142,7 +142,6 @@ def _initialize(api, source, **updates):
         "label_names": {"mouse": 0, "rat": 1},
         "head_replace": "linear",
         "head_source": "random",
-        "device": "cpu",
     }
     options.update(updates)
     initialization = {
@@ -153,10 +152,8 @@ def _initialize(api, source, **updates):
             "checkpoint": options.get("head_checkpoint"),
         },
     }
-    return api.YoloClassifierModel.initialize(
-        initialization,
-        label_names=options["label_names"],
-        device=options["device"],
+    return api.YoloClassifierBuilder.initialize(
+        initialization, label_names=options["label_names"]
     )
 
 
@@ -209,7 +206,7 @@ def test_linear_random_initialization_keeps_the_encoder_and_returns_eval_mode(
     classifier_api, supcon_source
 ):
     """A linear/random head is fresh; the encoder is unchanged and nothing starts in training mode."""
-    model = classifier_api.YoloClassifierModel.initialize(
+    model = classifier_api.YoloClassifierBuilder.initialize(
         {
             "encoder": {"source": "supcon", "checkpoint": supcon_source.path},
             "head": {"replace": "linear", "source": "random"},
@@ -217,10 +214,10 @@ def test_linear_random_initialization_keeps_the_encoder_and_returns_eval_mode(
         label_names={"mouse": 0, "rat": 1},
     )
     _assert_same_state(
-        _encoder_state(model.network, "linear"),
+        _encoder_state(model, "linear"),
         _encoder_state(supcon_source.network, "linear"),
     )
-    head = model.network.model[-1].linear
+    head = model.model[-1].linear
     assert not torch.equal(head.weight, supcon_source.network.model[-1].linear.weight)
     assert all(not module.training for module in model.modules())
 
@@ -233,8 +230,8 @@ def test_fresh_linear_head_preserves_all_encoder_state(
     expected = _encoder_state(encoder_source.network, "linear")
     labels = {name: index for index, name in enumerate(sorted(class_names))}
     model = _initialize(classifier_api, encoder_source, label_names=labels)
-    _assert_same_state(_encoder_state(model.network, "linear"), expected)
-    head = model.network.model[-1].linear
+    _assert_same_state(_encoder_state(model, "linear"), expected)
+    head = model.model[-1].linear
     assert id(head) in native_initializations
     _assert_same_state(head.state_dict(), native_initializations[id(head)])
     assert torch.count_nonzero(head.weight)
@@ -242,12 +239,7 @@ def test_fresh_linear_head_preserves_all_encoder_state(
     assert head.in_features == encoder_source.network.model[-1].linear.in_features
     original = encoder_source.network.model[-1].linear.weight
     assert head.weight.shape != original.shape or not torch.equal(head.weight, original)
-    assert model.label_names == {
-        name: index for index, name in enumerate(sorted(class_names))
-    }
-    assert model.network.names == {
-        index: name for name, index in model.label_names.items()
-    }
+    assert model.names == dict(enumerate(sorted(class_names)))
     assert all(parameter.device.type == "cpu" for parameter in model.parameters())
     assert all("projector" not in name for name in model.state_dict())
     assert all(not isinstance(module, YoloSupConModel) for module in model.modules())
@@ -259,10 +251,10 @@ def test_full_random_head_replaces_classify_conv_but_not_backbone(
     """Full replacement deliberately discards the convolution inside Classify."""
     model = _initialize(classifier_api, encoder_source, head_replace="full")
     _assert_same_state(
-        _encoder_state(model.network, "full"),
+        _encoder_state(model, "full"),
         _encoder_state(encoder_source.network, "full"),
     )
-    head = model.network.model[-1]
+    head = model.model[-1]
     assert not torch.equal(
         head.conv.conv.weight, encoder_source.network.model[-1].conv.conv.weight
     )
@@ -322,17 +314,17 @@ def test_head_checkpoint_initializes_only_compatible_requested_weights(
         head_checkpoint=native_source.path,
     )
     _assert_same_state(
-        _encoder_state(model.network, head_replace),
+        _encoder_state(model, head_replace),
         _encoder_state(supcon_source.network, head_replace),
     )
-    target = _replacement(model.network, head_replace).state_dict()
+    target = _replacement(model, head_replace).state_dict()
     donor = _replacement(native_source.network, head_replace).state_dict()
     for name, tensor in target.items():
         if donor[name].shape == tensor.shape:
             assert torch.equal(tensor, donor[name]), name
-    head = model.network.model[-1]
+    head = model.model[-1]
     assert head.linear.out_features == target_classes
-    assert model.network.names == {index: name for name, index in labels.items()}
+    assert model.names == {index: name for name, index in labels.items()}
     if source_classes != target_classes:
         assert head.linear.weight.shape == (
             target_classes,
@@ -361,11 +353,11 @@ def test_linear_transfer_allows_a_different_backbone_when_features_match(
         head_checkpoint=donor.path,
     )
     _assert_same_state(
-        model.network.model[-1].linear.state_dict(),
+        model.model[-1].linear.state_dict(),
         donor.network.model[-1].linear.state_dict(),
     )
     _assert_same_state(
-        _encoder_state(model.network, "linear"),
+        _encoder_state(model, "linear"),
         _encoder_state(supcon_source.network, "linear"),
     )
 
@@ -390,10 +382,10 @@ def test_incompatible_head_tensors_are_skipped_like_native_ultralytics(
         head_checkpoint=donor.path,
     )
     _assert_same_state(
-        _encoder_state(model.network, head_replace),
+        _encoder_state(model, head_replace),
         _encoder_state(supcon_source.network, head_replace),
     )
-    head = model.network.model[-1]
+    head = model.model[-1]
     assert (
         head.conv.conv.in_channels
         == supcon_source.network.model[-1].conv.conv.in_channels
@@ -403,7 +395,8 @@ def test_incompatible_head_tensors_are_skipped_like_native_ultralytics(
     assert torch.equal(head.linear.bias, loaded_donor.linear.bias)
     if head_replace == "full":
         _assert_same_state(head.conv.bn.state_dict(), loaded_donor.conv.bn.state_dict())
-    assert model(torch.rand(2, 3, 16, 16)).shape == (2, 2)
+    _, logits = model(torch.rand(2, 3, 16, 16))
+    assert logits.shape == (2, 2)
 
 
 @pytest.mark.parametrize(
@@ -423,41 +416,10 @@ def test_same_size_head_transfer_does_not_require_matching_class_identity(
         head_checkpoint=donor.path,
     )
     _assert_same_state(
-        model.network.model[-1].linear.state_dict(),
+        model.model[-1].linear.state_dict(),
         donor.network.model[-1].linear.state_dict(),
     )
-    assert model.network.names == {0: "mouse", 1: "rat"}
-
-
-@pytest.mark.parametrize("head_replace", ["linear", "full"])
-def test_initialized_classifier_has_no_hidden_training_mode_policy(
-    classifier_api, supcon_source, head_replace
-):
-    """train() switches every module, because freezing belongs to the native trainer."""
-    model = _initialize(classifier_api, supcon_source, head_replace=head_replace)
-    assert model.train() is model
-    assert all(module.training for module in model.modules())
-
-
-@pytest.mark.parametrize("head_replace", ["linear", "full"])
-def test_forward_returns_raw_logits_in_train_and_eval(
-    classifier_api, supcon_source, head_replace
-):
-    """CE receives raw scores without enabling training-mode BatchNorm during evaluation."""
-    model = _initialize(classifier_api, supcon_source, head_replace=head_replace)
-    with torch.no_grad():
-        model.network.model[-1].linear.weight.zero_()
-        model.network.model[-1].linear.bias.copy_(torch.tensor([-2.0, 3.0]))
-    images = torch.rand(4, 3, 16, 16)
-    for training in (True, False, True):
-        model.train(training)
-        before = {name: value.clone() for name, value in model.named_buffers()}
-        output = model(images)
-        assert isinstance(output, torch.Tensor) and output.shape == (4, 2)
-        torch.testing.assert_close(output, torch.tensor([[-2.0, 3.0]]).expand(4, -1))
-        if not training:
-            assert all(not module.training for module in model.modules())
-            _assert_same_state(dict(model.named_buffers()), before)
+    assert model.names == {0: "mouse", 1: "rat"}
 
 
 def test_supcon_conversion_does_not_keep_a_feature_capture_wrapper_alive(
@@ -477,7 +439,8 @@ def test_supcon_conversion_does_not_keep_a_feature_capture_wrapper_alive(
     model = _initialize(classifier_api, supcon_source)
     gc.collect()
     assert all(reference() is None for reference in restored_wrappers)
-    assert model(torch.rand(2, 3, 16, 16)).shape == (2, 2)
+    _, logits = model(torch.rand(2, 3, 16, 16))
+    assert logits.shape == (2, 2)
 
 
 @pytest.mark.parametrize("location", ["encoder", "head"])
@@ -547,7 +510,7 @@ def test_native_checkpoint_cannot_be_read_as_supcon(classifier_api, native_sourc
 def test_initialization_is_required_rather_than_guessed(classifier_api):
     """Model construction requires explicit, prepared initialization settings."""
     with pytest.raises(TypeError, match="initialization"):
-        classifier_api.YoloClassifierModel.initialize(
+        classifier_api.YoloClassifierBuilder.initialize(
             label_names={"mouse": 0, "rat": 1}
         )
 
@@ -580,9 +543,8 @@ def test_fresh_head_preserves_supplied_label_mapping(
     """The model preserves supplied IDs instead of sorting and reassigning them."""
     expected = {name: index for index, name in enumerate(class_names)}
     model = _initialize(classifier_api, supcon_source, label_names=expected)
-    assert model.label_names == expected
-    assert model.network.names == {index: name for name, index in expected.items()}
-    assert model.network.model[-1].linear.out_features == len(class_names)
+    assert model.names == {index: name for name, index in expected.items()}
+    assert model.model[-1].linear.out_features == len(class_names)
 
 
 @pytest.mark.parametrize("location", ["encoder", "head"])
@@ -617,101 +579,6 @@ def test_corrupt_official_named_local_checkpoint_is_never_replaced_or_downloaded
     assert path.read_bytes() == original
 
 
-def _fused_native_checkpoint(source, path, component):
-    """Use the official fusion primitive to create a saved, partially/fully fused model."""
-    from ultralytics.nn.modules import Conv
-    from ultralytics.utils.torch_utils import fuse_conv_and_bn
-
-    yolo = YOLO(str(source.path), task="classify")
-    if component == "backbone":
-        modules = [yolo.model.model[0]]
-    elif component == "head":
-        modules = [yolo.model.model[-1].conv]
-    else:
-        modules = [
-            module for module in yolo.model.modules() if isinstance(module, Conv)
-        ]
-    for module in modules:
-        module.conv = fuse_conv_and_bn(module.conv, module.bn)
-        del module.bn
-        module.forward = module.forward_fuse
-    yolo.save(path)
-    return SimpleNamespace(path=path, source_format="ultralytics")
-
-
-@pytest.mark.parametrize(
-    "component,boundary",
-    [("backbone", "linear"), ("backbone", "full"), ("head", "linear")],
-)
-def test_fused_retained_encoder_is_rejected_before_classifier_is_returned(
-    classifier_api, native_source, tmp_path, component, boundary
-):
-    """Retained fused state cannot silently become a CE checkpoint that will not restore."""
-    source = _fused_native_checkpoint(
-        native_source, tmp_path / "fused-encoder.pt", component
-    )
-    with pytest.raises(ValueError, match="fused|fusion"):
-        _initialize(classifier_api, source, head_replace=boundary)
-
-
-def test_fused_discarded_head_does_not_prevent_full_replacement(
-    classifier_api, native_source, tmp_path
-):
-    """Only retained components matter; a fused head being discarded is harmless."""
-    source = _fused_native_checkpoint(
-        native_source, tmp_path / "discard-head.pt", "head"
-    )
-    model = _initialize(classifier_api, source, head_replace="full")
-    _assert_same_state(
-        _encoder_state(model.network, "full"),
-        _encoder_state(native_source.network, "full"),
-    )
-
-
-def test_fused_full_head_donor_is_rejected(
-    classifier_api, supcon_source, native_source, tmp_path
-):
-    """Copying a fused Classify module would make the final classifier unrestorable."""
-    donor = _fused_native_checkpoint(
-        native_source, tmp_path / "fused-head-donor.pt", "head"
-    )
-    with pytest.raises(ValueError, match="fused|fusion"):
-        _initialize(
-            classifier_api,
-            supcon_source,
-            head_replace="full",
-            head_source="yolo_checkpoint",
-            head_checkpoint=donor.path,
-        )
-
-
-@pytest.mark.parametrize(
-    "component,boundary", [("all", "linear"), ("backbone", "full")]
-)
-def test_fused_unused_donor_components_do_not_prevent_head_transfer(
-    classifier_api, supcon_source, native_source, tmp_path, component, boundary
-):
-    """Do not reject fused donor layers outside the actual transferred component."""
-    donor = _fused_native_checkpoint(
-        native_source, tmp_path / "fused-unused-donor.pt", component
-    )
-    model = _initialize(
-        classifier_api,
-        supcon_source,
-        head_replace=boundary,
-        head_source="yolo_checkpoint",
-        head_checkpoint=donor.path,
-    )
-    _assert_same_state(
-        _encoder_state(model.network, boundary),
-        _encoder_state(supcon_source.network, boundary),
-    )
-    _assert_same_state(
-        _replacement(model.network, boundary).state_dict(),
-        _replacement(native_source.network, boundary).state_dict(),
-    )
-
-
 @pytest.fixture
 def activation_defaults(monkeypatch):
     """Isolate Ultralytics' process-global default activation in activation regressions."""
@@ -744,8 +611,8 @@ def test_full_weight_transfer_keeps_target_activation(
         head_source="yolo_checkpoint",
         head_checkpoint=donor.path,
     ).eval()
-    assert isinstance(model.network.model[0].act, torch.nn.SiLU)
-    assert isinstance(model.network.model[-1].conv.act, torch.nn.SiLU)
+    assert isinstance(model.model[0].act, torch.nn.SiLU)
+    assert isinstance(model.model[-1].conv.act, torch.nn.SiLU)
 
 
 def test_random_full_head_activation_is_independent_of_encoder_yaml(
@@ -761,5 +628,5 @@ def test_random_full_head_activation_is_independent_of_encoder_yaml(
     source = _native_checkpoint(architecture, tmp_path / "relu-encoder.pt")
     monkeypatch.setattr(Conv, "default_act", torch.nn.SiLU())
     model = _initialize(classifier_api, source, head_replace="full").eval()
-    assert isinstance(model.network.model[0].act, torch.nn.ReLU)
-    assert isinstance(model.network.model[-1].conv.act, torch.nn.SiLU)
+    assert isinstance(model.model[0].act, torch.nn.ReLU)
+    assert isinstance(model.model[-1].conv.act, torch.nn.SiLU)

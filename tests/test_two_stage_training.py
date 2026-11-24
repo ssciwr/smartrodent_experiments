@@ -383,6 +383,53 @@ def test_non_yolo_head_is_rejected_before_any_supcon_candidate(
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
+@pytest.mark.parametrize(
+    "head_replace,freeze", [("full", 2), ("full", [1]), ("linear", 3), ("linear", [2])]
+)
+def test_out_of_range_classifier_freeze_is_rejected_before_any_supcon_candidate(
+    pipeline_api, pipeline_document, recorded_stages, head_replace, freeze
+):
+    """The SupCon architecture fixes the classifier's layer count, so check it before SupCon trains."""
+    # Pipeline network: 0=Conv encoder, 1=Classify head.
+    pipeline_document["classifier"]["initialization"]["head"]["replace"] = head_replace
+    pipeline_document["classifier"]["freeze"] = freeze
+    with pytest.raises(ValueError, match="freeze"):
+        pipeline_api.TwoStageExperiment(
+            _configuration(pipeline_api, pipeline_document)
+        ).run()
+    assert recorded_stages.events == []
+    assert not Path(pipeline_document["output_directory"]).exists()
+
+
+def test_classifier_freeze_is_checked_against_every_supcon_architecture(
+    pipeline_api, pipeline_document, recorded_stages, tmp_path
+):
+    """The winning encoder is unknown before SupCon, so a freeze must fit every candidate."""
+    deeper = tmp_path / "deeper-cls.yaml"
+    deeper.write_text(
+        yaml.safe_dump(
+            {
+                "nc": 2,
+                "backbone": [[-1, 1, "Conv", [8, 3, 2]], [-1, 1, "Conv", [8, 3, 1]]],
+                "head": [[-1, 1, "Classify", [2]]],
+            }
+        )
+    )
+    shallow = pipeline_document["supcon"]["model_name"]
+    pipeline_document["supcon"]["model_name"] = {
+        "type": "sweep",
+        "values": [str(deeper), shallow],
+    }
+    # Count 3 freezes the deeper network's conv layers and head conv; the shallow one has 2 layers.
+    pipeline_document["classifier"]["freeze"] = 3
+    with pytest.raises(ValueError, match="freeze"):
+        pipeline_api.TwoStageExperiment(
+            _configuration(pipeline_api, pipeline_document)
+        ).run()
+    assert recorded_stages.events == []
+    assert not Path(pipeline_document["output_directory"]).exists()
+
+
 def test_classifier_failure_is_not_reported_as_a_completed_pipeline(
     pipeline_api, pipeline_document, recorded_stages
 ):
@@ -666,6 +713,8 @@ def test_configuration_round_trip_preserves_sweep_order_and_classifier_policy(
     document = deepcopy(pipeline_document)
     document["supcon"]["optimizer"]["lr"]["values"] = rates
     document["supcon"]["tracked_mode"] = mode
+    # The BatchNorm policy only exists when some layer is frozen.
+    batchnorm = batchnorm if freeze not in (0, []) else None
     document["classifier"]["encoder_batchnorm"] = batchnorm
     document["classifier"]["freeze"] = freeze
     config = _configuration(pipeline_api, document)
@@ -685,6 +734,8 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
     document = pipeline_document
     document["supcon"]["optimizer"]["lr"]["values"] = [0.001, 0.002]
     document["supcon"]["tracked_mode"] = mode
+    # Linear probe on the 2-layer network: encoder and head conv frozen, only Linear trains.
+    document["classifier"]["freeze"] = 2
     values = (
         [[0.3, 0.8, 0.5], [0.2, 0.9, 0.6]]
         if mode == "max"

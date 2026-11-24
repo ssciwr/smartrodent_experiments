@@ -19,9 +19,13 @@ import yaml
 from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 from ultralytics import YOLO
 from ultralytics.models.yolo.classify.val import ClassificationValidator
-from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
+from smartrodent.classifier_training import (
+    ClassifierConfiguration,
+    ClassifierExperiment,
+)
 from smartrodent.experiment_support import MlflowConfiguration
 from smartrodent.two_stage_training import TwoStageConfiguration, TwoStageExperiment
+
 # Reuse the already calibrated temporary CPU data/configuration fixture.
 from test_two_stage_training import pipeline_document
 
@@ -43,14 +47,19 @@ def tracking_store(tmp_path, monkeypatch):
     monkeypatch.setattr(registry_utils, "_registry_uri", uri)
     mlflow.set_experiment(experiment_id=experiment_id)
     configuration = {
-        "tracking_uri": uri, "experiment_name": "m6-tests",
-        "model_artifact_name": "species-classifier", "champion_alias": "approved",
+        "tracking_uri": uri,
+        "experiment_name": "m6-tests",
+        "model_artifact_name": "species-classifier",
+        "champion_alias": "approved",
         "dataset_revision": "dvc-fixture-123",
     }
     try:
         yield SimpleNamespace(
-            client=client, experiment_id=experiment_id, configuration=configuration,
-            registry_name="m6-classifier", downloads=tmp_path / "downloads",
+            client=client,
+            experiment_id=experiment_id,
+            configuration=configuration,
+            registry_name="m6-classifier",
+            downloads=tmp_path / "downloads",
         )
     finally:
         # Cleanup only runs owned by this isolated test; caller-preservation tests
@@ -79,7 +88,10 @@ def scripted_validation(monkeypatch):
         values = [[0.3, 0.8, 0.5], [0.2, 0.9, 0.6]]
         if config.effective_tracked_mode == "min":
             values = [[0.7, 0.2, 0.5], [0.8, 0.1, 0.4]]
-        return {"balanced_accuracy": values[index][epoch], "supcon_loss_mean": [0.1, 0.2, 0.3][epoch]}
+        return {
+            "balanced_accuracy": values[index][epoch],
+            "supcon_loss_mean": [0.1, 0.2, 0.3][epoch],
+        }
 
     original = ClassificationValidator.__call__
 
@@ -92,7 +104,10 @@ def scripted_validation(monkeypatch):
         if observed.failure == "classifier":
             raise RuntimeError("deliberate classifier validation failure")
         epoch = trainer.epoch
-        metrics.update(balanced_accuracy=[0.1, 0.9, 0.4][epoch], ce_loss_mean=[0.1, 0.2, 0.3][epoch])
+        metrics.update(
+            balanced_accuracy=[0.1, 0.9, 0.4][epoch],
+            ce_loss_mean=[0.1, 0.2, 0.3][epoch],
+        )
         return metrics
 
     monkeypatch.setattr(SupConExperiment, "_validate", supcon_validate)
@@ -106,8 +121,12 @@ def tracking_document(pipeline_document):
     document = deepcopy(pipeline_document)
     document["supcon"]["optimizer"]["lr"]["values"] = [0.001, 0.002]
     document["classifier"].update(
-        epochs=3, tracked_metric="balanced_accuracy", tracked_mode="max",
-        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        epochs=3,
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
     )
     return document
 
@@ -118,18 +137,28 @@ def standalone_configuration(pipeline_document, tmp_path):
     source_values = deepcopy(pipeline_document["supcon"])
     source_values.update(pipeline_document["data"])
     source_values.update(
-        epochs=1, optimizer={"lr": 0.001},
+        epochs=1,
+        optimizer={"lr": 0.001},
         output_directory=str(tmp_path / "standalone-source"),
     )
-    source = SupConExperiment(TrainingConfiguration.from_mapping(source_values)).run_with_result()
+    source = SupConExperiment(
+        TrainingConfiguration.from_mapping(source_values)
+    ).run_with_result()
     values = deepcopy(pipeline_document["classifier"])
     values.update(pipeline_document["data"])
     values.update(
-        epochs=3, output_directory=str(tmp_path / "standalone-ce"),
-        tracked_metric="balanced_accuracy", tracked_mode="max",
-        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        epochs=3,
+        output_directory=str(tmp_path / "standalone-ce"),
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
     )
-    values["initialization"]["encoder"] = {"source": "supcon", "checkpoint": str(source.best_checkpoint)}
+    values["initialization"]["encoder"] = {
+        "source": "supcon",
+        "checkpoint": str(source.best_checkpoint),
+    }
     return ClassifierConfiguration.from_mapping(values)
 
 
@@ -154,7 +183,9 @@ def _expected_encoder_provenance(result):
     selected = result.selected_supcon
     return {
         "encoder_checkpoint": str(selected.best_checkpoint.resolve()),
-        "encoder_checkpoint_sha256": hashlib.sha256(selected.best_checkpoint.read_bytes()).hexdigest(),
+        "encoder_checkpoint_sha256": hashlib.sha256(
+            selected.best_checkpoint.read_bytes()
+        ).hexdigest(),
         "encoder_run_id": selected.mlflow_run_id,
         "encoder_epoch": selected.best_epoch,
         "encoder_tracked_metric": selected.tracked_metric,
@@ -181,7 +212,10 @@ def _assert_registered_classifier(store, result):
     logged_model = store.client.get_logged_model(card["provenance"]["model_id"])
     assert logged_model.name == store.configuration["model_artifact_name"]
     assert logged_model.source_run_id == result.mlflow_run_id
-    assert version.source in {f"models:/{logged_model.model_id}", logged_model.artifact_location}
+    assert version.source in {
+        f"models:/{logged_model.model_id}",
+        logged_model.artifact_location,
+    }
     assert version.description == card_path.with_suffix(".md").read_text()
     for suffix in ("yaml", "md"):
         filename = f"best.model_card.{suffix}"
@@ -189,8 +223,13 @@ def _assert_registered_classifier(store, result):
             artifact_uri=f"{logged_model.artifact_location}/{filename}",
             dst_path=str(store.downloads),
         )
-        assert Path(downloaded).read_bytes() == (result.best_checkpoint.parent / filename).read_bytes()
-    registered = mlflow.pytorch.load_model(f"models:/{store.registry_name}/{version.version}")
+        assert (
+            Path(downloaded).read_bytes()
+            == (result.best_checkpoint.parent / filename).read_bytes()
+        )
+    registered = mlflow.pytorch.load_model(
+        f"models:/{store.registry_name}/{version.version}"
+    )
     portable = YOLO(str(result.best_checkpoint), task="classify").model.eval()
     images = torch.rand(2, 3, 32, 32)
     with torch.inference_mode():
@@ -219,24 +258,41 @@ def test_artifact_only_runs_retain_selected_metadata_without_extra_model_restore
         return original(weight, *args, **kwargs)
 
     monkeypatch.setattr(classifier_models, "load_checkpoint", restore)
-    config = replace(standalone_configuration, mlflow=MlflowConfiguration(**tracking_store.configuration) if tracking else None)
-    result = ClassifierExperiment(config, encoder_provenance={"encoder_run_id": "selected-encoder-run"}).run_with_result()
+    config = replace(
+        standalone_configuration,
+        mlflow=(
+            MlflowConfiguration(**tracking_store.configuration) if tracking else None
+        ),
+    )
+    result = ClassifierExperiment(
+        config, encoder_provenance={"encoder_run_id": "selected-encoder-run"}
+    ).run_with_result()
     assert restores == []
     assert result.best_epoch == 2 and result.best_value == 0.9
-    card = yaml.safe_load(result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
+    card = yaml.safe_load(
+        result.best_checkpoint.with_suffix(".model_card.yaml").read_text()
+    )
     assert card["classes"] == {0: "mouse", 1: "rat"}
     assert card["validation"]["epoch"] == 2
     assert card["validation"]["metrics"]["balanced_accuracy"] == 0.9
     assert card["provenance"]["encoder_run_id"] == "selected-encoder-run"
-    assert card["provenance"]["checkpoint_sha256"] == hashlib.sha256(result.best_checkpoint.read_bytes()).hexdigest()
+    assert (
+        card["provenance"]["checkpoint_sha256"]
+        == hashlib.sha256(result.best_checkpoint.read_bytes()).hexdigest()
+    )
     checkpoint = YOLO(str(result.best_checkpoint), task="classify").model
     assert checkpoint.names == card["classes"]
     assert checkpoint.provenance["encoder_run_id"] == "selected-encoder-run"
     if tracking:
         run = tracking_store.client.get_run(result.mlflow_run_id)
         assert run.info.status == "FINISHED" and run.data.metrics["best_epoch"] == 2
-        downloaded = _download(tracking_store, result.mlflow_run_id, "best_model/best.model_card.yaml")
-        assert downloaded.read_bytes() == result.best_checkpoint.with_suffix(".model_card.yaml").read_bytes()
+        downloaded = _download(
+            tracking_store, result.mlflow_run_id, "best_model/best.model_card.yaml"
+        )
+        assert (
+            downloaded.read_bytes()
+            == result.best_checkpoint.with_suffix(".model_card.yaml").read_bytes()
+        )
     else:
         assert result.mlflow_run_id is None
 
@@ -258,7 +314,9 @@ def test_corrupt_native_best_checkpoint_cannot_be_reported_or_published(
 
     monkeypatch.setattr(ClassificationTrainer, "save_model", save)
     config = replace(standalone_configuration, epochs=1)
-    with pytest.raises((ValueError, UnpicklingError), match="checkpoint|finaliz|pickle"):
+    with pytest.raises(
+        (ValueError, UnpicklingError), match="checkpoint|finaliz|pickle"
+    ):
         ClassifierExperiment(config).run_with_result()
     assert writes == [config.output_directory / "weights/best.pt"]
     assert not (config.output_directory / "weights/best.model_card.yaml").exists()
@@ -294,65 +352,142 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
 ):
     """Metric-selected epochs, registry model, cards and tracking artifacts must describe one result."""
     tracking_document["supcon"]["tracked_mode"] = mode
-    config, result = _run_tracking_document(tracking_document, tracking_store, register=register)
-    assert len(scripted_validation.supcon) == 6 and len(scripted_validation.classifier) == 3
+    config, result = _run_tracking_document(
+        tracking_document, tracking_store, register=register
+    )
+    assert (
+        len(scripted_validation.supcon) == 6
+        and len(scripted_validation.classifier) == 3
+    )
     assert result.selected_supcon == result.supcon_results[1]
     assert result.selected_supcon.best_epoch == result.classifier_result.best_epoch == 2
     assert result.selected_supcon.best_value == (0.1 if mode == "min" else 0.9)
     assert result.classifier_result.best_value == 0.9
-    child_ids = [item.mlflow_run_id for item in (*result.supcon_results, result.classifier_result)]
+    child_ids = [
+        item.mlflow_run_id
+        for item in (*result.supcon_results, result.classifier_result)
+    ]
     assert all(child_ids) and result.mlflow_run_id not in child_ids
     runs = tracking_store.client.search_runs([tracking_store.experiment_id])
-    assert len(runs) == 4 and {run.info.run_id for run in runs} == {result.mlflow_run_id, *child_ids}
+    assert len(runs) == 4 and {run.info.run_id for run in runs} == {
+        result.mlflow_run_id,
+        *child_ids,
+    }
     assert all(run.info.status == "FINISHED" for run in runs)
     parent = tracking_store.client.get_run(result.mlflow_run_id)
     assert "mlflow.parentRunId" not in parent.data.tags
     for run in runs:
         assert run.data.tags["git_commit"] == parent.data.tags["git_commit"]
-        assert run.data.tags["dataset_revision"] == tracking_store.configuration["dataset_revision"]
+        assert (
+            run.data.tags["dataset_revision"]
+            == tracking_store.configuration["dataset_revision"]
+        )
         if run.info.run_id in child_ids:
             assert run.data.tags["mlflow.parentRunId"] == result.mlflow_run_id
     for candidate in result.supcon_results:
-        history = tracking_store.client.get_metric_history(candidate.mlflow_run_id, "validation/balanced_accuracy")
+        history = tracking_store.client.get_metric_history(
+            candidate.mlflow_run_id, "validation/balanced_accuracy"
+        )
         assert [item.step for item in history] == [1, 2, 3]
-        assert tracking_store.client.get_run(candidate.mlflow_run_id).data.metrics["best_validation_balanced_accuracy"] == candidate.best_value
-        card = yaml.safe_load((candidate.output_directory / "best.model_card.yaml").read_text())
+        assert (
+            tracking_store.client.get_run(candidate.mlflow_run_id).data.metrics[
+                "best_validation_balanced_accuracy"
+            ]
+            == candidate.best_value
+        )
+        card = yaml.safe_load(
+            (candidate.output_directory / "best.model_card.yaml").read_text()
+        )
         assert card["model"]["task"] == "contrastive-encoder"
-        assert card["model"]["registry_version"] is None  # No untrained classifier registry versions.
+        assert (
+            card["model"]["registry_version"] is None
+        )  # No untrained classifier registry versions.
     ce_run_id = result.classifier_result.mlflow_run_id
-    ce_history = tracking_store.client.get_metric_history(ce_run_id, "validation/balanced_accuracy")
+    ce_history = tracking_store.client.get_metric_history(
+        ce_run_id, "validation/balanced_accuracy"
+    )
     assert [item.step for item in ce_history] == [1, 2, 3]
     assert [item.value for item in ce_history] == [0.1, 0.9, 0.4]
-    assert tracking_store.client.get_run(ce_run_id).data.metrics["best_validation_balanced_accuracy"] == 0.9
+    assert (
+        tracking_store.client.get_run(ce_run_id).data.metrics[
+            "best_validation_balanced_accuracy"
+        ]
+        == 0.9
+    )
     provenance = _expected_encoder_provenance(result)
-    for checkpoint in (result.classifier_result.best_checkpoint, result.classifier_result.last_checkpoint):
+    for checkpoint in (
+        result.classifier_result.best_checkpoint,
+        result.classifier_result.last_checkpoint,
+    ):
         model = YOLO(str(checkpoint), task="classify").model
         assert provenance.items() <= model.provenance.items()
-    card = yaml.safe_load(result.classifier_result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
+    card = yaml.safe_load(
+        result.classifier_result.best_checkpoint.with_suffix(
+            ".model_card.yaml"
+        ).read_text()
+    )
     assert provenance.items() <= card["provenance"].items()
     assert card["model"]["task"] == "image-classification"
     assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
     assert card["provenance"]["git_commit"] == parent.data.tags["git_commit"]
-    assert card["provenance"]["dataset_revision"] == tracking_store.configuration["dataset_revision"]
-    assert card["provenance"]["checkpoint_sha256"] == hashlib.sha256(result.classifier_result.best_checkpoint.read_bytes()).hexdigest()
+    assert (
+        card["provenance"]["dataset_revision"]
+        == tracking_store.configuration["dataset_revision"]
+    )
+    assert (
+        card["provenance"]["checkpoint_sha256"]
+        == hashlib.sha256(
+            result.classifier_result.best_checkpoint.read_bytes()
+        ).hexdigest()
+    )
     for child in (*result.supcon_results, result.classifier_result):
         for filename in ("best.pt", "best.model_card.yaml", "best.model_card.md"):
-            downloaded = _download(tracking_store, child.mlflow_run_id, f"best_model/{filename}")
-            assert downloaded.read_bytes() == (child.best_checkpoint.parent / filename).read_bytes()
+            downloaded = _download(
+                tracking_store, child.mlflow_run_id, f"best_model/{filename}"
+            )
+            assert (
+                downloaded.read_bytes()
+                == (child.best_checkpoint.parent / filename).read_bytes()
+            )
     for filename in ("config.yaml", "selection.yaml"):
-        assert _download(tracking_store, result.mlflow_run_id, filename).read_bytes() == (result.output_directory / filename).read_bytes()
+        assert (
+            _download(tracking_store, result.mlflow_run_id, filename).read_bytes()
+            == (result.output_directory / filename).read_bytes()
+        )
     summary = yaml.safe_load((result.output_directory / "selection.yaml").read_text())
     assert summary["mlflow_run_id"] == result.mlflow_run_id
-    assert summary["selected_supcon"]["mlflow_run_id"] == result.selected_supcon.mlflow_run_id
-    assert summary["classifier_result"]["mlflow_run_id"] == result.classifier_result.mlflow_run_id
-    assert yaml.safe_load((result.output_directory / "config.yaml").read_text()) == config.to_dict()
+    assert (
+        summary["selected_supcon"]["mlflow_run_id"]
+        == result.selected_supcon.mlflow_run_id
+    )
+    assert (
+        summary["classifier_result"]["mlflow_run_id"]
+        == result.classifier_result.mlflow_run_id
+    )
+    assert (
+        yaml.safe_load((result.output_directory / "config.yaml").read_text())
+        == config.to_dict()
+    )
     if register:
-        version = _assert_registered_classifier(tracking_store, result.classifier_result)
-        assert {model.name for model in tracking_store.client.search_registered_models()} == {tracking_store.registry_name}
+        version = _assert_registered_classifier(
+            tracking_store, result.classifier_result
+        )
+        assert {
+            model.name for model in tracking_store.client.search_registered_models()
+        } == {tracking_store.registry_name}
         assert version.tags["validation_status"] == "passed"
         assert version.tags["encoder_run_id"] == result.selected_supcon.mlflow_run_id
-        assert version.tags["encoder_checkpoint_sha256"] == provenance["encoder_checkpoint_sha256"]
-        assert tracking_store.client.get_model_version_by_alias(tracking_store.registry_name, tracking_store.configuration["champion_alias"]).version == version.version
+        assert (
+            version.tags["encoder_checkpoint_sha256"]
+            == provenance["encoder_checkpoint_sha256"]
+        )
+        assert (
+            tracking_store.client.get_model_version_by_alias(
+                tracking_store.registry_name,
+                tracking_store.configuration["champion_alias"],
+            ).version
+            == version.version
+        )
     else:
         assert tracking_store.client.search_registered_models() == []
     assert mlflow.active_run() is None
@@ -365,21 +500,41 @@ def test_untracked_pipeline_keeps_selected_provenance_without_touching_callers_t
     with mlflow.start_run(run_name="unrelated-caller") as caller:
         mlflow.set_tag("caller_tag", "unchanged")
         before = tracking_store.client.get_run(caller.info.run_id)
-        result = TwoStageExperiment(TwoStageConfiguration.from_mapping(tracking_document)).run()
+        result = TwoStageExperiment(
+            TwoStageConfiguration.from_mapping(tracking_document)
+        ).run()
         assert result.mlflow_run_id is None
-        assert all(item.mlflow_run_id is None for item in (*result.supcon_results, result.classifier_result))
+        assert all(
+            item.mlflow_run_id is None
+            for item in (*result.supcon_results, result.classifier_result)
+        )
         provenance = _expected_encoder_provenance(result)
-        for checkpoint in (result.classifier_result.best_checkpoint, result.classifier_result.last_checkpoint):
-            assert provenance.items() <= YOLO(str(checkpoint), task="classify").model.provenance.items()
-        card = yaml.safe_load(result.classifier_result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
+        for checkpoint in (
+            result.classifier_result.best_checkpoint,
+            result.classifier_result.last_checkpoint,
+        ):
+            assert (
+                provenance.items()
+                <= YOLO(str(checkpoint), task="classify").model.provenance.items()
+            )
+        card = yaml.safe_load(
+            result.classifier_result.best_checkpoint.with_suffix(
+                ".model_card.yaml"
+            ).read_text()
+        )
         assert provenance.items() <= card["provenance"].items()
         assert mlflow.active_run().info.run_id == caller.info.run_id
         after = tracking_store.client.get_run(caller.info.run_id)
         assert after.info.status == "RUNNING"
-        assert after.data.metrics == before.data.metrics and after.data.params == before.data.params
+        assert (
+            after.data.metrics == before.data.metrics
+            and after.data.params == before.data.params
+        )
         assert after.data.tags == before.data.tags
         assert tracking_store.client.list_artifacts(caller.info.run_id) == []
-        assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+        assert (
+            len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+        )
     assert mlflow.active_run() is None
 
 
@@ -392,17 +547,30 @@ def test_standalone_ce_registers_its_best_classifier_and_only_promotes_validated
     previous_version = None
     if not validation:
         configuration = replace(
-            configuration, validation_dataset=None, tracked_metric="ce_loss_mean",
-            tracked_mode="min", validation_metrics=None,
+            configuration,
+            validation_dataset=None,
+            tracked_metric="ce_loss_mean",
+            tracked_mode="min",
+            validation_metrics=None,
         )
         tracking_store.client.create_registered_model(tracking_store.registry_name)
         prior = tmp_path / "prior-validated-model"
         prior.mkdir()
-        previous_version = tracking_store.client.create_model_version(tracking_store.registry_name, prior.as_uri()).version
-        tracking_store.client.set_registered_model_alias(tracking_store.registry_name, tracking_store.configuration["champion_alias"], previous_version)
-    configuration = replace(configuration, mlflow=MlflowConfiguration(
-        **tracking_store.configuration, registered_model_name=tracking_store.registry_name,
-    ))
+        previous_version = tracking_store.client.create_model_version(
+            tracking_store.registry_name, prior.as_uri()
+        ).version
+        tracking_store.client.set_registered_model_alias(
+            tracking_store.registry_name,
+            tracking_store.configuration["champion_alias"],
+            previous_version,
+        )
+    configuration = replace(
+        configuration,
+        mlflow=MlflowConfiguration(
+            **tracking_store.configuration,
+            registered_model_name=tracking_store.registry_name,
+        ),
+    )
     before = deepcopy(configuration.to_dict())
     result = ClassifierExperiment(configuration).run_with_result()
     assert configuration.to_dict() == before
@@ -410,21 +578,51 @@ def test_standalone_ce_registers_its_best_classifier_and_only_promotes_validated
     run = tracking_store.client.get_run(result.mlflow_run_id)
     assert run.info.status == "FINISHED" and "mlflow.parentRunId" not in run.data.tags
     assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
-    versions = tracking_store.client.search_model_versions(f"name='{tracking_store.registry_name}'")
-    published = [version for version in versions if version.run_id == result.mlflow_run_id]
+    versions = tracking_store.client.search_model_versions(
+        f"name='{tracking_store.registry_name}'"
+    )
+    published = [
+        version for version in versions if version.run_id == result.mlflow_run_id
+    ]
     assert len(published) == 1
     version = published[0]
-    assert version.tags["validation_status"] == ("passed" if validation else "not_validated")
+    assert version.tags["validation_status"] == (
+        "passed" if validation else "not_validated"
+    )
     if validation:
         assert result.best_epoch == 2
         _assert_registered_classifier(tracking_store, result)
         expected_alias = version.version
     else:
-        card = yaml.safe_load(result.best_checkpoint.with_suffix(".model_card.yaml").read_text())
+        card = yaml.safe_load(
+            result.best_checkpoint.with_suffix(".model_card.yaml").read_text()
+        )
         assert card["validation"]["status"] == "not_validated"
         assert str(card["model"]["registry_version"]) == str(version.version)
         expected_alias = previous_version
-    assert tracking_store.client.get_model_version_by_alias(tracking_store.registry_name, tracking_store.configuration["champion_alias"]).version == expected_alias
+    assert (
+        tracking_store.client.get_model_version_by_alias(
+            tracking_store.registry_name, tracking_store.configuration["champion_alias"]
+        ).version
+        == expected_alias
+    )
+    assert mlflow.active_run() is None
+
+
+def test_out_of_range_freeze_fails_before_any_tracking_run_or_output(
+    standalone_configuration, tracking_store
+):
+    """Preparation errors surface before tracking starts, so no failed run is left behind."""
+    # Pipeline network: 0=Conv encoder, 1=Classify head; a linear probe can freeze 0..1.
+    config = replace(
+        standalone_configuration,
+        freeze=3,
+        mlflow=MlflowConfiguration(**tracking_store.configuration),
+    )
+    with pytest.raises(ValueError, match="freeze"):
+        ClassifierExperiment(config).run_with_result()
+    assert tracking_store.client.search_runs([tracking_store.experiment_id]) == []
+    assert not config.output_directory.exists()
     assert mlflow.active_run() is None
 
 
@@ -432,11 +630,17 @@ def test_standalone_ce_tracking_without_registration_remains_a_single_completed_
     standalone_configuration, tracking_store, scripted_validation
 ):
     """Adding pipeline contexts must not require one or silently register standalone tracking runs."""
-    config = replace(standalone_configuration, mlflow=MlflowConfiguration(**tracking_store.configuration))
+    config = replace(
+        standalone_configuration,
+        mlflow=MlflowConfiguration(**tracking_store.configuration),
+    )
     result = ClassifierExperiment(config).run_with_result()
     run = tracking_store.client.get_run(result.mlflow_run_id)
     assert run.info.status == "FINISHED" and "mlflow.parentRunId" not in run.data.tags
-    assert run.data.metrics["best_epoch"] == 2 and run.data.metrics["best_validation_balanced_accuracy"] == 0.9
+    assert (
+        run.data.metrics["best_epoch"] == 2
+        and run.data.metrics["best_validation_balanced_accuracy"] == 0.9
+    )
     assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
     assert tracking_store.client.search_registered_models() == []
     assert mlflow.active_run() is None
@@ -448,13 +652,26 @@ def test_standalone_supcon_registry_publication_remains_an_explicit_encoder(
     """Existing standalone encoder registration stays available, never labeled as a CE classifier."""
     values = deepcopy(pipeline_document["supcon"])
     values.update(pipeline_document["data"])
-    values.update(epochs=1, optimizer={"lr": 0.001}, output_directory=str(Path(pipeline_document["output_directory"]).parent / "standalone-supcon"))
+    values.update(
+        epochs=1,
+        optimizer={"lr": 0.001},
+        output_directory=str(
+            Path(pipeline_document["output_directory"]).parent / "standalone-supcon"
+        ),
+    )
     encoder_name = "m6-supcon-encoder"
-    values["mlflow"] = {**tracking_store.configuration, "registered_model_name": encoder_name}
-    result = SupConExperiment(TrainingConfiguration.from_mapping(values)).run_with_result()
+    values["mlflow"] = {
+        **tracking_store.configuration,
+        "registered_model_name": encoder_name,
+    }
+    result = SupConExperiment(
+        TrainingConfiguration.from_mapping(values)
+    ).run_with_result()
     versions = tracking_store.client.search_model_versions(f"name='{encoder_name}'")
     assert len(versions) == 1 and versions[0].run_id == result.mlflow_run_id
-    card = yaml.safe_load((result.output_directory / "best.model_card.yaml").read_text())
+    card = yaml.safe_load(
+        (result.output_directory / "best.model_card.yaml").read_text()
+    )
     assert card["model"]["task"] == "contrastive-encoder"
     assert str(card["model"]["registry_version"]) == str(versions[0].version)
     assert tracking_store.client.get_run(result.mlflow_run_id).info.status == "FINISHED"
@@ -463,34 +680,58 @@ def test_standalone_supcon_registry_publication_remains_an_explicit_encoder(
 
 @pytest.mark.parametrize("failure", ["supcon", "classifier", "publication"])
 def test_pipeline_failure_closes_owned_runs_and_preserves_the_existing_champion(
-    tracking_document, tracking_store, scripted_validation, monkeypatch, tmp_path, failure
+    tracking_document,
+    tracking_store,
+    scripted_validation,
+    monkeypatch,
+    tmp_path,
+    failure,
 ):
     """A failed candidate/CE/publication is never skipped, promoted, or reported as completed."""
     tracking_store.client.create_registered_model(tracking_store.registry_name)
     prior = tmp_path / "prior-model"
     prior.mkdir()
-    previous = tracking_store.client.create_model_version(tracking_store.registry_name, prior.as_uri()).version
-    tracking_store.client.set_registered_model_alias(tracking_store.registry_name, tracking_store.configuration["champion_alias"], previous)
+    previous = tracking_store.client.create_model_version(
+        tracking_store.registry_name, prior.as_uri()
+    ).version
+    tracking_store.client.set_registered_model_alias(
+        tracking_store.registry_name,
+        tracking_store.configuration["champion_alias"],
+        previous,
+    )
     scripted_validation.failure = failure
     if failure == "publication":
+
         def fail_publication(*args, **kwargs):
             """Simulate an external MLflow model-publication failure after successful CE training."""
             raise RuntimeError("deliberate classifier publication failure")
+
         monkeypatch.setattr(mlflow.pytorch, "log_model", fail_publication)
     with pytest.raises(RuntimeError, match="deliberate"):
         _run_tracking_document(tracking_document, tracking_store, register=True)
     runs = tracking_store.client.search_runs([tracking_store.experiment_id])
     parents = [run for run in runs if "mlflow.parentRunId" not in run.data.tags]
     assert len(parents) == 1 and parents[0].info.status == "FAILED"
-    children = [run for run in runs if run.data.tags.get("mlflow.parentRunId") == parents[0].info.run_id]
+    children = [
+        run
+        for run in runs
+        if run.data.tags.get("mlflow.parentRunId") == parents[0].info.run_id
+    ]
     assert len(children) == (2 if failure == "supcon" else 3)
     assert [run.info.status for run in children].count("FAILED") == 1
     assert all(run.info.status in {"FINISHED", "FAILED"} for run in runs)
     if failure == "supcon":
         assert scripted_validation.classifier == []
-    versions = tracking_store.client.search_model_versions(f"name='{tracking_store.registry_name}'")
+    versions = tracking_store.client.search_model_versions(
+        f"name='{tracking_store.registry_name}'"
+    )
     assert len(versions) == 1 and versions[0].version == previous
-    assert tracking_store.client.get_model_version_by_alias(tracking_store.registry_name, tracking_store.configuration["champion_alias"]).version == previous
+    assert (
+        tracking_store.client.get_model_version_by_alias(
+            tracking_store.registry_name, tracking_store.configuration["champion_alias"]
+        ).version
+        == previous
+    )
     summary = Path(tracking_document["output_directory"]) / "selection.yaml"
     if summary.exists():
         assert yaml.safe_load(summary.read_text()).get("classifier_result") is None
@@ -505,11 +746,17 @@ def test_tracked_pipeline_rejects_an_unrelated_active_run_before_creating_output
     document["mlflow"] = tracking_store.configuration
     configuration = TwoStageConfiguration.from_mapping(document)
     with mlflow.start_run(run_name="unrelated-caller") as caller:
-        with pytest.raises((ValueError, RuntimeError, MlflowException), match="active|existing|run"):
+        with pytest.raises(
+            (ValueError, RuntimeError, MlflowException), match="active|existing|run"
+        ):
             TwoStageExperiment(configuration).run()
         assert mlflow.active_run().info.run_id == caller.info.run_id
-        assert tracking_store.client.get_run(caller.info.run_id).info.status == "RUNNING"
-        assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+        assert (
+            tracking_store.client.get_run(caller.info.run_id).info.status == "RUNNING"
+        )
+        assert (
+            len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+        )
         assert not Path(document["output_directory"]).exists()
     assert mlflow.active_run() is None
 
@@ -519,7 +766,15 @@ def test_tracked_pipeline_rejects_an_unrelated_active_run_before_creating_output
     [
         ({"experiment_name": ""}, "experiment_name"),
         ({"registered_model_name": ""}, "registered_model_name"),
-        ({"tracking_uri": {"type": "sweep", "values": ["sqlite:///a.db", "sqlite:///b.db"]}}, "mlflow|tracking_uri|sweep"),
+        (
+            {
+                "tracking_uri": {
+                    "type": "sweep",
+                    "values": ["sqlite:///a.db", "sqlite:///b.db"],
+                }
+            },
+            "mlflow|tracking_uri|sweep",
+        ),
         ({"unexpected": True}, "unexpected"),
     ],
 )
@@ -534,9 +789,15 @@ def test_invalid_shared_tracking_settings_fail_before_runs_or_training(
     assert not Path(tracking_document["output_directory"]).exists()
 
 
-@settings(max_examples=6, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=6,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 @given(
-    revision=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=12),
+    revision=st.text(
+        alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=12
+    ),
     alias=st.sampled_from(["champion", "candidate"]),
     register=st.booleans(),
 )
@@ -545,21 +806,29 @@ def test_tracking_metadata_round_trip_preserves_optional_registry_identity(
 ):
     """Serialization cannot silently reset registry aliases or dataset provenance."""
     document = deepcopy(tracking_document)
-    document["mlflow"] = {**tracking_store.configuration, "dataset_revision": revision, "champion_alias": alias}
+    document["mlflow"] = {
+        **tracking_store.configuration,
+        "dataset_revision": revision,
+        "champion_alias": alias,
+    }
     if register:
         document["mlflow"]["registered_model_name"] = tracking_store.registry_name
     config = TwoStageConfiguration.from_mapping(document)
     restored = TwoStageConfiguration.from_mapping(config.to_dict())
     assert restored.mlflow.dataset_revision == revision
     assert restored.mlflow.champion_alias == alias
-    assert restored.mlflow.registered_model_name == (tracking_store.registry_name if register else None)
+    assert restored.mlflow.registered_model_name == (
+        tracking_store.registry_name if register else None
+    )
 
 
 def test_tracking_rejects_environment_run_resumption_without_modifying_the_existing_run(
     tracking_document, tracking_store, monkeypatch, tmp_path
 ):
     """An environment run ID is not authorization to resume, modify, or close someone else's run."""
-    caller = tracking_store.client.create_run(tracking_store.experiment_id, tags={"owner": "caller"})
+    caller = tracking_store.client.create_run(
+        tracking_store.experiment_id, tags={"owner": "caller"}
+    )
     tracking_store.client.log_param(caller.info.run_id, "caller_parameter", "unchanged")
     sentinel = tmp_path / "caller-artifact.txt"
     sentinel.write_text("unchanged caller artifact")
@@ -578,8 +847,13 @@ def test_tracking_rejects_environment_run_resumption_without_modifying_the_exist
     assert after.data.params == before.data.params
     assert after.data.metrics == before.data.metrics
     assert after.data.tags == before.data.tags
-    assert [item.path for item in tracking_store.client.list_artifacts(caller.info.run_id)] == [sentinel.name]
-    assert _download(tracking_store, caller.info.run_id, sentinel.name).read_bytes() == sentinel.read_bytes()
+    assert [
+        item.path for item in tracking_store.client.list_artifacts(caller.info.run_id)
+    ] == [sentinel.name]
+    assert (
+        _download(tracking_store, caller.info.run_id, sentinel.name).read_bytes()
+        == sentinel.read_bytes()
+    )
     assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
     assert mlflow.active_run() is None
     assert not Path(document["output_directory"]).exists()

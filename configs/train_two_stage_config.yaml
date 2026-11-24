@@ -125,7 +125,13 @@ classifier:
         values:
           - null
           - ./yolo26x-cls.pt
-  encoder_batchnorm: eval  # eval (fixed statistics) | adapt (update statistics).
+  # Layer count N (freezes layers 0..N-1) | list of unique layer indices | 0 / [] (train all).
+  # YOLO26-cls has 11 layers: 0-9 encoder, 10 = Classify head. Index 10 is only valid with
+  # replace=linear and freezes the head's conv, so only Linear trains (linear probe).
+  freeze: !coupled-sweep  # Linear probe (11) | frozen encoder with trainable full head (10).
+    target: classifier.initialization.head.replace
+    values: [11, 10]
+  encoder_batchnorm: eval  # Frozen layers' BN: eval (fixed) | adapt (update); omit when nothing is frozen.
   epochs: 30  # Integer >0.
   batch_size: 48  # Integer >0; single-view CE batch size.
   workers: 20  # Integer >=0; 0=main process, >0=worker processes.

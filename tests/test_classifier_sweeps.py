@@ -333,7 +333,7 @@ def test_distinct_head_initializations_are_not_flagged_as_redundant(
     "field,values",
     [
         ("encoder_batchnorm", ["eval", "adapt"]),
-        ("freeze", [0, [0, 1]]),
+        ("freeze", [1, [0, 1]]),
         ("batch_size", [2, 4]),
         ("seed", [11, 29]),
     ],

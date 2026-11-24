@@ -379,6 +379,15 @@ FREEZE_CASES = [
 ]
 
 
+# encoder_batchnorm only has an effect on frozen layers, so it is required when
+# something is frozen and must be omitted (None) when nothing is.
+FREEZE_RUNS = [
+    (*case, batchnorm)
+    for case in FREEZE_CASES
+    for batchnorm in (("eval", "adapt") if case[2] else (None,))
+]
+
+
 def _mode_dependent_modules(model):
     """Yield modules whose behavior depends on train/eval mode.
 
@@ -395,8 +404,7 @@ def _is_frozen(name, frozen_prefixes):
     return any(f"{name}.".startswith(prefix) for prefix in frozen_prefixes)
 
 
-@pytest.mark.parametrize("head_replace,freeze,frozen", FREEZE_CASES)
-@pytest.mark.parametrize("batchnorm", ["eval", "adapt"])
+@pytest.mark.parametrize("head_replace,freeze,frozen,batchnorm", FREEZE_RUNS)
 def test_configured_freeze_controls_native_gradients_modes_and_updates(
     training_api,
     classifier_configuration,
@@ -515,6 +523,30 @@ def test_invalid_freeze_values_fail_at_configuration(classifier_configuration, f
     with pytest.raises((ValueError, TypeError), match="freeze"):
         replace(classifier_configuration, freeze=freeze)
     assert not classifier_configuration.output_directory.exists()
+
+
+@pytest.mark.parametrize("freeze", [0, []])
+@pytest.mark.parametrize("batchnorm", ["eval", "adapt"])
+def test_encoder_batchnorm_without_frozen_layers_is_rejected(
+    classifier_configuration, freeze, batchnorm
+):
+    """With nothing frozen, every BatchNorm trains, so the setting would be silently ignored."""
+    with pytest.raises(ValueError, match="encoder_batchnorm"):
+        replace(classifier_configuration, freeze=freeze, encoder_batchnorm=batchnorm)
+    assert not classifier_configuration.output_directory.exists()
+
+
+@pytest.mark.parametrize("freeze", [1, [0], [2]])
+def test_frozen_layers_require_an_explicit_encoder_batchnorm(
+    training_api, classifier_configuration, freeze
+):
+    """Frozen BatchNorm statistics are either fixed or adapted, never a silent default."""
+    with pytest.raises(ValueError, match="encoder_batchnorm"):
+        replace(classifier_configuration, freeze=freeze, encoder_batchnorm=None)
+    values = {**classifier_configuration.to_dict(), "freeze": freeze}
+    del values["encoder_batchnorm"]
+    with pytest.raises(ValueError, match="encoder_batchnorm"):
+        training_api.ClassifierConfiguration.from_mapping(values)
 
 
 def test_freeze_is_a_required_explicit_decision(training_api, classifier_configuration):
@@ -809,7 +841,8 @@ def test_training_without_validation_is_explicit_and_still_reports_a_result(
         float(next(value for key, value in row.items() if key.strip() == "train/loss"))
         for row in rows
     ]
-    assert result.best_value == pytest.approx(min(losses), rel=0.0001)
+    # Native logging rounds train/loss to 5 decimals before writing results.csv.
+    assert result.best_value == pytest.approx(min(losses), abs=0.000005)
     card = yaml.safe_load(
         result.best_checkpoint.with_suffix(".model_card.yaml").read_text()
     )
@@ -1299,7 +1332,8 @@ def test_configuration_preserves_batch_native_options_bn_and_freeze_policy(
     config = replace(
         classifier_configuration,
         batch_size=batch_size,
-        encoder_batchnorm=batchnorm,
+        # The BatchNorm policy only exists when some layer is frozen.
+        encoder_batchnorm=batchnorm if freeze not in (0, []) else None,
         freeze=freeze,
         train_kwargs={**classifier_configuration.train_kwargs, "lr0": lr},
     )

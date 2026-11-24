@@ -5,7 +5,16 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
-from pydantic import AfterValidator, BeforeValidator, ConfigDict, Field, InstanceOf, StrictBool, StringConstraints, TypeAdapter, with_config
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    InstanceOf,
+    StringConstraints,
+    TypeAdapter,
+    with_config,
+)
 
 
 type Count = Annotated[int, Field(strict=True, gt=0)]
@@ -19,7 +28,7 @@ type Name = Annotated[str, StringConstraints(strict=True, min_length=1)]
 type Nonblank = Annotated[Name, StringConstraints(pattern=r"\S")]
 type CheckpointPath = Nonblank | InstanceOf[Path]
 type Mode = Literal["min", "max"]
-type EncoderSource = Literal["supcon", "ultralytics", "classifier"]
+type EncoderSource = Literal["supcon", "ultralytics"]
 type HeadReplacement = Literal["linear", "full"]
 type EncoderBatchnorm = Literal["eval", "adapt"]
 
@@ -39,7 +48,23 @@ def _unique_names(names):
     return tuple(names)
 
 
-type ClassNames = Annotated[Sequence[Name], Field(min_length=1), AfterValidator(_unique_names)]
+type ClassNames = Annotated[
+    Sequence[Name], Field(min_length=1), AfterValidator(_unique_names)
+]
+
+
+def _unique_layers(indices):
+    """Reject repeated layer indices instead of silently deduplicating them."""
+    if len(set(indices)) != len(indices):
+        raise ValueError("freeze layer indices must be unique")
+    return indices
+
+
+# Ultralytics' convention: a count N freezes layers 0..N-1, a list names layers.
+# The value is kept as given (not normalized) so saved configs match their source.
+type FreezeLayers = NonnegativeInt | Annotated[
+    list[NonnegativeInt], AfterValidator(_unique_layers)
+]
 
 
 @with_config(ConfigDict(extra="allow"))
@@ -137,15 +162,6 @@ class InitializationSettings(TypedDict):
 
 
 @with_config(ConfigDict(extra="forbid"))
-class ClassifierPolicy(TypedDict):
-    """Validate model policy overrides while retaining the constructor's defaults."""
-
-    head_replace: NotRequired[HeadReplacement]
-    freeze_encoder: NotRequired[StrictBool]
-    encoder_batchnorm: NotRequired[EncoderBatchnorm]
-
-
-@with_config(ConfigDict(extra="forbid"))
 class SharedData(TypedDict):
     """Keep pipeline data concrete while stage settings may still contain sweep tags."""
 
@@ -181,7 +197,14 @@ def settings_dict(settings) -> dict:
     return TypeAdapter(type(settings)).dump_python(settings, mode="json")
 
 
-def validate_output_paths(directories: Sequence[Path], datasets=(), sources=(), roots=(), *, native_directories=()) -> None:
+def validate_output_paths(
+    directories: Sequence[Path],
+    datasets=(),
+    sources=(),
+    roots=(),
+    *,
+    native_directories=(),
+) -> None:
     """Protect dataset/source bytes against all run artifacts, symlinks, and hard links.
 
     Args:
@@ -197,41 +220,82 @@ def validate_output_paths(directories: Sequence[Path], datasets=(), sources=(), 
     outputs = [Path(directory).resolve() for directory in directories]
     roots = [Path(root).resolve() for root in roots]
     for index, directory in enumerate(outputs):
-        if any(directory.is_relative_to(other) or other.is_relative_to(directory) for other in outputs[index + 1:]):
+        if any(
+            directory.is_relative_to(other) or other.is_relative_to(directory)
+            for other in outputs[index + 1 :]
+        ):
             raise ValueError("output_directory paths must not overlap")
     inputs = [Path(dataset).resolve() for dataset in datasets if dataset is not None]
     for dataset in inputs:
         if any(output.is_relative_to(dataset) for output in [*outputs, *roots]):
             raise ValueError("output_directory must be outside both input datasets")
-    names = ("config.yaml", "history.yaml", "last.pt", "best.pt", ".last.pt.tmp", ".best.pt.tmp", "best.model_card.yaml", "best.model_card.md")
+    names = (
+        "config.yaml",
+        "history.yaml",
+        "last.pt",
+        "best.pt",
+        ".last.pt.tmp",
+        ".best.pt.tmp",
+        "best.model_card.yaml",
+        "best.model_card.md",
+    )
     artifacts = [directory / name for directory in outputs for name in names]
-    root_artifacts = [root / name for root in roots for name in ("config.yaml", "selection.yaml")]
+    root_artifacts = [
+        root / name for root in roots for name in ("config.yaml", "selection.yaml")
+    ]
     artifacts.extend(root_artifacts)
     native = [Path(directory).resolve() for directory in native_directories]
-    native_names = ("config.yaml", "args.yaml", "results.csv", "results.png", "confusion_matrix.png", "confusion_matrix_normalized.png",
-                    "weights/last.pt", "weights/best.pt", "weights/best.model_card.yaml", "weights/best.model_card.md")
-    native_artifacts = [directory / name for directory in native for name in native_names]
+    native_names = (
+        "config.yaml",
+        "args.yaml",
+        "results.csv",
+        "results.png",
+        "confusion_matrix.png",
+        "confusion_matrix_normalized.png",
+        "weights/last.pt",
+        "weights/best.pt",
+        "weights/best.model_card.yaml",
+        "weights/best.model_card.md",
+    )
+    native_artifacts = [
+        directory / name for directory in native for name in native_names
+    ]
     # Native plots/periodic snapshots can have epoch-dependent names. Existing
     # aliases must be checked too, while the weights subtree is wholly output-owned.
     for directory in native:
         native_artifacts.extend(directory.glob("*.jpg"))
         native_artifacts.extend(directory.glob("*.png"))
-        native_artifacts.extend(path for path in (directory / "weights").glob("*") if path.is_file())
+        native_artifacts.extend(
+            path for path in (directory / "weights").glob("*") if path.is_file()
+        )
     artifacts.extend(native_artifacts)
     for dataset in inputs:
         if any(artifact.resolve().is_relative_to(dataset) for artifact in artifacts):
-            raise ValueError("Output artifacts must remain outside both input datasets, including aliases")
+            raise ValueError(
+                "Output artifacts must remain outside both input datasets, including aliases"
+            )
     # Native writers truncate existing files. Reject shared inodes rather than
     # scanning large datasets; SupCon's intentional checkpoint hardlinks remain valid.
     for artifact in [*native_artifacts, *root_artifacts]:
         if artifact.is_file() and artifact.stat().st_nlink > 1:
-            raise ValueError(f"Output artifact {artifact} is hardlinked and could overwrite an input/source")
+            raise ValueError(
+                f"Output artifact {artifact} is hardlinked and could overwrite an input/source"
+            )
     for source in sources:
         if source is None:
             continue
         source = Path(source).resolve()
-        if any(source.is_relative_to((directory / "weights").resolve()) for directory in native):
-            raise ValueError(f"Native output weights collide with source checkpoint/template {source}")
+        if any(
+            source.is_relative_to((directory / "weights").resolve())
+            for directory in native
+        ):
+            raise ValueError(
+                f"Native output weights collide with source checkpoint/template {source}"
+            )
         for artifact in artifacts:
-            if source == artifact.resolve() or (source.exists() and artifact.exists() and source.samefile(artifact)):
-                raise ValueError(f"Output artifact {artifact} collides with source checkpoint/template {source}")
+            if source == artifact.resolve() or (
+                source.exists() and artifact.exists() and source.samefile(artifact)
+            ):
+                raise ValueError(
+                    f"Output artifact {artifact} collides with source checkpoint/template {source}"
+                )

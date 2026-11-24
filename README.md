@@ -3,7 +3,7 @@
 Python tools for acquiring, reviewing, preparing, and learning from wildlife
 images, with a focus on rodents, snakes, birds, and other small animals. The
 repository contains an iNaturalist/LILA data workflow, SpeciesNet-assisted YOLO
-dataset creation, Ultralytics training wrappers, and independent PyTorch
+dataset creation, an Ultralytics detector training wrapper, and independent PyTorch
 supervised-contrastive (SupCon) and cross-entropy (CE) training workflows.
 
 ## Contents
@@ -109,9 +109,9 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`datasets.py`](src/smartrodent/datasets.py) | `ImageDataset`, `MultiViewImageDataset`, `collate_views`: class mappings, image indexing, and two-view batching. |
 | [`config_utils.py`](src/smartrodent/config_utils.py) | Custom YAML loader and `ConfigHandler` Cartesian/coupled sweep expansion. |
 | [`training_validation.py`](src/smartrodent/training_validation.py) | Shared configuration schemas, parsing, serialization, and output/input path protections. |
-| [`training.py`](src/smartrodent/training.py) | `YoloDetectionTrainer`, `YoloClassificationTrainer`: wrappers around Ultralytics train/tune/export. |
+| [`training.py`](src/smartrodent/training.py) | `YoloDetectionTrainer`: wrapper around Ultralytics detector train/tune/export. |
 | [`supcon_model.py`](src/smartrodent/supcon_model.py), [`supcon_training.py`](src/smartrodent/supcon_training.py) | `YoloSupConModel`, `TrainingConfiguration`, `SupConExperiment`, `load_training_configurations()`, `run_training()`. |
-| [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierModel`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and native Ultralytics head training. |
+| [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierBuilder`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and native Ultralytics training with configurable layer freezing. |
 | [`classifier_sweeps.py`](src/smartrodent/classifier_sweeps.py) | `ClassifierSweepConfiguration`, `ClassifierSweepExperiment`: prepare/run candidates and select the validated winner. |
 | [`two_stage_training.py`](src/smartrodent/two_stage_training.py) | `TwoStageConfiguration`, `TwoStageExperiment`: SupCon selection followed by a classifier sweep. |
 | [`experiment_support.py`](src/smartrodent/experiment_support.py), [`experiment_results.py`](src/smartrodent/experiment_results.py) | Transforms, schedulers, stopping, checkpoint storage, tracking/publication, and structured results. |
@@ -197,11 +197,9 @@ These commands initialize models and start actual training. They do not expose
 | `python scripts/train_classifier.py configs/train_classifier_config.yaml` | Fresh standalone CE classifier candidates; prints final checkpoints and, with validation, the selected `best.pt`. |
 | `python scripts/train_two_stage.py configs/train_two_stage_config.yaml` | SupCon sweep, encoder selection, then CE sweep; prints final classifier checkpoints and the selected classifier's `best.pt`. |
 | `python scripts/train_yolo_detector.py configs/train_yolo_detector_config.yaml` | Ultralytics detector training followed by the configured export; prints the export location. |
-| `python scripts/train_yolo_classifier.py configs/train_yolo_classifier_config.yaml` | Expands custom classifier sweeps, trains with Ultralytics, then exports each run. |
-| `python scripts/tune_yolo_classifier.py configs/train_yolo_classifier_config.yaml` | Expands configurations, runs Ultralytics tuning using `tune_kwargs`, then invokes export. |
 
-The last three scripts are separate from the modern SupCon/CE experiment
-implementation. They currently set `CUDA_VISIBLE_DEVICES=0` in their process;
+The detector script is separate from the modern SupCon/CE experiment
+implementation. It currently sets `CUDA_VISIBLE_DEVICES=0` in its process;
 keep that GPU masking in mind when selecting native Ultralytics devices.
 
 ## Configuration guide
@@ -213,11 +211,9 @@ choices, types, and ranges:
 - [`train_classifier_config.yaml`](configs/train_classifier_config.yaml): standalone CE and classifier sweeps.
 - [`train_two_stage_config.yaml`](configs/train_two_stage_config.yaml): unified two-stage experiment.
 
-These are different schemas from the older
-[`train_yolo_classifier_config.yaml`](configs/train_yolo_classifier_config.yaml)
-and [`train_yolo_detector_config.yaml`](configs/train_yolo_detector_config.yaml),
-which use `train_kwargs`, `tune_kwargs`, and `export_kwargs`. Do not interchange
-the files merely because both workflows train a YOLO-based classifier.
+These are different schemas from the detector's
+[`train_yolo_detector_config.yaml`](configs/train_yolo_detector_config.yaml),
+which uses `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
 
 ### Configuration families
 
@@ -231,7 +227,7 @@ the files merely because both workflows train a YOLO-based classifier.
 | YOLO dataset creators | Exactly one key under `data`: `YoloDetectorDatasetCreatorFromSpeciesnet` or `YoloClassifierDatasetCreatorFromSpeciesnet`. |
 | Modern standalone training | Top-level data/output, transforms, validation, tracking, and model/initialization settings; SupCon uses AdamW options, CE uses native `train_kwargs`. |
 | Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, and optional shared `mlflow`. |
-| Ultralytics wrappers | Dataset/model, trainer options, native train/tune/export kwargs, and optional wrapper-specific MLflow settings. |
+| Ultralytics detector wrapper | Dataset/model, trainer options, native train/tune/export kwargs, and optional wrapper-specific MLflow settings. |
 | Model cards | [`model_card_template.yaml`](configs/model_card_template.yaml): model, classes, validation, provenance, and editable narrative. |
 
 ### Sweeps and coupled values
@@ -275,7 +271,7 @@ project loader.
 | --- | --- |
 | `transforms` | torchvision v2 keyword dictionaries; `image_size` is a positive square size. Augmentation `p` values range from 0 to 1. |
 | SupCon `optimizer` | AdamW kwargs, including a positive `lr`; this is not an optimizer-name selector. |
-| CE `train_kwargs` | Native Ultralytics training options such as `optimizer`, `lr0`, `lrf`, `cos_lr`, `warmup_epochs`, `patience`, and `amp`. Shared model/data/output/batch/device/seed and frozen-encoder policy cannot be overridden here. |
+| CE `train_kwargs` | Native Ultralytics training options such as `optimizer`, `lr0`, `lrf`, `cos_lr`, `warmup_epochs`, `patience`, and `amp`. Shared model/data/output/batch/device/seed, `freeze`, and `save_period` (only `best.pt`/`last.pt` are kept) cannot be overridden here. |
 | `epochs`, `workers`, `seed`, `device` | Maximum epoch count, nonnegative loader worker count, integer seed in `[0, 2**32)`, and PyTorch device such as `cpu`/`cuda:0`. |
 | `validation_dataset` | Existing class-folder validation split, or `null` for standalone training-only operation. Two-stage selection uses validation. |
 | `validation_metrics` | Named sklearn metric specifications, or `null`. Each receives true/predicted labels, not probabilities. `function` names the metric; other entries are native kwargs. |
@@ -313,7 +309,7 @@ SupCon remains FP32. CE accepts native `amp` settings; the examples explicitly
 use FP32. Both start fresh optimizer state. The scripts do not expose training
 resumption, and CE rejects `train_kwargs.resume`. CE's former `optimizer`,
 `scheduler`, `early_stopping`, and `freeze_encoder` nodes are no longer accepted;
-use native `train_kwargs` and the fixed head-only boundary instead.
+use native `train_kwargs` and the explicit `freeze` setting instead.
 
 ### Inspect configuration without training
 
@@ -444,13 +440,12 @@ The encoder format is explicit:
 | --- | --- |
 | `supcon` | Standalone SmartRodent SupCon checkpoint. |
 | `ultralytics` | Local native Ultralytics classification checkpoint. |
-| `classifier` | Portable SmartRodent CE classifier checkpoint. |
 
 All supported encoder formats contain YOLO classification models, not arbitrary
 Torch modules. Unsupported non-YOLO models raise `NotImplementedError`.
-`head.replace: linear` replaces/trains only the final linear layer; everything
-before it, including the head convolution/BatchNorm, is encoder.
-`head.replace: full` replaces/trains the entire native `Classify` block.
+`head.replace: linear` replaces only the final linear layer.
+`head.replace: full` replaces the entire native `Classify` block. Which layers
+train is decided separately by `freeze`.
 
 `head.source: random` uses native constructors, not a custom initialization
 scheme. `yolo_checkpoint` copies only shape-compatible tensors from an explicit
@@ -462,10 +457,18 @@ convolution/BatchNorm while leaving the output linear fresh. A linear-only
 equivalence to random linear initialization. All configured variants still run.
 A random head accepts an omitted/null donor checkpoint.
 
-Encoder parameters are always frozen. `encoder_batchnorm: eval` fixes encoder
-running statistics; `adapt` updates only those statistics during training.
-Frozen encoder Dropout stays in eval mode. The selected head trains normally;
-`train_kwargs.dropout` can configure Dropout only for `replace: full`.
+`freeze` is required: a layer count N freezes layers `0..N-1` (Ultralytics'
+convention), a list names unique layer indices, and `0`/`[]` trains everything.
+The last layer is the `Classify` head; its index is only valid with
+`replace: linear` and freezes the head convolution, so only Linear trains (for
+YOLO26-cls, `freeze: 11` is a linear probe and `freeze: 10` freezes the encoder
+under a trainable full head). Out-of-range values fail before training; in the
+two-stage pipeline they fail before SupCon trains. Frozen layers stay in eval
+mode, including Dropout. `encoder_batchnorm` is required when layers are frozen:
+`eval` fixes their running statistics, `adapt` updates only those statistics. It
+must be omitted (or null) when nothing is frozen. `train_kwargs.dropout` sets the
+head's Dropout before Linear for every `replace` mode (native default 0.0); other
+Dropout modules are not changed.
 Configured torchvision augmentations remain the actual training transforms;
 validation uses deterministic, unaugmented preprocessing. Dataset/cache-writing
 native discovery and conflicting augmentation options are not used.
@@ -510,14 +513,14 @@ and C classifiers, not S*C classifiers. Stage failures propagate rather than
 being skipped. Two-stage selection uses existing validation data, never a test
 split.
 
-### Ultralytics detector/classifier wrappers
+### Ultralytics detector wrapper
 
-The `train_yolo_*`/`tune_yolo_classifier.py` commands delegate training and tuning
-to Ultralytics through `smartrodent.training`. Their configs contain native
+The `train_yolo_detector.py` command delegates training to Ultralytics through
+`smartrodent.training`. Its config contains native
 `train_kwargs`, `tune_kwargs` (including tuner `space`/`iterations`), and
 `export_kwargs` (for example `format: onnx`). Outputs follow native
 `project`/`name` settings, not the modern experiment directory convention.
-These wrappers use a different MLflow schema and do not implement the modern
+The wrapper uses a different MLflow schema and does not implement the modern
 classifier champion-comparison workflow.
 
 ## Checkpoints, results, and model cards
@@ -602,11 +605,10 @@ print(classifier.names)  # Integer ID -> species name.
 supcon.finalize()  # Release the SupCon feature hook when finished.
 ```
 
-`YoloClassifierModel.from_checkpoint()` remains a reader for older portable CE
-artifacts; those inputs use encoder `source: classifier`. New CE weights use
-`source: ultralytics` and can serve as native head donors. Both native and
-portable pickled checkpoints must come from trusted sources. Portability still
-requires compatible installed PyTorch/Ultralytics/library versions.
+CE weights are native Ultralytics checkpoints: they load with encoder
+`source: ultralytics` and can serve as native head donors. Pickled checkpoints
+must come from trusted sources and require compatible installed
+PyTorch/Ultralytics/library versions.
 
 For library-driven execution, use `SupConExperiment(configuration).run_with_result()`,
 `ClassifierExperiment(configuration).run_with_result()`,
@@ -660,14 +662,13 @@ download_inaturalist
   -> materialize_filtered_data -> reconcile_filtered_data
   -> split_dataset -> sample_training_dataset
        -> create_yolo_detector_dataset -> train_yolo_detector
-       -> create_yolo_classifier_dataset -> train_yolo_classifier
-                                         -> tune_yolo_classifier
+       -> create_yolo_classifier_dataset
 
 download_lila  (independent)
 ```
 
-Both classifier training and tuning depend on the classifier dataset; tuning
-is not declared to depend on completion of `train_yolo_classifier`.
+Classifier training (SupCon, CE, two-stage) is not a DVC stage: DVC tracks
+data, while MLflow tracks training runs and models.
 
 **The graph is not currently a guarantee that all supplied config paths line
 up.** Several configs target Sri Lanka directories ending in `_srilanka`, while
@@ -818,8 +819,7 @@ SupCon registration and applies the CE policy to classifier candidates only.
 
 ### Ultralytics wrapper tracking
 
-The older `train_yolo_*`/`tune_yolo_classifier.py` wrappers use this distinct
-schema:
+The `train_yolo_detector.py` wrapper uses this distinct schema:
 
 ```yaml
 mlflow:

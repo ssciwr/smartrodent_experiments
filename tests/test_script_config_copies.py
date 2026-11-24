@@ -1,8 +1,6 @@
 """Config copies at script output roots, without downloads or model training."""
 
-import builtins
 import importlib
-from io import StringIO
 import runpy
 import sys
 from types import SimpleNamespace
@@ -131,20 +129,6 @@ def test_download_entry_points_copy_config_before_download(
             "train",
             True,
         ),
-        (
-            "scripts.train_yolo_classifier",
-            "YoloClassificationTrainer",
-            "train_yolo_classifier_config.yaml",
-            "train",
-            True,
-        ),
-        (
-            "scripts.tune_yolo_classifier",
-            "YoloClassificationTrainer",
-            "train_yolo_classifier_config.yaml",
-            "tune",
-            True,
-        ),
     ],
 )
 def test_training_scripts_copy_original_config_to_project_base(
@@ -177,16 +161,6 @@ def test_training_scripts_copy_original_config_to_project_base(
         ),
         encoding="utf-8",
     )
-    # Isolate the scripts' existing fixed /tmp scratch file during testing.
-    original_open = builtins.open
-
-    def isolated_open(file, *args, **kwargs):
-        if str(file) == "/tmp/train_yolo_classifier_config.yaml":
-            return StringIO()
-        else:
-            return original_open(file, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "open", isolated_open)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     trainer = Mock()
     trainer.train_kwargs = {"project": str(output_root)}

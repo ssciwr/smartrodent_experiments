@@ -11,14 +11,23 @@ from pathlib import Path
 
 import mlflow
 import yaml
+from ultralytics import YOLO
 
 from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 from smartrodent import config_utils
 from smartrodent.classifier_training import ClassifierConfiguration
-from smartrodent.classifier_sweeps import ClassifierSweepConfiguration, ClassifierSweepExperiment
+from smartrodent.classifier_sweeps import (
+    ClassifierSweepConfiguration,
+    ClassifierSweepExperiment,
+)
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
 from smartrodent.experiment_support import MlflowConfiguration, validate_stopping
-from smartrodent.training_validation import MappingInput, SharedData, parse_settings, validate_output_paths
+from smartrodent.training_validation import (
+    MappingInput,
+    SharedData,
+    parse_settings,
+    validate_output_paths,
+)
 
 
 def _plain_values(value):
@@ -53,7 +62,9 @@ class TwoStageConfiguration:
     supcon: dict[str, object]
     classifier: dict[str, object]
     mlflow: MappingInput[MlflowConfiguration] | None = None
-    supcon_configurations: tuple[TrainingConfiguration, ...] = field(init=False, repr=False)
+    supcon_configurations: tuple[TrainingConfiguration, ...] = field(
+        init=False, repr=False
+    )
     _classifier_sweep: ClassifierSweepConfiguration = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -66,22 +77,39 @@ class TwoStageConfiguration:
         # multiply SupCon candidates or change which encoder is selected.
         runs = config_utils.ConfigHandler({"supcon": deepcopy(self.supcon)}).run_configs
         if not runs:
-            raise ValueError("SupCon sweep must contain at least one candidate; empty sweep")
+            raise ValueError(
+                "SupCon sweep must contain at least one candidate; empty sweep"
+            )
         configurations = [
             self._build_supcon_configuration(run["supcon"], index)
             for index, run in enumerate(runs, start=1)
         ]
         reference = configurations[0]
-        if any(config.temperature != reference.temperature for config in configurations):
+        if any(
+            config.temperature != reference.temperature for config in configurations
+        ):
             raise ValueError("SupCon temperature must remain fixed within a sweep")
-        if any(config.effective_tracked_metric != reference.effective_tracked_metric for config in configurations):
+        if any(
+            config.effective_tracked_metric != reference.effective_tracked_metric
+            for config in configurations
+        ):
             raise ValueError("SupCon sweep must use the same tracked metric")
-        if any(config.effective_tracked_mode != reference.effective_tracked_mode for config in configurations):
+        if any(
+            config.effective_tracked_mode != reference.effective_tracked_mode
+            for config in configurations
+        ):
             raise ValueError("SupCon sweep must use the same tracked mode/direction")
-        if any(config.tracked_metric_definition != reference.tracked_metric_definition for config in configurations):
-            raise ValueError("SupCon sweep must use the same tracked metric definition/function/options")
+        if any(
+            config.tracked_metric_definition != reference.tracked_metric_definition
+            for config in configurations
+        ):
+            raise ValueError(
+                "SupCon sweep must use the same tracked metric definition/function/options"
+            )
         object.__setattr__(self, "supcon_configurations", tuple(configurations))
-        classifier_runs = config_utils.ConfigHandler({"classifier": deepcopy(self.classifier)}).run_configs
+        classifier_runs = config_utils.ConfigHandler(
+            {"classifier": deepcopy(self.classifier)}
+        ).run_configs
         classifier_root = self.output_directory / "classifier"
         shared_classifier_settings = {
             **self.data,
@@ -93,17 +121,26 @@ class TwoStageConfiguration:
             settings = run["classifier"]
             self._validate_stage_ownership(settings, "classifier")
             initialization = settings.get("initialization")
-            if not isinstance(initialization, Mapping) or initialization.get("encoder") != {"source": "selected_supcon"}:
-                raise ValueError("classifier encoder must be exactly {source: selected_supcon}, without checkpoint")
+            if not isinstance(initialization, Mapping) or initialization.get(
+                "encoder"
+            ) != {"source": "selected_supcon"}:
+                raise ValueError(
+                    "classifier encoder must be exactly {source: selected_supcon}, without checkpoint"
+                )
             candidate = {**deepcopy(settings), **shared_classifier_settings}
             # The winning file does not exist yet; this validates settings and
             # source/output relationships without loading any model weights.
             candidate["initialization"]["encoder"] = {
-                "source": "supcon", "checkpoint": str(reference.output_directory / "best.pt"),
+                "source": "supcon",
+                "checkpoint": str(reference.output_directory / "best.pt"),
             }
             values.append(candidate)
-        document = _plain_values({**deepcopy(self.classifier), **shared_classifier_settings})
-        sweep = ClassifierSweepConfiguration.from_runs(classifier_root, values, document)
+        document = _plain_values(
+            {**deepcopy(self.classifier), **shared_classifier_settings}
+        )
+        sweep = ClassifierSweepConfiguration.from_runs(
+            classifier_root, values, document
+        )
         object.__setattr__(self, "_classifier_sweep", sweep)
         self._validate_output_paths()
 
@@ -111,7 +148,11 @@ class TwoStageConfiguration:
     def _validate_stage_ownership(settings: Mapping, section: str) -> None:
         """Reject shared data/output overrides and deferred tracking before merging settings."""
         reserved = {
-            "train_dataset", "validation_dataset", "class_names", "output_directory", "mlflow",
+            "train_dataset",
+            "validation_dataset",
+            "class_names",
+            "output_directory",
+            "mlflow",
         }
         conflicts = reserved & set(settings)
         if conflicts:
@@ -130,7 +171,11 @@ class TwoStageConfiguration:
             **self.data,
             "output_directory": self.output_directory / "supcon" / f"run_{index:03d}",
             # Pipeline candidates are encoders, never classifier registry versions.
-            "mlflow": asdict(replace(self.mlflow, registered_model_name=None)) if self.mlflow is not None else None,
+            "mlflow": (
+                asdict(replace(self.mlflow, registered_model_name=None))
+                if self.mlflow is not None
+                else None
+            ),
         }
         try:
             config = TrainingConfiguration.from_mapping(values)
@@ -147,12 +192,19 @@ class TwoStageConfiguration:
         # Selected encoder checkpoints are pipeline outputs, not external inputs.
         sources = [config.model_name for config in self.supcon_configurations]
         sources.extend(config.model_card_template for config in stages)
-        sources.extend(config.initialization["head"].get("checkpoint") for config in self._classifier_sweep.configurations)
+        sources.extend(
+            config.initialization["head"].get("checkpoint")
+            for config in self._classifier_sweep.configurations
+        )
         validate_output_paths(
             [config.output_directory for config in stages],
-            (self.data["train_dataset"], self.data["validation_dataset"]), sources,
+            (self.data["train_dataset"], self.data["validation_dataset"]),
+            sources,
             (self.output_directory, self._classifier_sweep.output_directory),
-            native_directories=[config.output_directory for config in self._classifier_sweep.configurations],
+            native_directories=[
+                config.output_directory
+                for config in self._classifier_sweep.configurations
+            ],
         )
 
     @classmethod
@@ -180,7 +232,9 @@ class TwoStageConfiguration:
         Returns:
             Fully prevalidated pipeline settings.
         """
-        document = yaml.load(Path(path).read_text(encoding="utf-8"), Loader=config_utils.get_loader())
+        document = yaml.load(
+            Path(path).read_text(encoding="utf-8"), Loader=config_utils.get_loader()
+        )
         return cls.from_mapping(document)
 
     def to_dict(self) -> dict:
@@ -190,8 +244,10 @@ class TwoStageConfiguration:
             Unified settings including the selected_supcon encoder placeholder.
         """
         values = {
-            "output_directory": self.output_directory, "data": self.data,
-            "supcon": self.supcon, "classifier": self.classifier,
+            "output_directory": self.output_directory,
+            "data": self.data,
+            "supcon": self.supcon,
+            "classifier": self.classifier,
         }
         if self.mlflow is not None:
             values["mlflow"] = asdict(self.mlflow)
@@ -208,10 +264,14 @@ class TwoStageConfiguration:
         """
         configurations = self.classifier_sweep_configuration(checkpoint).configurations
         if len(configurations) != 1:
-            raise ValueError("Multiple classifier configurations; use classifier_sweep_configuration")
+            raise ValueError(
+                "Multiple classifier configurations; use classifier_sweep_configuration"
+            )
         return configurations[0]
 
-    def classifier_sweep_configuration(self, checkpoint: Path) -> ClassifierSweepConfiguration:
+    def classifier_sweep_configuration(
+        self, checkpoint: Path
+    ) -> ClassifierSweepConfiguration:
         """Inject the same selected encoder into every prepared classifier variant.
 
         Args:
@@ -254,7 +314,9 @@ class TwoStageResult:
             ValueError: Multiple classifiers ran; use classifier_results instead.
         """
         if len(self.classifier_results) != 1:
-            raise ValueError("Classifier sweep has multiple results; use classifier_results or selected_classifier")
+            raise ValueError(
+                "Classifier sweep has multiple results; use classifier_results or selected_classifier"
+            )
         return self.classifier_results[0]
 
 
@@ -268,8 +330,36 @@ class TwoStageExperiment:
     def __init__(self, configuration: TwoStageConfiguration):
         """Prepare every stage's independent inputs before training or output creation."""
         self.configuration = configuration
-        self.supcon_experiments = tuple(SupConExperiment(candidate) for candidate in configuration.supcon_configurations)
+        self._validate_classifier_freeze(configuration)
+        self.supcon_experiments = tuple(
+            SupConExperiment(candidate)
+            for candidate in configuration.supcon_configurations
+        )
         self.classifiers = ClassifierSweepExperiment(configuration._classifier_sweep)
+
+    @staticmethod
+    def _validate_classifier_freeze(configuration: TwoStageConfiguration) -> None:
+        """Reject classifier freeze settings that do not fit every SupCon candidate's network.
+
+        The winning encoder is unknown until the SupCon sweep finishes. Its network
+        keeps the layer count of its ``model_name``, so checking every candidate
+        architecture now avoids failing only after all SupCon training.
+        """
+        model_names = sorted(
+            {
+                str(candidate.model_name)
+                for candidate in configuration.supcon_configurations
+            }
+        )
+        for model_name in model_names:
+            layer_count = len(YOLO(model_name, task="classify").model.model)
+            for classifier in configuration._classifier_sweep.configurations:
+                try:
+                    classifier.native_freeze(layer_count)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Classifier freeze does not fit SupCon model {model_name}: {error}"
+                    ) from error
 
     def run(self) -> TwoStageResult:
         """Run all candidates, select best.pt, and train a fresh CE classifier.
@@ -301,22 +391,38 @@ class TwoStageExperiment:
         if summary_path.exists():
             # Invalidate only this invocation's active summary before replacing
             # config/checkpoints. Retain prior stage files and unrelated runs.
-            summary_path.write_text(yaml.safe_dump({
-                "supcon_results": [], "selected_supcon": None, "classifier_result": None,
-                "classifier_results": [], "selected_classifier": None,
-            }), encoding="utf-8")
-        (root / "config.yaml").write_text(yaml.safe_dump(config.to_dict()), encoding="utf-8")
+            summary_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "supcon_results": [],
+                        "selected_supcon": None,
+                        "classifier_result": None,
+                        "classifier_results": [],
+                        "selected_classifier": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        (root / "config.yaml").write_text(
+            yaml.safe_dump(config.to_dict()), encoding="utf-8"
+        )
         results = []
         context = {"parent_run_id": run_id} if run_id is not None else {}
         for experiment in self.supcon_experiments:
             candidate = experiment.configuration
             result = experiment.run_with_result(**context)
             if result.tracked_metric != candidate.effective_tracked_metric:
-                raise ValueError("SupCon result tracked metric does not match configuration")
+                raise ValueError(
+                    "SupCon result tracked metric does not match configuration"
+                )
             if result.tracked_mode != candidate.effective_tracked_mode:
-                raise ValueError("SupCon result tracked mode does not match configuration")
+                raise ValueError(
+                    "SupCon result tracked mode does not match configuration"
+                )
             if result.validation_dataset != candidate.validation_dataset:
-                raise ValueError("SupCon result validation dataset does not match configuration")
+                raise ValueError(
+                    "SupCon result validation dataset does not match configuration"
+                )
             results.append(result)
         selected = select_best_experiment(results)
         with selected.best_checkpoint.open("rb") as stream:
@@ -324,24 +430,39 @@ class TwoStageExperiment:
         summary = {
             "supcon_results": [result.to_dict() for result in results],
             "selected_supcon": {**selected.to_dict(), "checkpoint_sha256": checksum},
-            "classifier_result": None, "classifier_results": [], "selected_classifier": None,
+            "classifier_result": None,
+            "classifier_results": [],
+            "selected_classifier": None,
             "mlflow_run_id": run_id,
         }
         summary_path.write_text(yaml.safe_dump(summary), encoding="utf-8")
         encoder_provenance = {
-            "encoder_run_id": selected.mlflow_run_id, "encoder_epoch": selected.best_epoch,
+            "encoder_run_id": selected.mlflow_run_id,
+            "encoder_epoch": selected.best_epoch,
             "encoder_tracked_metric": selected.tracked_metric,
-            "encoder_tracked_mode": selected.tracked_mode, "encoder_best_value": selected.best_value,
+            "encoder_tracked_mode": selected.tracked_mode,
+            "encoder_best_value": selected.best_value,
             "pipeline_run_id": run_id,
         }
-        self.classifiers.bind_supcon_encoder(selected.best_checkpoint, encoder_provenance)
+        self.classifiers.bind_supcon_encoder(
+            selected.best_checkpoint, encoder_provenance
+        )
         classifiers = self.classifiers.run(**context)
         classifier_report = classifiers.to_dict()
-        for name in ("classifier_results", "selected_classifier", "registered_champion_version"):
+        for name in (
+            "classifier_results",
+            "selected_classifier",
+            "registered_champion_version",
+        ):
             summary[name] = classifier_report[name]
         if len(classifiers.classifier_results) == 1:
             summary["classifier_result"] = classifiers.classifier_results[0].to_dict()
         summary_path.write_text(yaml.safe_dump(summary), encoding="utf-8")
         return TwoStageResult(
-            root, tuple(results), selected, classifiers.classifier_results, classifiers.selected_classifier, run_id,
+            root,
+            tuple(results),
+            selected,
+            classifiers.classifier_results,
+            classifiers.selected_classifier,
+            run_id,
         )
