@@ -430,6 +430,44 @@ def test_classifier_freeze_is_checked_against_every_supcon_architecture(
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
+def test_each_stage_section_exports_every_run_it_configures(
+    pipeline_api, pipeline_document, tmp_path
+):
+    """SupCon candidates export encoders and CE candidates export classifiers, all reported."""
+    from test_model_export import widened_architecture
+
+    # Native classifier export needs a network above Ultralytics' minimum file size.
+    pipeline_document["supcon"]["model_name"] = str(
+        widened_architecture(
+            Path(pipeline_document["supcon"]["model_name"]), tmp_path / "wide-cls.yaml"
+        )
+    )
+    pipeline_document["supcon"]["export"] = {"format": "onnx"}
+    pipeline_document["classifier"]["export"] = {"format": "onnx"}
+    pipeline_document["classifier"]["seed"] = {"type": "sweep", "values": [29, 31]}
+    result = pipeline_api.TwoStageExperiment(
+        _configuration(pipeline_api, pipeline_document)
+    ).run()
+    runs = [*result.supcon_results, *result.classifier_results]
+    assert len(result.supcon_results) == 3 and len(result.classifier_results) == 2
+    for supcon in result.supcon_results:
+        assert supcon.exported_model == supcon.output_directory / "best.onnx"
+    for classifier in result.classifier_results:
+        assert (
+            classifier.exported_model
+            == classifier.output_directory / "weights" / "best.onnx"
+        )
+    assert all(run.exported_model.is_file() for run in runs)
+    summary = yaml.safe_load((result.output_directory / "selection.yaml").read_text())
+    for name, results in (
+        ("supcon_results", result.supcon_results),
+        ("classifier_results", result.classifier_results),
+    ):
+        assert [item["exported_model"] for item in summary[name]] == [
+            str(item.exported_model) for item in results
+        ]
+
+
 def test_classifier_failure_is_not_reported_as_a_completed_pipeline(
     pipeline_api, pipeline_document, recorded_stages
 ):

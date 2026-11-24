@@ -626,6 +626,144 @@ def test_out_of_range_freeze_fails_before_any_tracking_run_or_output(
     assert mlflow.active_run() is None
 
 
+def _exporting_classifier(
+    standalone_configuration, pipeline_document, tracking_store, tmp_path, *, register
+):
+    """Configure a tracked CE run on an encoder wide enough for native ONNX export."""
+    from test_model_export import wide_native_encoder
+
+    encoder = wide_native_encoder(
+        Path(pipeline_document["supcon"]["model_name"]), tmp_path / "wide-cls.pt"
+    )
+    settings = {**tracking_store.configuration}
+    if register:
+        settings["registered_model_name"] = tracking_store.registry_name
+    return replace(
+        standalone_configuration,
+        export={"format": "onnx"},
+        mlflow=MlflowConfiguration(**settings),
+        initialization={
+            "encoder": {"source": "ultralytics", "checkpoint": str(encoder)},
+            "head": {"replace": "linear", "source": "random"},
+        },
+    )
+
+
+@pytest.mark.parametrize("register", [False, True])
+def test_tracked_classifier_logs_its_onnx_export_with_the_best_model(
+    standalone_configuration,
+    pipeline_document,
+    tracking_store,
+    scripted_validation,
+    tmp_path,
+    register,
+):
+    """The exported file is published next to best.pt, with or without registration."""
+    config = _exporting_classifier(
+        standalone_configuration,
+        pipeline_document,
+        tracking_store,
+        tmp_path,
+        register=register,
+    )
+    result = ClassifierExperiment(config).run_with_result()
+    downloaded = _download(tracking_store, result.mlflow_run_id, "best_model/best.onnx")
+    assert downloaded.read_bytes() == result.exported_model.read_bytes()
+
+
+def test_failed_classifier_export_fails_the_run_before_publication(
+    standalone_configuration,
+    pipeline_document,
+    tracking_store,
+    scripted_validation,
+    tmp_path,
+    monkeypatch,
+):
+    """A failed export leaves a failed run: no ONNX artifact and no registered version."""
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("simulated ONNX export failure")
+
+    config = _exporting_classifier(
+        standalone_configuration,
+        pipeline_document,
+        tracking_store,
+        tmp_path,
+        register=True,
+    )
+    monkeypatch.setattr(torch.onnx, "export", fail)
+    with pytest.raises(RuntimeError, match="export failure"):
+        ClassifierExperiment(config).run_with_result()
+    (run,) = tracking_store.client.search_runs([tracking_store.experiment_id])
+    assert run.info.status == "FAILED"
+    assert "best_model" not in {
+        item.path for item in tracking_store.client.list_artifacts(run.info.run_id)
+    }
+    assert tracking_store.client.search_registered_models() == []
+    assert mlflow.active_run() is None
+
+
+def test_failed_supcon_export_fails_the_run_before_publication(
+    pipeline_document, tracking_store, monkeypatch
+):
+    """Like the classifier, a failed encoder export publishes nothing to the failed run."""
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("simulated ONNX export failure")
+
+    values = deepcopy(pipeline_document["supcon"])
+    values.update(pipeline_document["data"])
+    values.update(
+        epochs=1,
+        optimizer={"lr": 0.001},
+        export={"format": "onnx"},
+        output_directory=str(
+            Path(pipeline_document["output_directory"]).parent / "failed-export-supcon"
+        ),
+        mlflow={
+            **tracking_store.configuration,
+            "registered_model_name": "failed-supcon-encoder",
+        },
+    )
+    config = TrainingConfiguration.from_mapping(values)
+    monkeypatch.setattr(torch.onnx, "export", fail)
+    with pytest.raises(RuntimeError, match="export failure"):
+        SupConExperiment(config).run_with_result()
+    (run,) = tracking_store.client.search_runs([tracking_store.experiment_id])
+    assert run.info.status == "FAILED"
+    assert "best_model" not in {
+        item.path for item in tracking_store.client.list_artifacts(run.info.run_id)
+    }
+    assert tracking_store.client.search_registered_models() == []
+    assert mlflow.active_run() is None
+
+
+@pytest.mark.parametrize("register", [False, True])
+def test_tracked_supcon_logs_its_onnx_export_with_the_best_model(
+    pipeline_document, tracking_store, register
+):
+    """The encoder export is published next to the SupCon best.pt, with or without registration."""
+    values = deepcopy(pipeline_document["supcon"])
+    values.update(pipeline_document["data"])
+    settings = {**tracking_store.configuration}
+    if register:
+        settings["registered_model_name"] = "exported-supcon-encoder"
+    values.update(
+        epochs=1,
+        optimizer={"lr": 0.001},
+        export={"format": "onnx"},
+        output_directory=str(
+            Path(pipeline_document["output_directory"]).parent / "exported-supcon"
+        ),
+        mlflow=settings,
+    )
+    result = SupConExperiment(
+        TrainingConfiguration.from_mapping(values)
+    ).run_with_result()
+    downloaded = _download(tracking_store, result.mlflow_run_id, "best_model/best.onnx")
+    assert downloaded.read_bytes() == result.exported_model.read_bytes()
+
+
 def test_standalone_ce_tracking_without_registration_remains_a_single_completed_run(
     standalone_configuration, tracking_store, scripted_validation
 ):
