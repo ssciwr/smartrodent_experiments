@@ -4,6 +4,7 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -1453,3 +1454,104 @@ def test_classifier_cli_trains_a_native_cpu_checkpoint_without_touching_inputs(
         if path.is_file() and not path.is_relative_to(config.output_directory)
     }
     assert after == inputs
+
+
+# --- Per-epoch observer hook (used by Optuna pruning; the trainer stays Optuna-free) ---
+
+
+def _balanced_accuracy_configuration(configuration, **changes):
+    """Track a controllable validation score instead of the fixture's CE loss."""
+    return replace(
+        configuration,
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
+        **changes,
+    )
+
+
+def test_epoch_callback_observes_each_native_epoch_after_its_checkpoint(
+    training_api, classifier_configuration, controlled_scores
+):
+    """The hook sees each epoch's configured score, never native fitness, once last.pt exists."""
+    config = _balanced_accuracy_configuration(classifier_configuration, epochs=3)
+    controlled_scores.score_sets = {0.002: [0.2, 0.8, 0.6]}
+    observed = []
+
+    def callback(epoch, value):
+        """Record the call and whether the epoch's native checkpoint is already written."""
+        observed.append(
+            (epoch, value, (config.output_directory / "weights/last.pt").is_file())
+        )
+
+    result = training_api.ClassifierExperiment(config).run_with_result(
+        epoch_callback=callback
+    )
+    assert observed == [(1, 0.2, True), (2, 0.8, True), (3, 0.6, True)]
+    assert result.best_epoch == 2 and result.best_value == 0.8
+
+
+def test_epoch_callback_ends_with_native_early_stopping(
+    training_api, classifier_configuration, controlled_scores
+):
+    """Native patience ends the hook sequence; the final best-model evaluation is not an epoch."""
+    config = _balanced_accuracy_configuration(
+        classifier_configuration,
+        epochs=6,
+        train_kwargs={**classifier_configuration.train_kwargs, "patience": 1},
+    )
+    controlled_scores.score_sets = {0.002: [0.5, 0.4, 0.3, 0.2, 0.1, 0.0]}
+    observed = []
+    training_api.ClassifierExperiment(config).run_with_result(
+        epoch_callback=lambda epoch, value: observed.append((epoch, value))
+    )
+    assert observed == [(1, 0.5), (2, 0.4)]
+
+
+def test_epoch_callback_reports_training_loss_without_validation(
+    training_api, classifier_configuration
+):
+    """Training-only runs report the CE loss that also selects their best epoch."""
+    config = replace(classifier_configuration, validation_dataset=None, epochs=2)
+    observed = []
+    result = training_api.ClassifierExperiment(config).run_with_result(
+        epoch_callback=lambda epoch, value: observed.append((epoch, value))
+    )
+    assert [epoch for epoch, _ in observed] == [1, 2]
+    assert all(
+        isinstance(value, float) and math.isfinite(value) for _, value in observed
+    )
+    assert result.best_value == min(value for _, value in observed)
+
+
+def test_epoch_callback_exception_stops_native_training_and_propagates_unchanged(
+    training_api, classifier_configuration, controlled_scores
+):
+    """A hook may stop a run (e.g. pruning) before any model card or publication is written."""
+
+    class StopRequested(Exception):
+        """A caller-owned exception type that must not be wrapped or swallowed."""
+
+    def callback(epoch, value):
+        raise StopRequested(f"stop after epoch {epoch}")
+
+    config = _balanced_accuracy_configuration(classifier_configuration, epochs=3)
+    controlled_scores.score_sets = {0.002: [0.2, 0.8, 0.6]}
+    with pytest.raises(StopRequested, match="stop after epoch 1"):
+        training_api.ClassifierExperiment(config).run_with_result(
+            epoch_callback=callback
+        )
+    assert len(controlled_scores.validations) == 1
+    assert not (config.output_directory / "weights/best.model_card.yaml").exists()
+
+
+def test_omitting_the_classifier_epoch_callback_keeps_existing_behavior(
+    training_api, classifier_configuration
+):
+    """The hook is optional; the existing result API is unchanged without it."""
+    result = training_api.ClassifierExperiment(
+        classifier_configuration
+    ).run_with_result(epoch_callback=None)
+    assert result.last_checkpoint.is_file()

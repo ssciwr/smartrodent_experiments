@@ -39,10 +39,12 @@ vllm = [
 ] # needs uv pip install "vllm==0.28.0" --torch-backend=auto to resolve bug: https://github.com/vllm-project/vllm/issues/58236
 ollama = ["ollama"]
 jupyter = ["ipykernel"]
-experiments = ["dvc>=3.67.1", "mlflow>=3.17.0"]
+experiments = ["dvc>=3.67.1", "mlflow>=3.17.0", "optuna>=5.1.0"]
 all = ["rodent-experiments[dev,vllm,ollama,jupyter,experiments]"]
 
 [tool.pytest]
+# Collect only the project test suite, never test-like files in outputs/ or datasets/.
+testpaths = ["tests"]
 # Script entry points live outside the installed src package.
 pythonpath = ["."]
 markers = [

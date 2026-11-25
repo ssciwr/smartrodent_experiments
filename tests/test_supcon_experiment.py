@@ -463,7 +463,10 @@ def test_early_stopping_stops_after_patience_values_without_new_best(
         ({"name": "ReduceLROnPlateau"}, ("parameters",)),
         ({"name": "StepLR", "parameters": {}}, ("name",)),
         ({"name": "ReduceLROnPlateau", "parameters": []}, ("parameters",)),
-        ({"name": "ReduceLROnPlateau", "parameters": {"unknown": 1}}, ("parameters", "unknown")),
+        (
+            {"name": "ReduceLROnPlateau", "parameters": {"unknown": 1}},
+            ("parameters", "unknown"),
+        ),
     ],
 )
 def test_invalid_scheduler_mapping_fails(document, location):
@@ -798,7 +801,8 @@ def test_configured_metric_controls_checkpoint_result_scheduler_and_stopping(
         )
         client = train_supcon.MlflowClient(tracking_uri=tracking_config.tracking_uri)
         client.create_experiment(
-            tracking_config.experiment_name, artifact_location=(tmp_path / "artifacts").as_uri()
+            tracking_config.experiment_name,
+            artifact_location=(tmp_path / "artifacts").as_uri(),
         )
     config = replace(
         validation_configuration,
@@ -806,17 +810,25 @@ def test_configured_metric_controls_checkpoint_result_scheduler_and_stopping(
         mlflow=tracking_config,
         tracked_metric="balanced_accuracy",
         tracked_mode=mode,
-        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
         scheduler=SchedulerConfiguration(
             "ReduceLROnPlateau", {"mode": mode, "patience": 0, "factor": 0.5}
         ),
         early_stopping={
-            "patience": 2, "tolerance": 0.0,
+            "patience": 2,
+            "tolerance": 0.0,
             "comparison": "less" if mode == "min" else "greater",
         },
     )
     tracked_values = [0.8, 0.2, 0.2, 0.5] if mode == "min" else [0.2, 0.8, 0.8, 0.5]
-    supcon_values = [0.1, 0.2, 0.3, 0.4]  # Loss prefers epoch 1, NOT the configured winner.
+    supcon_values = [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+    ]  # Loss prefers epoch 1, NOT the configured winner.
     scores = iter(zip(tracked_values, supcon_values, strict=True))
 
     def validate(self, model, loader, criterion):
@@ -836,23 +848,40 @@ def test_configured_metric_controls_checkpoint_result_scheduler_and_stopping(
     assert result.best_value == tracked_values[1]  # Original value, not a signed score.
     assert result.validation_dataset == config.validation_dataset
     assert [row["validation"]["balanced_accuracy"] for row in history] == tracked_values
-    assert [row["next_learning_rate"] for row in history] == [0.001, 0.001, 0.0005, 0.00025]
+    assert [row["next_learning_rate"] for row in history] == [
+        0.001,
+        0.001,
+        0.0005,
+        0.00025,
+    ]
     assert best["optimizer_state_dict"]["param_groups"][0]["lr"] == 0.001
     assert last["configuration"]["tracked_metric"] == "balanced_accuracy"
     assert last["configuration"]["tracked_mode"] == mode
     assert all("selection" not in row for row in history)  # No separate scoring pass.
-    assert yaml.safe_load((config.output_directory / "history.yaml").read_text()) == history
-    card = yaml.safe_load((config.output_directory / "best.model_card.yaml").read_text())
+    assert (
+        yaml.safe_load((config.output_directory / "history.yaml").read_text())
+        == history
+    )
+    card = yaml.safe_load(
+        (config.output_directory / "best.model_card.yaml").read_text()
+    )
     assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
     assert card["validation"]["metrics"]["balanced_accuracy"] == tracked_values[1]
-    assert {path.name for path in config.output_directory.glob("*.pt")} == {"best.pt", "last.pt"}
+    assert {path.name for path in config.output_directory.glob("*.pt")} == {
+        "best.pt",
+        "last.pt",
+    }
     if tracking:
         run = client.get_run(result.mlflow_run_id)
         assert run.info.status == "FINISHED"
-        metrics = client.get_metric_history(result.mlflow_run_id, "validation/balanced_accuracy")
+        metrics = client.get_metric_history(
+            result.mlflow_run_id, "validation/balanced_accuracy"
+        )
         assert [item.step for item in metrics] == [1, 2, 3, 4]
         assert [item.value for item in metrics] == tracked_values
-        assert run.data.metrics["best_validation_balanced_accuracy"] == tracked_values[1]
+        assert (
+            run.data.metrics["best_validation_balanced_accuracy"] == tracked_values[1]
+        )
         assert run.data.metrics["best_epoch"] == 2
     else:
         assert result.mlflow_run_id is None
@@ -897,15 +926,19 @@ def test_tracking_configuration_round_trip_and_fixed_temperature_sweep(
         validation_configuration,
         tracked_metric="balanced_accuracy",
         tracked_mode="max",
-        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
     )
     path = tmp_path / "tracked.yaml"
     path.write_text(yaml.safe_dump(config.to_dict()))
     assert TrainingConfiguration.from_yaml(path) == config
     assert config.mlflow_parameters()["tracked_mode"] == "max"
-    path.write_text(path.read_text().replace(
-        "\n  lr: 0.001\n", "\n  lr: !sweep\n    values: [0.001, 0.002]\n"
-    ))
+    path.write_text(
+        path.read_text().replace(
+            "\n  lr: 0.001\n", "\n  lr: !sweep\n    values: [0.001, 0.002]\n"
+        )
+    )
     runs = train_supcon.load_training_configurations(path)
     assert [run.optimizer["lr"] for run in runs] == [0.001, 0.002]
     assert all(run.temperature == config.temperature for run in runs)
@@ -913,12 +946,16 @@ def test_tracking_configuration_round_trip_and_fixed_temperature_sweep(
     assert all(run.effective_tracked_mode == "max" for run in runs)
 
 
-def test_temperature_cannot_vary_within_a_supcon_sweep(experiment_configuration, tmp_path):
+def test_temperature_cannot_vary_within_a_supcon_sweep(
+    experiment_configuration, tmp_path
+):
     """Reject different temperatures before any run rather than adding another scoring pass."""
     path = tmp_path / "varying-temperature.yaml"
-    path.write_text(yaml.safe_dump(experiment_configuration.to_dict()).replace(
-        "\ntemperature: 0.1\n", "\ntemperature: !sweep\n  values: [0.05, 0.2]\n"
-    ))
+    path.write_text(
+        yaml.safe_dump(experiment_configuration.to_dict()).replace(
+            "\ntemperature: 0.1\n", "\ntemperature: !sweep\n  values: [0.05, 0.2]\n"
+        )
+    )
     with pytest.raises(ValueError, match="temperature.*sweep|sweep.*temperature"):
         train_supcon.load_training_configurations(path)
     assert not experiment_configuration.output_directory.exists()
@@ -935,7 +972,9 @@ def test_omitted_tracking_direction_preserves_legacy_defaults(
     document = replace(
         validation_configuration,
         tracked_metric=metric,
-        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
     ).to_dict()
     document.pop("tracked_mode", None)
     config = TrainingConfiguration.from_mapping(document)
@@ -962,8 +1001,12 @@ def test_explicit_tracking_direction_must_agree_with_scheduler_and_stopping(
     """One configured direction applies consistently to the same tracked metric."""
     with pytest.raises(ValueError, match="tracked_mode|direction"):
         replace(
-            validation_configuration, tracked_metric="balanced_accuracy", tracked_mode="max",
-            validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+            validation_configuration,
+            tracked_metric="balanced_accuracy",
+            tracked_mode="max",
+            validation_metrics={
+                "balanced_accuracy": {"function": "balanced_accuracy_score"}
+            },
             **updates,
         )
 
@@ -975,28 +1018,161 @@ def test_nonfinite_tracked_metric_aborts_before_checkpointing(
     """A valid training loss cannot hide an invalid configured validation metric."""
     torch.set_num_threads(2)
     config = replace(
-        validation_configuration, tracked_metric="balanced_accuracy",
-        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        validation_configuration,
+        tracked_metric="balanced_accuracy",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
     )
     monkeypatch.setattr(
-        SupConExperiment, "_validate",
-        lambda self, model, loader, criterion: {"balanced_accuracy": value, "supcon_loss_mean": 0.1},
+        SupConExperiment,
+        "_validate",
+        lambda self, model, loader, criterion: {
+            "balanced_accuracy": value,
+            "supcon_loss_mean": 0.1,
+        },
     )
     with pytest.raises(FloatingPointError, match="tracked|validation"):
         SupConExperiment(config).run_with_result()
     assert not list(config.output_directory.glob("*.pt"))
 
 
-def test_missing_tracked_metric_does_not_fall_back_to_loss(validation_configuration, monkeypatch):
+def test_missing_tracked_metric_does_not_fall_back_to_loss(
+    validation_configuration, monkeypatch
+):
     """A missing configured metric must fail explicitly instead of switching objectives."""
     torch.set_num_threads(2)
     config = replace(
-        validation_configuration, tracked_metric="balanced_accuracy",
-        validation_metrics={"balanced_accuracy": {"function": "balanced_accuracy_score"}},
+        validation_configuration,
+        tracked_metric="balanced_accuracy",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
     )
     monkeypatch.setattr(
-        SupConExperiment, "_validate", lambda self, model, loader, criterion: {"supcon_loss_mean": 0.1}
+        SupConExperiment,
+        "_validate",
+        lambda self, model, loader, criterion: {"supcon_loss_mean": 0.1},
     )
     with pytest.raises(ValueError, match="balanced_accuracy"):
         SupConExperiment(config).run_with_result()
     assert not list(config.output_directory.glob("*.pt"))
+
+
+# --- Per-epoch observer hook (used by Optuna pruning; the trainer stays Optuna-free) ---
+
+
+def test_epoch_callback_observes_each_completed_epoch_after_its_checkpoint(
+    validation_configuration, monkeypatch
+):
+    """The hook sees every epoch's configured tracked value once that epoch is saved."""
+    torch.set_num_threads(2)
+    config = replace(
+        validation_configuration,
+        epochs=3,
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
+    )
+    tracked_values = iter([0.3, 0.9, 0.6])
+
+    def validate(self, model, loader, criterion):
+        """Disagree with SupCon loss so only the configured metric can match."""
+        return {"balanced_accuracy": next(tracked_values), "supcon_loss_mean": 0.01}
+
+    monkeypatch.setattr(SupConExperiment, "_validate", validate)
+    observed = []
+
+    def callback(epoch, value):
+        """Record the call and the checkpoint that already exists at that moment."""
+        saved = torch.load(config.output_directory / "last.pt", weights_only=True)
+        observed.append((epoch, value, saved["epoch"]))
+
+    result = SupConExperiment(config).run_with_result(epoch_callback=callback)
+    assert observed == [(1, 0.3, 1), (2, 0.9, 2), (3, 0.6, 3)]
+    assert result.best_epoch == 2 and result.best_value == 0.9
+
+
+def test_epoch_callback_reports_training_loss_when_no_validation_is_configured(
+    experiment_configuration,
+):
+    """Training-only runs report the same fallback value used for best-epoch selection."""
+    torch.set_num_threads(2)
+    observed = []
+    result = SupConExperiment(experiment_configuration).run_with_result(
+        epoch_callback=lambda epoch, value: observed.append((epoch, value))
+    )
+    history = torch.load(result.last_checkpoint, weights_only=True)["history"]
+    assert observed == [
+        (index, row["mean"]) for index, row in enumerate(history, start=1)
+    ]
+
+
+def test_epoch_callback_stops_after_early_stopping_without_extra_calls(
+    validation_configuration, monkeypatch
+):
+    """Early stopping ends the hook sequence at the last trained epoch."""
+    torch.set_num_threads(2)
+    config = replace(
+        validation_configuration,
+        epochs=8,
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
+        early_stopping={"patience": 1, "tolerance": 0.0, "comparison": "greater"},
+    )
+    tracked_values = iter([0.5, 0.4, 0.3, 0.2])
+    monkeypatch.setattr(
+        SupConExperiment,
+        "_validate",
+        lambda self, model, loader, criterion: {
+            "balanced_accuracy": next(tracked_values)
+        },
+    )
+    observed = []
+    SupConExperiment(config).run_with_result(
+        epoch_callback=lambda epoch, value: observed.append(epoch)
+    )
+    assert observed == [1, 2]
+
+
+def test_epoch_callback_exception_stops_training_and_propagates_unchanged(
+    experiment_configuration, monkeypatch
+):
+    """A hook may stop a run (e.g. pruning); no further epoch runs and the model is released."""
+    torch.set_num_threads(2)
+    created = []
+    original = train_supcon.YoloSupConModel
+
+    def create_model(*args, **kwargs):
+        model = original(*args, **kwargs)
+        created.append(model)
+        return model
+
+    class StopRequested(Exception):
+        """A caller-owned exception type that must not be wrapped or swallowed."""
+
+    def callback(epoch, value):
+        raise StopRequested(f"stop after epoch {epoch}")
+
+    monkeypatch.setattr(train_supcon, "YoloSupConModel", create_model)
+    config = replace(experiment_configuration, epochs=3)
+    with pytest.raises(StopRequested, match="stop after epoch 1"):
+        SupConExperiment(config).run_with_result(epoch_callback=callback)
+    last = torch.load(config.output_directory / "last.pt", weights_only=True)
+    assert last["epoch"] == 1 and len(last["history"]) == 1
+    assert created[0].embeddings is None and not created[0].training
+    assert not (config.output_directory / "best.model_card.yaml").exists()
+
+
+def test_omitting_the_epoch_callback_keeps_existing_behavior(experiment_configuration):
+    """The hook is optional; the existing result API is unchanged without it."""
+    torch.set_num_threads(2)
+    result = SupConExperiment(experiment_configuration).run_with_result(
+        epoch_callback=None
+    )
+    assert torch.load(result.last_checkpoint, weights_only=True)["epoch"] == 2
