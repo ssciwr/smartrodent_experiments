@@ -106,6 +106,9 @@ validation_metrics:  # Named sklearn scorer specifications | null (CE loss only)
 tracked_metric: balanced_accuracy  # ce_loss_mean | a validation_metrics alias.
 tracked_mode: max  # min | max | null (infer direction).
 # model_card_template: configs/model_card_template.yaml  # Optional template path.
+onnx_export:  # ONNX export of best.pt (class probabilities), written next to best.pt | null (no export).
+  dynamic: false  # true | false; true=any batch and image size, false=batch 1 at image_size.
+  simplify: true  # true | false; onnxslim graph simplification.
 
 mlflow:  # Tracking settings | null (disabled).
   tracking_uri: sqlite:///mlflow.db  # MLflow tracking URI, e.g. SQLite or HTTP(S).

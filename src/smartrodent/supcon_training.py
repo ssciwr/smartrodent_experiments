@@ -1,4 +1,5 @@
 """Configure, prepare, and run standalone multiview SupCon experiments."""
+
 import hashlib
 import random
 from collections.abc import Mapping
@@ -34,9 +35,24 @@ from smartrodent.experiment_support import (
     validate_stopping,
 )
 from smartrodent.training_validation import (
-    CheckpointPath, ClassNames, Count, MappingInput, Mode, Name, NonnegativeInt, OptimizerSettings,
-    PositiveNumber, Probability, Seed, StoppingSettings, TransformSettings, ValidationMetrics,
-    parse_settings, settings_dict, validate_output_paths,
+    CheckpointPath,
+    ClassNames,
+    Count,
+    MappingInput,
+    Mode,
+    Name,
+    NonnegativeInt,
+    OnnxExportSettings,
+    OptimizerSettings,
+    PositiveNumber,
+    Probability,
+    Seed,
+    StoppingSettings,
+    TransformSettings,
+    ValidationMetrics,
+    parse_settings,
+    settings_dict,
+    validate_output_paths,
 )
 from smartrodent.model_card import (
     load_training_template,
@@ -47,6 +63,7 @@ from smartrodent.datasets import (
     MultiViewImageDataset,
     collate_views,
 )
+from smartrodent.onnx_export import OnnxExporter
 from smartrodent.supcon_model import YoloSupConModel
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -84,10 +101,15 @@ class TrainingConfiguration:
         early_stopping: Optional patience, tolerance, and comparison settings.
         scheduler: Optional validation-driven learning-rate scheduler settings.
         model_card_template: YAML template used for the selected checkpoint's card.
+        onnx_export: Optional ONNX export of the best checkpoint's pooled encoder features;
+            omitted/null exports nothing.
     """
 
     _native_metrics: ClassVar[tuple[str, ...]] = (
-        "supcon_loss_min", "supcon_loss_mean", "supcon_loss_std", "supcon_loss_max",
+        "supcon_loss_min",
+        "supcon_loss_mean",
+        "supcon_loss_std",
+        "supcon_loss_max",
     )
 
     train_dataset: Path
@@ -117,12 +139,15 @@ class TrainingConfiguration:
     scheduler: MappingInput[SchedulerConfiguration] | None = None
     model_card_template: CheckpointPath = "configs/model_card_template.yaml"
     tracked_mode: Mode | None = None
+    onnx_export: MappingInput[OnnxExportSettings] | None = None
 
     def __post_init__(self):
         """Reject invalid settings before building datasets or writing outputs."""
         collisions = set(self.validation_metrics or {}) & set(self._native_metrics)
         if collisions:
-            raise ValueError(f"validation_metrics cannot override native SupCon losses: {sorted(collisions)}")
+            raise ValueError(
+                f"validation_metrics cannot override native SupCon losses: {sorted(collisions)}"
+            )
         if self.classes_per_batch > len(self.class_names):
             raise ValueError(
                 "classes_per_batch must be between 2 and the number of species"
@@ -130,7 +155,8 @@ class TrainingConfiguration:
         if self.samples_per_epoch < self.batch_size:
             raise ValueError("samples_per_epoch must contain at least one full batch")
         validate_output_paths(
-            [self.output_directory], (self.train_dataset, self.validation_dataset),
+            [self.output_directory],
+            (self.train_dataset, self.validation_dataset),
             (self.model_name, self.model_card_template),
         )
         if self.validation_dataset is None:
@@ -146,7 +172,10 @@ class TrainingConfiguration:
                     "validation_dataset"
                 )
         elif self.tracked_metric is not None:
-            available_metrics = {*self._native_metrics, *(self.validation_metrics or {})}
+            available_metrics = {
+                *self._native_metrics,
+                *(self.validation_metrics or {}),
+            }
             if self.tracked_metric not in available_metrics:
                 raise ValueError(
                     f"tracked_metric '{self.tracked_metric}' is not available"
@@ -179,8 +208,11 @@ class TrainingConfiguration:
         """
         metric = self.effective_tracked_metric
         if metric in self._native_metrics:
-            return {"function": "pytorch_metric_learning.losses.SupConLoss",
-                    "temperature": self.temperature, "statistic": metric}
+            return {
+                "function": "pytorch_metric_learning.losses.SupConLoss",
+                "temperature": self.temperature,
+                "statistic": metric,
+            }
         else:
             return deepcopy(self.validation_metrics[metric])
 
@@ -280,25 +312,52 @@ class SupConExperiment:
             configuration.validation_metrics
         )
         # Fail on malformed templates before spending time on training.
-        self.card_template = load_training_template(Path(configuration.model_card_template))
+        self.card_template = load_training_template(
+            Path(configuration.model_card_template)
+        )
         self.transforms = ImageTransforms(configuration.transforms)
+        self.exporter = (
+            OnnxExporter(
+                configuration.onnx_export, configuration.transforms["image_size"]
+            )
+            if configuration.onnx_export is not None
+            else None
+        )
         self.training_dataset = MultiViewImageDataset(
-            configuration.train_dataset, labels=configuration.class_names,
+            configuration.train_dataset,
+            labels=configuration.class_names,
             transform=self.transforms.training(),
         )
-        if sum(count > 0 for count in self.training_dataset.class_counts.values()) < configuration.classes_per_batch:
-            raise ValueError("Training dataset has too few nonempty classes for the requested batch")
+        if (
+            sum(count > 0 for count in self.training_dataset.class_counts.values())
+            < configuration.classes_per_batch
+        ):
+            raise ValueError(
+                "Training dataset has too few nonempty classes for the requested batch"
+            )
         self.validation_dataset = (
             ImageDataset(
-                configuration.validation_dataset, labels=self.training_dataset.label_names,
+                configuration.validation_dataset,
+                labels=self.training_dataset.label_names,
                 transform=self.transforms.validation(),
-            ) if configuration.validation_dataset is not None else None
+            )
+            if configuration.validation_dataset is not None
+            else None
         )
         if self.validation_dataset is not None:
             if len(self.validation_dataset) < configuration.batch_size:
-                raise ValueError("Validation dataset must contain at least one full batch")
-            if sum(count > 0 for count in self.validation_dataset.class_counts.values()) < configuration.classes_per_batch:
-                raise ValueError("Validation dataset has too few nonempty classes for the requested batch")
+                raise ValueError(
+                    "Validation dataset must contain at least one full batch"
+                )
+            if (
+                sum(
+                    count > 0 for count in self.validation_dataset.class_counts.values()
+                )
+                < configuration.classes_per_batch
+            ):
+                raise ValueError(
+                    "Validation dataset has too few nonempty classes for the requested batch"
+                )
 
     def _register_best_model(
         self,
@@ -319,10 +378,14 @@ class SupConExperiment:
         model.load_state_dict(checkpoint_data["model_state_dict"])
         model.eval()
         version = ModelPublication(mlflow_config, client).publish(
-            model, best_epoch=best_epoch,
-            validated=config.validation_dataset is not None, tags=source_tags,
+            model,
+            best_epoch=best_epoch,
+            validated=config.validation_dataset is not None,
+            tags=source_tags,
             write_card=lambda version, identity: self._write_model_card(
-                checkpoint, checkpoint_data, version,
+                checkpoint,
+                checkpoint_data,
+                version,
                 provenance={**source_tags, **identity},
             ),
         )
@@ -492,9 +555,12 @@ class SupConExperiment:
         if not torch.isfinite(values).all():
             raise FloatingPointError(f"Nonfinite loss in epoch {epoch}")
         return {
-            "epoch": epoch, "min": values.min().item(), "mean": values.mean().item(),
+            "epoch": epoch,
+            "min": values.min().item(),
+            "mean": values.mean().item(),
             "std": values.std(correction=1 if len(values) > 1 else 0).item(),
-            "max": values.max().item(), "learning_rate": learning_rate,
+            "max": values.max().item(),
+            "learning_rate": learning_rate,
         }
 
     def _report_epoch(self, statistics: Mapping) -> None:
@@ -508,13 +574,25 @@ class SupConExperiment:
             f"{statistics['max']:.6f}; lr={learning_rate:.6g}"
         )
         if next_learning_rate < learning_rate:
-            print(f"Learning rate reduced: {learning_rate:.6g} -> {next_learning_rate:.6g} for the next epoch")
+            print(
+                f"Learning rate reduced: {learning_rate:.6g} -> {next_learning_rate:.6g} for the next epoch"
+            )
         if validation:
-            print("Validation: " + ", ".join(f"{name}={value:.6f}" for name, value in validation.items()))
+            print(
+                "Validation: "
+                + ", ".join(f"{name}={value:.6f}" for name, value in validation.items())
+            )
         if self.configuration.mlflow is not None:
-            metrics = {f"supcon_loss_{name}": statistics[name] for name in ("min", "mean", "std", "max")}
-            metrics.update(learning_rate=learning_rate, next_learning_rate=next_learning_rate)
-            metrics.update({f"validation/{name}": value for name, value in validation.items()})
+            metrics = {
+                f"supcon_loss_{name}": statistics[name]
+                for name in ("min", "mean", "std", "max")
+            }
+            metrics.update(
+                learning_rate=learning_rate, next_learning_rate=next_learning_rate
+            )
+            metrics.update(
+                {f"validation/{name}": value for name, value in validation.items()}
+            )
             mlflow.log_metrics(metrics, step=statistics["epoch"])
 
     def _run_training(
@@ -528,8 +606,10 @@ class SupConExperiment:
         dataset, loader = self._build_loader()
         validation_loader = self._build_validation_loader()
         self.model_configuration = {
-            "dropout": config.dropout, "output_features": config.output_features,
-            "num_classes": len(dataset.label_names), "freeze": list(config.freeze),
+            "dropout": config.dropout,
+            "output_features": config.output_features,
+            "num_classes": len(dataset.label_names),
+            "freeze": list(config.freeze),
         }
         model = YoloSupConModel(config.model_name, **self.model_configuration)
         return_live_model = False
@@ -545,7 +625,9 @@ class SupConExperiment:
                 (p for p in model.parameters() if p.requires_grad), **config.optimizer
             )
             scheduler = (
-                config.scheduler.build(optimizer) if config.scheduler is not None else None
+                config.scheduler.build(optimizer)
+                if config.scheduler is not None
+                else None
             )
             criterion = SupConLoss(temperature=config.temperature)
             early_stopping = (
@@ -555,7 +637,9 @@ class SupConExperiment:
             )
             self.checkpoint_store = CheckpointStore(config.output_directory)
             output = self.checkpoint_store.output_directory
-            (output / "config.yaml").write_text(yaml.safe_dump(self.document, sort_keys=False))
+            (output / "config.yaml").write_text(
+                yaml.safe_dump(self.document, sort_keys=False)
+            )
             print(
                 f"{len(loader)} batches/epoch; {config.batch_size} source images and "
                 f"{2 * config.batch_size} views/batch on {config.device}"
@@ -568,7 +652,9 @@ class SupConExperiment:
             best_metric_value = float("inf") if tracked_mode == "min" else float("-inf")
             best_epoch = 0
             for epoch in range(1, config.epochs + 1):
-                statistics = self._train_epoch(model, loader, optimizer, criterion, epoch)
+                statistics = self._train_epoch(
+                    model, loader, optimizer, criterion, epoch
+                )
                 validation = (
                     self._validate(model, validation_loader, criterion)
                     if validation_loader is not None
@@ -576,13 +662,19 @@ class SupConExperiment:
                 )
                 if validation_loader is not None:
                     if tracked_metric not in validation:
-                        raise ValueError(f"Validation is missing tracked metric '{tracked_metric}'")
+                        raise ValueError(
+                            f"Validation is missing tracked metric '{tracked_metric}'"
+                        )
                     statistics["validation"] = validation
                     tracked_value = validation[tracked_metric]
                 else:
                     tracked_value = statistics["mean"]
-                if not isinstance(tracked_value, Real) or not np.isfinite(tracked_value):
-                    raise FloatingPointError(f"Nonfinite tracked validation metric '{tracked_metric}'")
+                if not isinstance(tracked_value, Real) or not np.isfinite(
+                    tracked_value
+                ):
+                    raise FloatingPointError(
+                        f"Nonfinite tracked validation metric '{tracked_metric}'"
+                    )
                 if scheduler is not None:
                     # Step after validation, before saving both optimizer and scheduler:
                     # the checkpoint then holds the LR ready for the next epoch.
@@ -642,38 +734,73 @@ class SupConExperiment:
         """
         config = self.configuration
         context = (
-            config.mlflow.start_run(config.output_directory.name, parent_run_id=parent_run_id)
-            if config.mlflow is not None else nullcontext()
+            config.mlflow.start_run(
+                config.output_directory.name, parent_run_id=parent_run_id
+            )
+            if config.mlflow is not None
+            else nullcontext()
         )
         model = None
         with context as run:
             run_id = run.info.run_id if run is not None else None
-            source_tags = config.mlflow.run_tags() if config.mlflow is not None else {"git_commit": _git_commit()}
+            source_tags = (
+                config.mlflow.run_tags()
+                if config.mlflow is not None
+                else {"git_commit": _git_commit()}
+            )
             try:
                 if config.mlflow is not None:
                     mlflow.set_tags(source_tags)
                     mlflow.log_params(config.mlflow_parameters())
-                final_checkpoint, best_checkpoint, best_value, best_epoch, model = self._run_training()
+                final_checkpoint, best_checkpoint, best_value, best_epoch, model = (
+                    self._run_training()
+                )
+                # Export before any publication: a failed export must leave nothing published.
+                if self.exporter is not None:
+                    onnx_model = self.exporter.encoder(best_checkpoint)
+                else:
+                    onnx_model = None
                 if config.mlflow is not None:
                     metric = (
                         f"best_validation_{config.effective_tracked_metric}"
-                        if config.validation_dataset is not None else "best_supcon_loss_mean"
+                        if config.validation_dataset is not None
+                        else "best_supcon_loss_mean"
                     )
                     mlflow.log_metric(metric, best_value, step=best_epoch)
                     mlflow.log_metric("best_epoch", best_epoch)
-                    mlflow.log_artifact(str(best_checkpoint), artifact_path="best_model")
-                if config.mlflow is not None and config.mlflow.registered_model_name is not None:
+                    mlflow.log_artifact(
+                        str(best_checkpoint), artifact_path="best_model"
+                    )
+                    if onnx_model is not None:
+                        mlflow.log_artifact(str(onnx_model), artifact_path="best_model")
+                if (
+                    config.mlflow is not None
+                    and config.mlflow.registered_model_name is not None
+                ):
                     client = MlflowClient(tracking_uri=config.mlflow.tracking_uri)
-                    self._register_best_model(model, best_checkpoint, client, source_tags, best_epoch)
+                    self._register_best_model(
+                        model, best_checkpoint, client, source_tags, best_epoch
+                    )
                 else:
-                    checkpoint_data = torch.load(best_checkpoint, map_location="cpu", weights_only=True)
+                    checkpoint_data = torch.load(
+                        best_checkpoint, map_location="cpu", weights_only=True
+                    )
                     cards = self._write_model_card(
-                        best_checkpoint, checkpoint_data, provenance={**source_tags, "run_id": run_id},
+                        best_checkpoint,
+                        checkpoint_data,
+                        provenance={**source_tags, "run_id": run_id},
                     )
                     if config.mlflow is not None:
                         for path in cards:
                             mlflow.log_artifact(str(path), artifact_path="best_model")
-                return self._build_result(final_checkpoint, best_checkpoint, best_value, best_epoch, run_id)
+                return self._build_result(
+                    final_checkpoint,
+                    best_checkpoint,
+                    best_value,
+                    best_epoch,
+                    run_id,
+                    onnx_model,
+                )
             finally:
                 if model is not None:
                     model.finalize()
@@ -685,6 +812,7 @@ class SupConExperiment:
         best_value: float,
         best_epoch: int,
         mlflow_run_id: str | None = None,
+        onnx_model: Path | None = None,
     ) -> ExperimentResult:
         """Report the same configured metric and snapshots used by the training loop."""
         config = self.configuration
@@ -698,6 +826,7 @@ class SupConExperiment:
             best_value=best_value,
             validation_dataset=config.validation_dataset,
             mlflow_run_id=mlflow_run_id,
+            onnx_model=onnx_model,
         )
 
     def _write_model_card(
@@ -713,16 +842,22 @@ class SupConExperiment:
         with checkpoint.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
         return write_training_card(
-            self.card_template, checkpoint, checkpoint_data,
+            self.card_template,
+            checkpoint,
+            checkpoint_data,
             model_details={
-                "name": (config.mlflow.registered_model_name if config.mlflow else None) or config.output_directory.name,
-                "registry_version": version, "base_model": str(config.model_name),
+                "name": (config.mlflow.registered_model_name if config.mlflow else None)
+                or config.output_directory.name,
+                "registry_version": version,
+                "base_model": str(config.model_name),
                 "task": "contrastive-encoder",
             },
             validation_dataset=config.validation_dataset,
             provenance={
                 "checkpoint_sha256": checksum,
-                "dataset_revision": config.mlflow.dataset_revision if config.mlflow else None,
+                "dataset_revision": (
+                    config.mlflow.dataset_revision if config.mlflow else None
+                ),
                 **(provenance or {}),
             },
         )
@@ -774,7 +909,9 @@ def run_training(config_path: Path) -> list[Path]:
     Returns:
         Final checkpoint path for each expanded run.
     """
-    experiments = [SupConExperiment(config) for config in load_training_configurations(config_path)]
+    experiments = [
+        SupConExperiment(config) for config in load_training_configurations(config_path)
+    ]
     checkpoints = []
     for run_number, experiment in enumerate(experiments, start=1):
         print(
@@ -783,4 +920,3 @@ def run_training(config_path: Path) -> list[Path]:
         )
         checkpoints.append(experiment.run())
     return checkpoints
-

@@ -34,6 +34,7 @@ from smartrodent.experiment_support import (
     resolve_validation_metrics,
 )
 from smartrodent.model_card import load_training_template, write_training_card
+from smartrodent.onnx_export import OnnxExporter
 from smartrodent.training_validation import (
     CheckpointPath,
     ClassifierTrainingSettings,
@@ -46,6 +47,7 @@ from smartrodent.training_validation import (
     Mode,
     Name,
     NonnegativeInt,
+    OnnxExportSettings,
     Seed,
     TransformSettings,
     ValidationMetrics,
@@ -82,6 +84,7 @@ class ClassifierConfiguration:
         validation_metrics: Optional sklearn label metric specifications.
         mlflow: Optional owned tracking/registry settings.
         model_card_template: Template used for the selected best checkpoint.
+        onnx_export: Optional ONNX export of the best checkpoint; omitted/null exports nothing.
     """
 
     train_dataset: Path
@@ -103,6 +106,7 @@ class ClassifierConfiguration:
     validation_metrics: ValidationMetrics | None = None
     mlflow: MappingInput[MlflowConfiguration] | None = None
     model_card_template: CheckpointPath = "configs/model_card_template.yaml"
+    onnx_export: MappingInput[OnnxExportSettings] | None = None
 
     def __post_init__(self):
         """Validate external options once before preparing native resources or outputs."""
@@ -582,6 +586,13 @@ class ClassifierExperiment:
             self.training_dataset.label_names,
             cache=head_cache,
         )
+        self.exporter = (
+            OnnxExporter(
+                configuration.onnx_export, configuration.transforms["image_size"]
+            )
+            if configuration.onnx_export is not None
+            else None
+        )
 
     @cached_property
     def champion_registry(self) -> ClassifierChampionRegistry | None:
@@ -654,6 +665,11 @@ class ClassifierExperiment:
                     }
                 )
             result, snapshot = self._train(network, freeze, run_id)
+            # Export before any publication: a failed export must leave nothing published.
+            if self.exporter is not None:
+                result = replace(
+                    result, onnx_model=self.exporter.classifier(result.best_checkpoint)
+                )
             with result.best_checkpoint.open("rb") as stream:
                 checksum = hashlib.file_digest(stream, "sha256").hexdigest()
             self._write_model_card(result, snapshot, checksum, source_tags)
@@ -677,7 +693,9 @@ class ClassifierExperiment:
                     if not defer_promotion:
                         self.champion_registry.promote(result)
                 else:
-                    config.mlflow.log_best_artifacts(result.best_checkpoint)
+                    config.mlflow.log_best_artifacts(
+                        result.best_checkpoint, result.onnx_model
+                    )
             return result
 
     def _prepare_network(self) -> ClassificationModel:
@@ -747,7 +765,7 @@ class ClassifierExperiment:
             self._write_model_card(
                 result, snapshot, checksum, {**source_tags, **identity}, version=version
             )
-            config.mlflow.log_best_artifacts(result.best_checkpoint)
+            config.mlflow.log_best_artifacts(result.best_checkpoint, result.onnx_model)
             return result.best_checkpoint.with_suffix(
                 ".model_card.yaml"
             ), result.best_checkpoint.with_suffix(".model_card.md")

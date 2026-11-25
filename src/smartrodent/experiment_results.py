@@ -22,6 +22,7 @@ class ExperimentResult:
         validation_dataset: Validation split, or ``None`` for training-only runs.
         mlflow_run_id: Tracking run ID when MLflow is enabled.
         registered_model_version: Published classifier version, when registered.
+        onnx_model: ONNX file exported from the best checkpoint, when export is configured.
     """
 
     output_directory: Path
@@ -34,6 +35,7 @@ class ExperimentResult:
     validation_dataset: Path | None = None
     mlflow_run_id: str | None = None
     registered_model_version: str | None = None
+    onnx_model: Path | None = None
 
     def to_dict(self) -> dict:
         """Serialize result paths without changing scores or optional registry metadata.
@@ -71,7 +73,10 @@ def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentRes
             raise ValueError("Experiments must use the same tracked mode")
         # Input aliases identify the same split; preserve original report paths
         # while matching the canonical identity used during sweep prevalidation.
-        if result.validation_dataset.resolve() != reference.validation_dataset.resolve():
+        if (
+            result.validation_dataset.resolve()
+            != reference.validation_dataset.resolve()
+        ):
             raise ValueError("Experiments must use the same validation dataset")
     # Result construction validates the direction. Both builtins preserve the
     # first exact tie and return the original object, without sorting or copying.

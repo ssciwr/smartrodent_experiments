@@ -17,7 +17,12 @@ import numpy as np
 import sklearn.metrics
 import torch
 from smartrodent.training_validation import (
-    Count, Nonblank, NonnegativeNumber, PlateauSettings, ValidationMetrics, parse_settings,
+    Count,
+    Nonblank,
+    NonnegativeNumber,
+    PlateauSettings,
+    ValidationMetrics,
+    parse_settings,
 )
 from torchvision.transforms.v2 import (
     Compose,
@@ -89,22 +94,36 @@ class MlflowConfiguration:
                 or the requested parent is absent.
         """
         if os.environ.get("MLFLOW_RUN_ID"):
-            raise ValueError("Implicit run resumption via MLFLOW_RUN_ID is not supported")
+            raise ValueError(
+                "Implicit run resumption via MLFLOW_RUN_ID is not supported"
+            )
         active = mlflow.active_run()
         if parent_run_id is None and active is not None:
             raise ValueError("An unrelated MLflow run is already active")
-        if parent_run_id is not None and (active is None or active.info.run_id != parent_run_id):
+        if parent_run_id is not None and (
+            active is None or active.info.run_id != parent_run_id
+        ):
             raise ValueError("The requested MLflow parent run must be active")
         self.configure()
         return mlflow.start_run(run_name=run_name, nested=parent_run_id is not None)
 
-    def log_best_artifacts(self, checkpoint: Path) -> None:
-        """Publish a best checkpoint and its completed local cards to the owned run.
+    def log_best_artifacts(
+        self, checkpoint: Path, onnx_model: Path | None = None
+    ) -> None:
+        """Publish a best checkpoint, its completed local cards, and its export to the owned run.
 
         Args:
             checkpoint: Selected best.pt whose YAML/Markdown cards already exist.
+            onnx_model: ONNX file exported from the checkpoint, or None without export.
         """
-        for path in (checkpoint, checkpoint.with_suffix(".model_card.yaml"), checkpoint.with_suffix(".model_card.md")):
+        paths = [
+            checkpoint,
+            checkpoint.with_suffix(".model_card.yaml"),
+            checkpoint.with_suffix(".model_card.md"),
+        ]
+        if onnx_model is not None:
+            paths.append(onnx_model)
+        for path in paths:
             mlflow.log_artifact(str(path), artifact_path="best_model")
 
     def run_tags(self) -> dict[str, str]:
@@ -127,7 +146,9 @@ class ModelPublication:
         client: Optional existing client, preserving standalone publication callers.
     """
 
-    def __init__(self, configuration: MlflowConfiguration, client: MlflowClient | None = None):
+    def __init__(
+        self, configuration: MlflowConfiguration, client: MlflowClient | None = None
+    ):
         """Keep publication separate from reconstruction, optionally using an existing client."""
         self.configuration = configuration
         self.client = client
@@ -164,7 +185,8 @@ class ModelPublication:
         # MLflow 3.18 defaults to traced pt2 graphs. Preserve this project's
         # reconstructible wrappers and label metadata using trusted own-model pickle.
         info = mlflow.pytorch.log_model(
-            pytorch_model=model, name=config.model_artifact_name,
+            pytorch_model=model,
+            name=config.model_artifact_name,
             registered_model_name=config.registered_model_name,
             serialization_format="pickle",
         )
@@ -172,7 +194,8 @@ class ModelPublication:
             raise RuntimeError("MLflow did not return a registered model version")
         version = str(info.registered_model_version)
         client = (
-            self.client if self.client is not None
+            self.client
+            if self.client is not None
             else MlflowClient(tracking_uri=config.tracking_uri)
         )
         version_tags = {
@@ -182,15 +205,23 @@ class ModelPublication:
         }
         for key, value in version_tags.items():
             if value is not None:
-                client.set_model_version_tag(config.registered_model_name, version, key, str(value))
+                client.set_model_version_tag(
+                    config.registered_model_name, version, key, str(value)
+                )
         cards = write_card(version, {"run_id": info.run_id, "model_id": info.model_id})
         self._attach_model_cards(client, info.model_id, version, cards)
         if validated and promote:
-            client.set_registered_model_alias(config.registered_model_name, config.champion_alias, version)
+            client.set_registered_model_alias(
+                config.registered_model_name, config.champion_alias, version
+            )
         return version
 
     def _attach_model_cards(
-        self, client: MlflowClient, model_id: str, version: str, cards: tuple[Path, Path]
+        self,
+        client: MlflowClient,
+        model_id: str,
+        version: str,
+        cards: tuple[Path, Path],
     ) -> None:
         """Attach completed cards and their description before alias promotion is allowed."""
         for path in cards:
@@ -261,7 +292,12 @@ class EarlyStopping:
     """
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
-    def __init__(self, patience: Count, tolerance: NonnegativeNumber, comparison: Literal["less", "greater"]):
+    def __init__(
+        self,
+        patience: Count,
+        tolerance: NonnegativeNumber,
+        comparison: Literal["less", "greater"],
+    ):
         """Validate settings and initialize independent stopping state."""
         self.patience = patience
         self.current_patience = patience
@@ -326,17 +362,20 @@ class ImageTransforms:
         """Prepare and verify both pipelines once for the owning experiment."""
         size = settings["image_size"]
         preprocessing = [
-            PILToTensor(), ToDtype(torch.float32, scale=True),
+            PILToTensor(),
+            ToDtype(torch.float32, scale=True),
             Resize((size, size), **settings["resize"]),
         ]
-        self._training = Compose([
-            *preprocessing,
-            RandomAdjustSharpness(**settings["random_adjust_sharpness"]),
-            RandomGrayscale(**settings["random_grayscale"]),
-            RandomPerspective(**settings["random_perspective"]),
-            RandomHorizontalFlip(**settings["random_horizontal_flip"]),
-            RandomResizedCrop((size, size), **settings["random_resized_crop"]),
-        ])
+        self._training = Compose(
+            [
+                *preprocessing,
+                RandomAdjustSharpness(**settings["random_adjust_sharpness"]),
+                RandomGrayscale(**settings["random_grayscale"]),
+                RandomPerspective(**settings["random_perspective"]),
+                RandomHorizontalFlip(**settings["random_horizontal_flip"]),
+                RandomResizedCrop((size, size), **settings["random_resized_crop"]),
+            ]
+        )
         self._validation = Compose(preprocessing)
 
     def training(self) -> Compose:
@@ -403,13 +442,20 @@ def validate_stopping(configuration, mode: str | None) -> None:
     """
     modes = {mode} if mode is not None else set()
     if configuration.early_stopping is not None:
-        modes.add("min" if configuration.early_stopping["comparison"] == "less" else "max")
+        modes.add(
+            "min" if configuration.early_stopping["comparison"] == "less" else "max"
+        )
     if configuration.scheduler is not None:
         modes.add(configuration.scheduler.mode)
-        if configuration.scheduler.parameters.get("min_lr", 0) > configuration.optimizer["lr"]:
+        if (
+            configuration.scheduler.parameters.get("min_lr", 0)
+            > configuration.optimizer["lr"]
+        ):
             raise ValueError("scheduler min_lr must not exceed optimizer.lr")
     if len(modes) > 1:
-        raise ValueError("scheduler and early_stopping directions must agree with tracked_mode")
+        raise ValueError(
+            "scheduler and early_stopping directions must agree with tracked_mode"
+        )
 
 
 class CheckpointStore:

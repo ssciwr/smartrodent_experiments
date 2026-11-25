@@ -106,3 +106,6 @@ early_stopping:  # Stopping settings | null (disabled).
   tolerance: 0.005  # Float >=0; absolute improvement tolerance.
   comparison: less  # less (minimize) | greater (maximize)
 # model_card_template: configs/model_card_template.yaml  # Optional template path.
+onnx_export:  # ONNX export of best.pt's pooled encoder features (embeddings), written next to best.pt | null (no export).
+  dynamic: false  # true | false; true=any batch and image size, false=batch 1 at image_size.
+  simplify: true  # true | false; onnxslim graph simplification.

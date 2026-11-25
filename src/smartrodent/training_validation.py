@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 
+type Flag = Annotated[bool, Field(strict=True)]
 type Count = Annotated[int, Field(strict=True, gt=0)]
 type NonnegativeInt = Annotated[int, Field(strict=True, ge=0)]
 type Seed = Annotated[int, Field(strict=True, ge=0, lt=2**32)]
@@ -159,6 +160,18 @@ class InitializationSettings(TypedDict):
 
     encoder: EncoderSettings
     head: Annotated[RandomHead | CheckpointHead, Field(discriminator="source")]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class OnnxExportSettings(TypedDict):
+    """Select ONNX export options; an empty mapping exports with Ultralytics' defaults.
+
+    The opset is deliberately not configurable: both exports use Ultralytics'
+    default for the installed torch, so classifier and encoder files always agree.
+    """
+
+    dynamic: NotRequired[Flag]
+    simplify: NotRequired[Flag]
 
 
 @with_config(ConfigDict(extra="forbid"))

@@ -640,7 +640,7 @@ def _exporting_classifier(
         settings["registered_model_name"] = tracking_store.registry_name
     return replace(
         standalone_configuration,
-        export={"format": "onnx"},
+        onnx_export={},
         mlflow=MlflowConfiguration(**settings),
         initialization={
             "encoder": {"source": "ultralytics", "checkpoint": str(encoder)},
@@ -668,7 +668,7 @@ def test_tracked_classifier_logs_its_onnx_export_with_the_best_model(
     )
     result = ClassifierExperiment(config).run_with_result()
     downloaded = _download(tracking_store, result.mlflow_run_id, "best_model/best.onnx")
-    assert downloaded.read_bytes() == result.exported_model.read_bytes()
+    assert downloaded.read_bytes() == result.onnx_model.read_bytes()
 
 
 def test_failed_classifier_export_fails_the_run_before_publication(
@@ -716,7 +716,7 @@ def test_failed_supcon_export_fails_the_run_before_publication(
     values.update(
         epochs=1,
         optimizer={"lr": 0.001},
-        export={"format": "onnx"},
+        onnx_export={},
         output_directory=str(
             Path(pipeline_document["output_directory"]).parent / "failed-export-supcon"
         ),
@@ -751,7 +751,7 @@ def test_tracked_supcon_logs_its_onnx_export_with_the_best_model(
     values.update(
         epochs=1,
         optimizer={"lr": 0.001},
-        export={"format": "onnx"},
+        onnx_export={},
         output_directory=str(
             Path(pipeline_document["output_directory"]).parent / "exported-supcon"
         ),
@@ -761,7 +761,7 @@ def test_tracked_supcon_logs_its_onnx_export_with_the_best_model(
         TrainingConfiguration.from_mapping(values)
     ).run_with_result()
     downloaded = _download(tracking_store, result.mlflow_run_id, "best_model/best.onnx")
-    assert downloaded.read_bytes() == result.exported_model.read_bytes()
+    assert downloaded.read_bytes() == result.onnx_model.read_bytes()
 
 
 def test_standalone_ce_tracking_without_registration_remains_a_single_completed_run(

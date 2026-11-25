@@ -115,6 +115,7 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`classifier_sweeps.py`](src/smartrodent/classifier_sweeps.py) | `ClassifierSweepConfiguration`, `ClassifierSweepExperiment`: prepare/run candidates and select the validated winner. |
 | [`two_stage_training.py`](src/smartrodent/two_stage_training.py) | `TwoStageConfiguration`, `TwoStageExperiment`: SupCon selection followed by a classifier sweep. |
 | [`experiment_support.py`](src/smartrodent/experiment_support.py), [`experiment_results.py`](src/smartrodent/experiment_results.py) | Transforms, schedulers, stopping, checkpoint storage, tracking/publication, and structured results. |
+| [`onnx_export.py`](src/smartrodent/onnx_export.py) | `OnnxExporter`: ONNX export of CE classifiers (probabilities) and SupCon encoders (pooled features). |
 | [`classifier_champions.py`](src/smartrodent/classifier_champions.py) | `ClassifierChampionRegistry`: provenance-aware historical comparison and promotion. |
 | [`model_card.py`](src/smartrodent/model_card.py) | Template loading, training-card population, YAML/Markdown rendering and writing. |
 | [`eval.py`](src/smartrodent/eval.py) | `EvaluationImages`, `FeatureExtractor`, `EvaluationFeatures`, `TsneComparison`: fixed-subset representation evaluation. |
@@ -281,6 +282,7 @@ project loader.
 | SupCon `early_stopping` | `null`/omitted, or positive `patience`, nonnegative absolute `tolerance`, and `comparison: less`/`greater`. |
 | `mlflow` | `null`/omitted, or tracking/registry settings described below. |
 | `model_card_template` | Optional template path; defaults to `configs/model_card_template.yaml`. |
+| `onnx_export` | `null`/omitted for no export, or a mapping with optional `dynamic` (default `false`: batch 1 at `image_size`; `true`: any batch and image size) and `simplify` (default `true`: onnxslim). `{}` exports with these defaults. The opset is not configurable; see [Sharing ONNX exports](#sharing-onnx-exports). |
 
 Native SupCon validation statistics are `supcon_loss_min`,
 `supcon_loss_mean`, `supcon_loss_std`, and `supcon_loss_max`; custom aliases
@@ -534,6 +536,7 @@ classifier champion-comparison workflow.
 | Latest weights | `last.pt` | `weights/last.pt` |
 | Selected best weights | `best.pt` | `weights/best.pt` |
 | Selected snapshot cards | `best.model_card.yaml` / `.md` | `weights/best.model_card.yaml` / `.md` |
+| ONNX export (with `onnx_export`) | `best.onnx` (pooled encoder features) | `weights/best.onnx` (class probabilities) |
 
 SupCon checkpoints embed architecture/state, label mapping, configuration,
 optimizer and optional scheduler state. Its history exposes `learning_rate`
@@ -556,6 +559,7 @@ For a two-stage experiment with multiple classifier candidates:
       history.yaml
       last.pt
       best.pt
+      best.onnx              # Only with onnx_export
       best.model_card.yaml
       best.model_card.md
   classifier/
@@ -567,6 +571,7 @@ For a two-stage experiment with multiple classifier candidates:
       results.csv
       weights/
         best.pt
+        best.onnx            # Only with onnx_export
         last.pt
         best.model_card.yaml
         best.model_card.md
@@ -609,6 +614,44 @@ CE weights are native Ultralytics checkpoints: they load with encoder
 `source: ultralytics` and can serve as native head donors. Pickled checkpoints
 must come from trusted sources and require compatible installed
 PyTorch/Ultralytics/library versions.
+
+### Sharing ONNX exports
+
+With `onnx_export` set, every run exports its selected `best.pt` to ONNX next
+to it, before any MLflow publication; a failed export, including a failed
+onnxslim simplification, fails the run and leaves no ONNX file. A recipient
+needs only `onnxruntime`, `numpy`, and an image library, not PyTorch,
+Ultralytics, or this package.
+
+| | CE classifier `weights/best.onnx` | SupCon `best.onnx` |
+| --- | --- | --- |
+| Exporter | Ultralytics' native ONNX export | Ultralytics' `torch2onnx` on the pooled encoder |
+| Input | `images` | `images` |
+| Output | `output0`: softmax class probabilities, N x classes | `embeddings`: pooled encoder features (before the projector), N x `embedding_dim` |
+| Metadata | Ultralytics' `names`, `imgsz`, and more | `imgsz`, `embedding_dim`, `checkpoint_sha256` of `best.pt`, `input` |
+
+Both expect the same input: RGB, float32 in `[0, 1]`, N x 3 x S x S, with S
+from the `imgsz` metadata. Resize (stretch, not crop) to S x S; there is no
+mean/std normalization. Training resizes with torchvision, so another resize
+implementation can shift outputs slightly. Without `dynamic: true`, N is fixed
+at 1. Both use Ultralytics' default opset for the installed PyTorch (currently
+18), so the two files always agree.
+
+```python
+import ast
+import numpy as np
+import onnxruntime
+from PIL import Image
+
+session = onnxruntime.InferenceSession("weights/best.onnx", providers=["CPUExecutionProvider"])
+metadata = session.get_modelmeta().custom_metadata_map
+height, width = ast.literal_eval(metadata["imgsz"])
+image = Image.open("mouse.jpg").convert("RGB").resize((width, height), Image.BILINEAR)
+batch = (np.asarray(image, dtype=np.float32).transpose(2, 0, 1) / 255)[None]
+(output,) = session.run(None, {"images": batch})
+names = ast.literal_eval(metadata["names"])  # CE classifier only.
+print(names[int(output.argmax(axis=1)[0])])
+```
 
 For library-driven execution, use `SupConExperiment(configuration).run_with_result()`,
 `ClassifierExperiment(configuration).run_with_result()`,
@@ -775,7 +818,7 @@ working directory.
   not registered CE classifier versions.
 
 Runs record stage-specific parameters and epoch metrics, selected best values
-and epochs, source Git/data tags, and best checkpoint/cards. CE metrics use
+and epochs, source Git/data tags, and best checkpoint/cards (plus `best.onnx` with `onnx_export`). CE metrics use
 `training/ce_loss_mean` and `validation/<metric>`; SupCon records native training
 loss statistics, validation metrics, and current/next learning rates. Local
 `config.yaml` and SupCon `history.yaml` / CE `results.csv` remain useful independently of the tracking UI.
