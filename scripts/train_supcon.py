@@ -3,8 +3,8 @@
 import argparse
 from pathlib import Path
 
-from smartrodent.hyperparameter_search import SupConStudy, is_study_configuration
 from smartrodent.supcon_training import run_training
+from smartrodent.training_studies import SupConStudy, is_study_configuration
 
 
 def _parse_args() -> argparse.Namespace:

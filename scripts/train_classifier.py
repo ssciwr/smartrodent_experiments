@@ -7,7 +7,7 @@ from smartrodent.classifier_sweeps import (
     ClassifierSweepConfiguration,
     ClassifierSweepExperiment,
 )
-from smartrodent.hyperparameter_search import ClassifierStudy, is_study_configuration
+from smartrodent.training_studies import ClassifierStudy, is_study_configuration
 
 
 def main() -> None:

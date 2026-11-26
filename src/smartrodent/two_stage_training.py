@@ -5,33 +5,30 @@ it, as an Optuna study. Stages run in order: the SupCon winner by its own metric
 becomes the encoder of every classifier run or trial.
 """
 
+import hashlib
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass as result_dataclass, field, replace
-
-from pydantic import ConfigDict
-from pydantic.dataclasses import dataclass
-import hashlib
+from dataclasses import asdict, field, replace
+from dataclasses import dataclass as result_dataclass
 from pathlib import Path
 
 import mlflow
 import yaml
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
 from ultralytics import YOLO
 
-from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 from smartrodent import config_utils
-from smartrodent.classifier_training import ClassifierConfiguration
 from smartrodent.classifier_sweeps import (
     ClassifierSweepConfiguration,
     ClassifierSweepExperiment,
 )
+from smartrodent.classifier_training import ClassifierConfiguration
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
 from smartrodent.experiment_support import MlflowConfiguration, validate_stopping
-from smartrodent.hyperparameter_search import (
-    ClassifierStudy,
-    StudyConfiguration,
-    SupConStudy,
-)
+from smartrodent.hyperparameter_search import StudyConfiguration
+from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
+from smartrodent.training_studies import ClassifierStudy, SupConStudy
 from smartrodent.training_validation import (
     MappingInput,
     SharedData,
@@ -140,7 +137,9 @@ class TwoStageConfiguration:
         if classifier_study is not None:
             self._validate_classifier_encoder(self.classifier)
             sweep = None
-            candidates = self.classifier_study(self.encoder_placeholder).configurations
+            candidates = self._classifier_study(
+                self.encoder_placeholder, None
+            ).configurations
         else:
             sweep = self._prepare_classifier_sweep(self.encoder_placeholder)
             candidates = sweep.configurations
@@ -343,10 +342,7 @@ class TwoStageConfiguration:
         Returns:
             Fully prevalidated pipeline settings.
         """
-        document = yaml.load(
-            Path(path).read_text(encoding="utf-8"), Loader=config_utils.get_loader()
-        )
-        return cls.from_mapping(document)
+        return cls.from_mapping(config_utils.load_yaml(path))
 
     def to_dict(self) -> dict:
         """Return an independent YAML-compatible document, retaining unresolved sweeps.
@@ -403,12 +399,21 @@ class TwoStageConfiguration:
         return self._classifier_sweep.with_supcon_encoder(checkpoint)
 
     def classifier_study(
-        self, checkpoint: Path, encoder_provenance: Mapping | None = None
+        self,
+        checkpoint: Path,
+        encoder_key: str,
+        encoder_provenance: Mapping | None = None,
     ) -> ClassifierStudy:
-        """Prepare the classifier study on one SupCon encoder checkpoint.
+        """Prepare the classifier study on the selected SupCon encoder.
+
+        Each selected encoder gets its own study: trials on different encoders are
+        not comparable, so a new SupCon winner starts a fresh classifier study while
+        an unchanged winner can resume its own.
 
         Args:
-            checkpoint: Selected SupCon best.pt (or a placeholder for prevalidation).
+            checkpoint: Selected SupCon best.pt.
+            encoder_key: Short checksum of the selected encoder; it names the study
+                (``<study_name>-<key>``) and its directory (``classifier/<key>``).
             encoder_provenance: Selected encoder and parent-run metadata.
 
         Returns:
@@ -417,17 +422,29 @@ class TwoStageConfiguration:
         Raises:
             ValueError: The classifier stage runs as a grid sweep.
         """
+        return self._classifier_study(checkpoint, encoder_key, encoder_provenance)
+
+    def _classifier_study(
+        self,
+        checkpoint: Path,
+        encoder_key: str | None,
+        encoder_provenance: Mapping | None = None,
+    ) -> ClassifierStudy:
+        """Build the classifier study; without a key only for prevalidation on a placeholder."""
         if self.tuning is None or self.tuning.classifier is None:
             raise ValueError(
                 "The classifier stage runs as a grid sweep; use classifier_sweep_configuration"
             )
         tracking = asdict(self.mlflow) if self.mlflow is not None else None
+        stage_root = self.output_directory / "classifier"
         document = self._stage_document(
             "classifier",
             self.tuning.classifier,
-            self.output_directory / "classifier",
+            stage_root / encoder_key if encoder_key is not None else stage_root,
             tracking,
         )
+        if encoder_key is not None:
+            document["tuning"]["study_name"] += f"-{encoder_key}"
         document["initialization"]["encoder"] = {
             "source": "supcon",
             "checkpoint": str(checkpoint),
@@ -547,12 +564,16 @@ class TwoStageExperiment:
             return result
 
     def _preflight_studies(self) -> None:
-        """Find study storage/output conflicts of both stages before any training."""
+        """Find SupCon study storage/output conflicts before any training.
+
+        A classifier study is keyed by the encoder SupCon selects, so it has no
+        location to check yet, and no conflict with studies of other encoders. One
+        case remains late: persistent classifier storage with load_if_exists false
+        and a rerun selecting the same encoder fails after SupCon as a duplicate.
+        """
         config = self.configuration
         if config.supcon_study is not None:
             config.supcon_study.preflight()
-        if config._classifier_sweep is None:
-            config.classifier_study(config.encoder_placeholder).preflight()
 
     def _run_pipeline(self, run_id: str | None = None) -> TwoStageResult:
         """Run stage composition, using explicit child ownership only when tracking is enabled."""
@@ -599,7 +620,7 @@ class TwoStageExperiment:
             "pipeline_run_id": run_id,
         }
         classifier_results, selected_classifier, champion_version = (
-            self._run_classifier_stage(selected, encoder_provenance, run_id)
+            self._run_classifier_stage(selected, checksum, encoder_provenance, run_id)
         )
         summary["classifier_results"] = [
             result.to_dict() for result in classifier_results
@@ -652,17 +673,24 @@ class TwoStageExperiment:
     def _run_classifier_stage(
         self,
         selected: ExperimentResult,
+        checksum: str,
         encoder_provenance: Mapping,
         run_id: str | None,
     ) -> tuple[tuple[ExperimentResult, ...], ExperimentResult | None, str | None]:
         """Train the classifier study or sweep on the selected encoder.
+
+        Args:
+            selected: Selected SupCon result.
+            checksum: SHA-256 of the selected best.pt; keys the classifier study.
+            encoder_provenance: Selected encoder and parent-run metadata.
+            run_id: Pipeline parent run, or None when untracked.
 
         Returns:
             All completed results, the winner, and the champion version after promotion.
         """
         if self.classifiers is None:
             study = self.configuration.classifier_study(
-                selected.best_checkpoint.resolve(), encoder_provenance
+                selected.best_checkpoint.resolve(), checksum[:12], encoder_provenance
             ).run(parent_run_id=run_id)
             return study.results, study.selected, study.registered_champion_version
         else:

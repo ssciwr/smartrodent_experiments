@@ -8,7 +8,10 @@ from pathlib import Path
 import yaml
 
 from smartrodent import config_utils
-from smartrodent.classifier_training import ClassifierConfiguration, ClassifierExperiment
+from smartrodent.classifier_training import (
+    ClassifierConfiguration,
+    ClassifierExperiment,
+)
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
 from smartrodent.training_validation import validate_output_paths
 
@@ -32,19 +35,36 @@ class ClassifierSweepConfiguration:
         object.__setattr__(self, "output_directory", Path(self.output_directory))
         object.__setattr__(self, "document", deepcopy(dict(self.document)))
         if not self.configurations:
-            raise ValueError("Classifier sweep must contain at least one candidate; empty sweep")
+            raise ValueError(
+                "Classifier sweep must contain at least one candidate; empty sweep"
+            )
         reference = self.configurations[0]
         for configuration in self.configurations:
             if configuration.tracked_metric != reference.tracked_metric:
                 raise ValueError("Classifier sweep must use the same tracked metric")
             if configuration.effective_tracked_mode != reference.effective_tracked_mode:
-                raise ValueError("Classifier sweep must use the same tracked mode/direction")
-            if configuration.tracked_metric_definition != reference.tracked_metric_definition:
-                raise ValueError("Classifier sweep must use the same tracked metric definition/function/options")
-            if self._validation_path(configuration.validation_dataset) != self._validation_path(reference.validation_dataset):
-                raise ValueError("Classifier sweep must use the same validation dataset")
-            if reference.validation_dataset is not None and sorted(configuration.class_names) != sorted(reference.class_names):
-                raise ValueError("Validated classifier sweep must evaluate the same class population")
+                raise ValueError(
+                    "Classifier sweep must use the same tracked mode/direction"
+                )
+            if (
+                configuration.tracked_metric_definition
+                != reference.tracked_metric_definition
+            ):
+                raise ValueError(
+                    "Classifier sweep must use the same tracked metric definition/function/options"
+                )
+            if self._validation_path(
+                configuration.validation_dataset
+            ) != self._validation_path(reference.validation_dataset):
+                raise ValueError(
+                    "Classifier sweep must use the same validation dataset"
+                )
+            if reference.validation_dataset is not None and sorted(
+                configuration.class_names
+            ) != sorted(reference.class_names):
+                raise ValueError(
+                    "Validated classifier sweep must evaluate the same class population"
+                )
         self._validate_paths()
 
     @classmethod
@@ -73,8 +93,7 @@ class ClassifierSweepConfiguration:
         Returns:
             Prevalidated sweep configurations; no training is started.
         """
-        document = yaml.load(Path(path).read_text(encoding="utf-8"), Loader=config_utils.get_loader())
-        return cls.from_mapping(document)
+        return cls.from_mapping(config_utils.load_yaml(path))
 
     @classmethod
     def from_runs(
@@ -94,7 +113,9 @@ class ClassifierSweepConfiguration:
         for index, mapping in enumerate(runs, start=1):
             values = deepcopy(dict(mapping))
             values["output_directory"] = (
-                output_directory / f"run_{index:03d}" if len(runs) > 1 else output_directory
+                output_directory / f"run_{index:03d}"
+                if len(runs) > 1
+                else output_directory
             )
             try:
                 configurations.append(ClassifierConfiguration.from_mapping(values))
@@ -114,11 +135,17 @@ class ClassifierSweepConfiguration:
         checkpoint = checkpoint.resolve()
         sweep = deepcopy(self)
         for configuration in sweep.configurations:
-            configuration.initialization["encoder"] = {"source": "supcon", "checkpoint": str(checkpoint)}
+            configuration.initialization["encoder"] = {
+                "source": "supcon",
+                "checkpoint": str(checkpoint),
+            }
         validate_output_paths(
             [configuration.output_directory for configuration in sweep.configurations],
-            sources=(checkpoint,), roots=(sweep.output_directory,),
-            native_directories=[configuration.output_directory for configuration in sweep.configurations],
+            sources=(checkpoint,),
+            roots=(sweep.output_directory,),
+            native_directories=[
+                configuration.output_directory for configuration in sweep.configurations
+            ],
         )
         return sweep
 
@@ -129,13 +156,29 @@ class ClassifierSweepConfiguration:
 
     def _validate_paths(self) -> None:
         """Protect every run's inputs against every run's artifacts, including aliases."""
-        sources = [configuration.model_card_template for configuration in self.configurations]
-        sources.extend(node.get("checkpoint") for configuration in self.configurations for node in configuration.initialization.values())
+        sources = [
+            configuration.model_card_template for configuration in self.configurations
+        ]
+        sources.extend(
+            node.get("checkpoint")
+            for configuration in self.configurations
+            for node in configuration.initialization.values()
+        )
         validate_output_paths(
             [configuration.output_directory for configuration in self.configurations],
-            [path for configuration in self.configurations for path in (configuration.train_dataset, configuration.validation_dataset)],
-            sources, (self.output_directory,),
-            native_directories=[configuration.output_directory for configuration in self.configurations],
+            [
+                path
+                for configuration in self.configurations
+                for path in (
+                    configuration.train_dataset,
+                    configuration.validation_dataset,
+                )
+            ],
+            sources,
+            (self.output_directory,),
+            native_directories=[
+                configuration.output_directory for configuration in self.configurations
+            ],
         )
 
 
@@ -163,8 +206,12 @@ class ClassifierSweepResult:
         """
         return {
             "output_directory": str(self.output_directory),
-            "classifier_results": [result.to_dict() for result in self.classifier_results],
-            "selected_classifier": self.selected_classifier.to_dict() if self.selected_classifier is not None else None,
+            "classifier_results": [
+                result.to_dict() for result in self.classifier_results
+            ],
+            "selected_classifier": self.selected_classifier.to_dict()
+            if self.selected_classifier is not None
+            else None,
             "registered_champion_version": self.registered_champion_version,
         }
 
@@ -177,17 +224,28 @@ class ClassifierSweepExperiment:
         encoder_provenance: Optional selected-SupCon metadata supplied by the pipeline.
     """
 
-    def __init__(self, configuration: ClassifierSweepConfiguration, *, encoder_provenance: Mapping | None = None):
+    def __init__(
+        self,
+        configuration: ClassifierSweepConfiguration,
+        *,
+        encoder_provenance: Mapping | None = None,
+    ):
         """Retain preparation separately from expensive training and filesystem writes."""
         self.configuration = configuration
         self.encoder_provenance = deepcopy(dict(encoder_provenance or {}))
         head_cache = {}
         self.experiments = tuple(
-            ClassifierExperiment(candidate, encoder_provenance=self.encoder_provenance, head_cache=head_cache)
+            ClassifierExperiment(
+                candidate,
+                encoder_provenance=self.encoder_provenance,
+                head_cache=head_cache,
+            )
             for candidate in configuration.configurations
         )
 
-    def bind_supcon_encoder(self, checkpoint: Path, encoder_provenance: Mapping) -> None:
+    def bind_supcon_encoder(
+        self, checkpoint: Path, encoder_provenance: Mapping
+    ) -> None:
         """Bind the deferred input while retaining all prepared classifier resources.
 
         Args:
@@ -196,7 +254,9 @@ class ClassifierSweepExperiment:
         """
         self.configuration = self.configuration.with_supcon_encoder(checkpoint)
         self.encoder_provenance = deepcopy(dict(encoder_provenance))
-        for experiment, configuration in zip(self.experiments, self.configuration.configurations, strict=True):
+        for experiment, configuration in zip(
+            self.experiments, self.configuration.configurations, strict=True
+        ):
             experiment.configuration = configuration
             experiment.encoder_provenance = deepcopy(self.encoder_provenance)
 
@@ -220,18 +280,31 @@ class ClassifierSweepExperiment:
         summary_path = root / "selection.yaml"
         # Clear the active report before any previous run artifact is replaced.
         self._write_summary(summary_path, ClassifierSweepResult(root, (), None))
-        (root / "config.yaml").write_text(yaml.safe_dump(dict(configuration.document)), encoding="utf-8")
+        (root / "config.yaml").write_text(
+            yaml.safe_dump(dict(configuration.document)), encoding="utf-8"
+        )
         results = []
         for experiment in self.experiments:
             candidate = experiment.configuration
-            context = {"parent_run_id": parent_run_id} if parent_run_id is not None else {}
-            if candidate.mlflow is not None and candidate.mlflow.registered_model_name is not None:
+            context = (
+                {"parent_run_id": parent_run_id} if parent_run_id is not None else {}
+            )
+            if (
+                candidate.mlflow is not None
+                and candidate.mlflow.registered_model_name is not None
+            ):
                 context["defer_promotion"] = True
             result = experiment.run_with_result(**context)
             self._validate_result(candidate, result)
             results.append(result)
-            self._write_summary(summary_path, ClassifierSweepResult(root, tuple(results), None))
-        selected = select_best_experiment(results) if results[0].validation_dataset is not None else None
+            self._write_summary(
+                summary_path, ClassifierSweepResult(root, tuple(results), None)
+            )
+        selected = (
+            select_best_experiment(results)
+            if results[0].validation_dataset is not None
+            else None
+        )
         champion_version = None
         if selected is not None:
             registry = self.experiments[results.index(selected)].champion_registry
@@ -242,14 +315,26 @@ class ClassifierSweepExperiment:
         return report
 
     @staticmethod
-    def _validate_result(configuration: ClassifierConfiguration, result: ExperimentResult) -> None:
+    def _validate_result(
+        configuration: ClassifierConfiguration, result: ExperimentResult
+    ) -> None:
         """Check each result against its configuration, even for a singleton or uniform lie."""
         if result.tracked_metric != configuration.tracked_metric:
-            raise ValueError("Classifier result tracked metric does not match configuration")
+            raise ValueError(
+                "Classifier result tracked metric does not match configuration"
+            )
         if result.tracked_mode != configuration.effective_tracked_mode:
-            raise ValueError("Classifier result tracked mode does not match configuration")
-        if ClassifierSweepConfiguration._validation_path(result.validation_dataset) != ClassifierSweepConfiguration._validation_path(configuration.validation_dataset):
-            raise ValueError("Classifier result validation dataset does not match configuration")
+            raise ValueError(
+                "Classifier result tracked mode does not match configuration"
+            )
+        if ClassifierSweepConfiguration._validation_path(
+            result.validation_dataset
+        ) != ClassifierSweepConfiguration._validation_path(
+            configuration.validation_dataset
+        ):
+            raise ValueError(
+                "Classifier result validation dataset does not match configuration"
+            )
 
     @staticmethod
     def _write_summary(path: Path, result: ClassifierSweepResult) -> None:

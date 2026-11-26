@@ -1,7 +1,9 @@
-import yaml
 import copy
 import importlib
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from . import utils
 
@@ -43,17 +45,7 @@ def coupled_sweep_constructor(
     Returns:
         dict[str, Any]: dictionary of the form {keys:'type', type: 'coupled-sweep', values: [v1,v2,v3,...], target: [path, to, target]}
     """
-    tokens = node.value[0][1].value.split(".")
-    sweep_target = []
-    for token in tokens:
-        split_token = token.split("[")
-        if len(split_token) > 1:
-            index = int(split_token[1][:-1])
-            sweep_target.append(split_token[0])
-            sweep_target.append(index)
-        else:
-            sweep_target.append(token)
-
+    sweep_target = list(utils.parse_path(node.value[0][1].value))
     values = loader.construct_sequence(node.value[1][1])
     return {"target": sweep_target, "values": values, "type": "coupled-sweep"}
 
@@ -175,6 +167,18 @@ def get_loader():
     loader.add_constructor("!pyobject", object_constructor)
     loader.add_constructor("!reference", reference_constructor)
     return loader
+
+
+def load_yaml(path: str | Path) -> Any:
+    """Load a YAML configuration file with the project's custom tags.
+
+    Args:
+        path (str | Path): configuration file
+
+    Returns:
+        Any: the loaded document
+    """
+    return yaml.load(Path(path).read_text(encoding="utf-8"), Loader=get_loader())
 
 
 def convert_to_pyobject_tags(config: dict[str, Any]) -> dict[str, Any]:
@@ -476,7 +480,7 @@ class ConfigHandler:
         Returns:
             list[dict[str, Any]]: list of config dictionaries constructed.
         """
-        sweep_keys = [k for k in sweep_targets.keys()]
+        sweep_keys = [k for k in sweep_targets]
         lookup_keys = []
 
         # make a set of lookup keys so we later know where to put the values

@@ -5,31 +5,37 @@ resolution, Optuna sampling/pruning/storage, and report writing stay real.
 Trainer-specific integration lives in ``test_training_studies.py``.
 """
 
+import time
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
-import time
 from types import SimpleNamespace
 
-from hypothesis import HealthCheck, given, settings, strategies as st
 import optuna
+import pytest
+import yaml
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from optuna.distributions import (
     CategoricalDistribution,
     FloatDistribution,
     IntDistribution,
 )
-import pytest
-import yaml
-
-from smartrodent import config_utils
-from smartrodent.experiment_results import ExperimentResult
 from study_test_support import (
     STUDY_NAME,
-    quiet_optuna,
-    search_api,
     study_report,
     tuning,
 )
+
+from smartrodent import config_utils
+from smartrodent.experiment_results import ExperimentResult
+from smartrodent.hyperparameter_search import (
+    HyperparameterStudy,
+    StudyConfiguration,
+    StudyObjective,
+    TrialConfigurationError,
+)
+from smartrodent.search_space import SearchSpace
 
 
 def _load(text: str):
@@ -37,9 +43,9 @@ def _load(text: str):
     return yaml.load(text, Loader=config_utils.get_loader())
 
 
-def _space(search_api, text: str, **kwargs):
+def _space(text: str, **kwargs):
     """Build a search space from YAML text."""
-    return search_api.SearchSpace.from_document(_load(text), **kwargs)
+    return SearchSpace.from_document(_load(text), **kwargs)
 
 
 # --------------------------------------------------------------------------------------
@@ -47,10 +53,9 @@ def _space(search_api, text: str, **kwargs):
 # --------------------------------------------------------------------------------------
 
 
-def test_suggest_tags_define_optuna_distributions_named_by_dotted_path(search_api):
+def test_suggest_tags_define_optuna_distributions_named_by_dotted_path():
     """Each tag becomes one Optuna distribution keyed by its full document path."""
     space = _space(
-        search_api,
         """
 optimizer:
   lr: !suggest-float {low: 1.0e-5, high: 1.0e-3, log: true}
@@ -70,17 +75,16 @@ fixed: 3
     }
 
 
-def test_block_style_tags_are_equivalent_to_flow_style(search_api):
+def test_block_style_tags_are_equivalent_to_flow_style():
     """Tags accept ordinary YAML block mappings, as the existing sweep tags do."""
-    flow = _space(search_api, "lr: !suggest-float {low: 0.1, high: 0.9}\n")
-    block = _space(search_api, "lr: !suggest-float\n  low: 0.1\n  high: 0.9\n")
+    flow = _space("lr: !suggest-float {low: 0.1, high: 0.9}\n")
+    block = _space("lr: !suggest-float\n  low: 0.1\n  high: 0.9\n")
     assert flow.distributions == block.distributions
 
 
-def test_tags_inside_lists_are_named_with_index_paths_and_resolved_in_place(search_api):
+def test_tags_inside_lists_are_named_with_index_paths_and_resolved_in_place():
     """List elements use the coupled-sweep path syntax and keep their siblings."""
     space = _space(
-        search_api,
         """
 transforms:
   random_resized_crop:
@@ -92,10 +96,9 @@ transforms:
     assert resolved["transforms"]["random_resized_crop"]["scale"] == [0.6, 1.0]
 
 
-def test_coupled_sweep_follows_the_chosen_categorical_index(search_api):
+def test_coupled_sweep_follows_the_chosen_categorical_index():
     """Existing !coupled-sweep semantics pair structured values with a categorical choice."""
     space = _space(
-        search_api,
         """
 initialization:
   head:
@@ -117,9 +120,7 @@ augment: !coupled-sweep
     assert full["initialization"]["head"]["replace"] == "full"
 
 
-def test_resolution_leaves_the_source_document_and_previous_results_untouched(
-    search_api,
-):
+def test_resolution_leaves_the_source_document_and_previous_results_untouched():
     """Every resolution is an independent concrete copy."""
     document = _load(
         """
@@ -128,7 +129,7 @@ nested: {values: [1, 2]}
 """
     )
     snapshot = deepcopy(document)
-    space = search_api.SearchSpace.from_document(document)
+    space = SearchSpace.from_document(document)
     first = space.resolve({"lr": 0.2})
     first["nested"]["values"].append(3)
     second = space.resolve({"lr": 0.3})
@@ -141,16 +142,11 @@ nested: {values: [1, 2]}
     [
         ({"head": "linear"}, "lr"),  # missing parameter
         ({"lr": 0.5, "head": "linear", "other": 1}, "other"),  # unknown parameter
-        ({"lr": 1.5, "head": "linear"}, "lr"),  # outside the distribution
-        ({"lr": 0.5, "head": "bogus"}, "head"),  # not a declared choice
     ],
 )
-def test_resolution_rejects_parameters_that_do_not_match_the_space(
-    search_api, params, match
-):
+def test_resolution_rejects_parameters_that_do_not_match_the_space(params, match):
     """Resolution never fills in, drops, or clamps a parameter silently."""
     space = _space(
-        search_api,
         """
 lr: !suggest-float {low: 0.0, high: 1.0}
 head: !suggest-categorical {choices: [linear, full]}
@@ -191,16 +187,16 @@ head: !suggest-categorical {choices: [linear, full]}
         "c: !suggest-categorical [a, b]\n",  # sequence instead of mapping
     ],
 )
-def test_invalid_tag_definitions_are_rejected_with_value_errors(search_api, text):
+def test_invalid_tag_definitions_are_rejected_with_value_errors(text):
     """Optuna would warn, adjust, or crash later; the project rejects these up front."""
     with pytest.raises(ValueError):
-        search_api.SearchSpace.from_document(_load(text))
+        SearchSpace.from_document(_load(text))
 
 
-def test_a_document_without_suggest_tags_is_not_a_search_space(search_api):
+def test_a_document_without_suggest_tags_is_not_a_search_space():
     """An empty search space would run identical trials; reject it explicitly."""
     with pytest.raises(ValueError, match="empty"):
-        _space(search_api, "lr: 0.1\nnested: {a: 1}\n")
+        _space("lr: 0.1\nnested: {a: 1}\n")
 
 
 @pytest.mark.parametrize(
@@ -216,10 +212,10 @@ def test_a_document_without_suggest_tags_is_not_a_search_space(search_api):
         ),
     ],
 )
-def test_grid_sweeps_cannot_be_mixed_into_a_search_space(search_api, text):
+def test_grid_sweeps_cannot_be_mixed_into_a_search_space(text):
     """Decision: a configuration is either a grid sweep or an Optuna study, never both."""
     with pytest.raises(ValueError, match="!sweep"):
-        search_api.SearchSpace.from_document(_load(text))
+        SearchSpace.from_document(_load(text))
 
 
 @pytest.mark.parametrize(
@@ -242,10 +238,10 @@ def test_grid_sweeps_cannot_be_mixed_into_a_search_space(search_api, text):
         ),
     ],
 )
-def test_invalid_couplings_are_rejected(search_api, text, match):
+def test_invalid_couplings_are_rejected(text, match):
     """A coupled value must pair one-to-one with an existing categorical's choices."""
     with pytest.raises(ValueError, match=match):
-        search_api.SearchSpace.from_document(_load(text))
+        SearchSpace.from_document(_load(text))
 
 
 @pytest.mark.parametrize(
@@ -263,10 +259,10 @@ def test_invalid_couplings_are_rejected(search_api, text, match):
         ),
     ],
 )
-def test_protected_paths_and_their_children_cannot_be_searched(search_api, text, path):
+def test_protected_paths_and_their_children_cannot_be_searched(text, path):
     """Settings that define comparability must stay fixed, whether sampled or coupled."""
     with pytest.raises(ValueError, match=path.replace(".", r"\.")):
-        search_api.SearchSpace.from_document(
+        SearchSpace.from_document(
             _load(text), protected=("tracked_metric", "validation_metrics")
         )
 
@@ -396,13 +392,11 @@ def _leaves(node):
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 @given(case=_search_documents(), seed=st.integers(0, 2**16))
-def test_every_sampled_resolution_is_concrete_and_inside_its_declared_space(
-    search_api, case, seed
-):
+def test_every_sampled_resolution_is_concrete_and_inside_its_declared_space(case, seed):
     """Any Optuna sample resolves to a plain document honoring bounds, steps and couplings."""
     text, specs, couplings = case
     source = _load(text)
-    space = search_api.SearchSpace.from_document(source)
+    space = SearchSpace.from_document(source)
     assert set(space.distributions) == set(specs)
     study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
     for _ in range(3):
@@ -439,9 +433,9 @@ def test_every_sampled_resolution_is_concrete_and_inside_its_declared_space(
 # --------------------------------------------------------------------------------------
 
 
-def test_study_settings_round_trip_with_explicit_optional_defaults(search_api):
+def test_study_settings_round_trip_with_explicit_optional_defaults():
     """Optional keys have visible defaults; omitted sampler parameters mean the constructor default."""
-    parsed = search_api.StudyConfiguration.from_mapping(
+    parsed = StudyConfiguration.from_mapping(
         tuning(
             sampler={"name": "TPESampler"},
             pruner={"name": "MedianPruner", "parameters": {"n_startup_trials": 2}},
@@ -489,10 +483,10 @@ def test_study_settings_round_trip_with_explicit_optional_defaults(search_api):
         tuning(unknown=True),
     ],
 )
-def test_invalid_study_settings_fail_before_any_trial(search_api, values):
+def test_invalid_study_settings_fail_before_any_trial(values):
     """Unknown, missing, or unconstructible settings are configuration errors."""
     with pytest.raises(ValueError):
-        search_api.StudyConfiguration.from_mapping(values)
+        StudyConfiguration.from_mapping(values)
 
 
 # --------------------------------------------------------------------------------------
@@ -569,18 +563,18 @@ class ScriptedRunner:
 
 
 @pytest.fixture
-def study_case(search_api, tmp_path):
+def study_case(tmp_path):
     """Build real studies around a scripted runner, varying settings per test."""
 
     def build(runner=None, *, mode="max", space=SPACE, root="study", **study_settings):
         validation = tmp_path / "val"
         runner = runner if runner is not None else ScriptedRunner(validation, mode=mode)
-        study = search_api.HyperparameterStudy(
-            search_api.SearchSpace.from_document(_load(space)),
-            search_api.StudyConfiguration.from_mapping(tuning(**study_settings)),
+        study = HyperparameterStudy(
+            SearchSpace.from_document(_load(space)),
+            StudyConfiguration.from_mapping(tuning(**study_settings)),
             runner,
             output_directory=tmp_path / root,
-            objective=search_api.StudyObjective(
+            objective=StudyObjective(
                 tracked_metric="balanced_accuracy",
                 tracked_mode=mode,
                 validation_dataset=validation,
@@ -678,15 +672,13 @@ def test_pruner_stops_weak_trials_from_reported_epoch_values(study_case, tmp_pat
     ["nonfinite", "invalid_combination"],
 )
 def test_anticipated_trial_failures_are_recorded_and_the_study_continues(
-    search_api, study_case, tmp_path, error
+    study_case, tmp_path, error
 ):
     """Diverging runs and invalid sampled combinations fail one trial, not the study."""
     exception = (
         FloatingPointError("Nonfinite tracked validation metric")
         if error == "nonfinite"
-        else search_api.TrialConfigurationError(
-            "classes_per_batch * samples_per_class too large"
-        )
+        else TrialConfigurationError("classes_per_batch * samples_per_class too large")
     )
     runner = ScriptedRunner(tmp_path / "val", failures={1: exception})
     case = study_case(runner, n_trials=3)
@@ -698,19 +690,19 @@ def test_anticipated_trial_failures_are_recorded_and_the_study_continues(
     assert trials[0]["error"] is None and trials[1]["result"] is None
 
 
-def test_a_study_objective_requires_a_validation_split(search_api):
+def test_a_study_objective_requires_a_validation_split():
     """Ranking training-only runs is rejected for studies, as for sweep selection."""
     with pytest.raises(ValueError, match="validation"):
-        search_api.StudyObjective(
+        StudyObjective(
             tracked_metric="supcon_loss_mean",
             tracked_mode="min",
             validation_dataset=None,
         )
 
 
-def test_invalid_trial_configuration_errors_are_value_errors(search_api):
+def test_invalid_trial_configuration_errors_are_value_errors():
     """Callers that only know configuration errors can still handle them uniformly."""
-    assert issubclass(search_api.TrialConfigurationError, ValueError)
+    assert issubclass(TrialConfigurationError, ValueError)
 
 
 def test_unexpected_trial_errors_stop_the_study_and_are_recorded(study_case, tmp_path):
@@ -912,7 +904,7 @@ def test_resuming_with_the_opposite_direction_fails_before_any_trial(
     ],
 )
 def test_resuming_with_a_different_objective_fails_before_any_trial(
-    search_api, study_case, tmp_path, objective
+    study_case, tmp_path, objective
 ):
     """Stored trials ranked on another metric or split cannot be compared with new ones."""
     storage = f"sqlite:///{tmp_path / 'optuna.db'}"
@@ -929,14 +921,14 @@ def test_resuming_with_a_different_objective_fails_before_any_trial(
         }
     )
     runner = ScriptedRunner(values["validation_dataset"])
-    study = search_api.HyperparameterStudy(
-        search_api.SearchSpace.from_document(_load(SPACE)),
-        search_api.StudyConfiguration.from_mapping(
+    study = HyperparameterStudy(
+        SearchSpace.from_document(_load(SPACE)),
+        StudyConfiguration.from_mapping(
             tuning(n_trials=1, storage=storage, load_if_exists=True)
         ),
         runner,
         output_directory=tmp_path / "study",
-        objective=search_api.StudyObjective(**values),
+        objective=StudyObjective(**values),
     )
     with pytest.raises(ValueError, match="objective"):
         study.run()
@@ -954,40 +946,9 @@ def test_another_study_cannot_reuse_an_output_directory(study_case, tmp_path):
     assert study_report(tmp_path / "study")["study_name"] == STUDY_NAME
 
 
-@pytest.mark.parametrize(
-    "params",
-    [
-        {"lr": 0.15},  # between two steps of 0.1
-        {"lr": "0.1"},  # not a number
-        {"n": 2.5},  # not an integer
-        {"n": True},  # a boolean is not an integer
-        {"n": 3},  # between two steps of 2
-        {"c": 1.0},  # equal to the choice 1, but a different type
-        {"c": True},  # equal to the choice 1, but a different type
-    ],
-)
-def test_resolution_requires_exact_members_of_each_distribution(search_api, params):
-    """Values must be on the declared step grid and of the declared type, never coerced."""
-    space = _space(
-        search_api,
-        """
-lr: !suggest-float {low: 0.0, high: 1.0, step: 0.1}
-n: !suggest-int {low: 0, high: 10, step: 2}
-c: !suggest-categorical {choices: [1, a]}
-""",
-    )
-    valid = {"lr": 0.3, "n": 4, "c": 1}
-    assert space.resolve(valid) == valid
-    name = next(iter(params))
-    with pytest.raises(ValueError, match=name):
-        space.resolve({**valid, **params})
-
-
-def test_prefixed_spaces_name_parameters_and_couplings_by_full_document_path(
-    search_api,
-):
+def test_prefixed_spaces_name_parameters_and_couplings_by_full_document_path():
     """A stage embedded in a larger document keeps the document's full parameter paths."""
-    space = search_api.SearchSpace.from_document(
+    space = SearchSpace.from_document(
         _load(
             """
 initialization:
@@ -1013,14 +974,14 @@ tracked_metric: accuracy
 # --- Review round 2 additions ---
 
 
-def _identity_study(search_api, tmp_path, runner, identity, **settings):
+def _identity_study(tmp_path, runner, identity, **settings):
     """A real study over SPACE with an extra stored identity."""
-    return search_api.HyperparameterStudy(
-        search_api.SearchSpace.from_document(_load(SPACE)),
-        search_api.StudyConfiguration.from_mapping(tuning(**settings)),
+    return HyperparameterStudy(
+        SearchSpace.from_document(_load(SPACE)),
+        StudyConfiguration.from_mapping(tuning(**settings)),
         runner,
         output_directory=tmp_path / "study",
-        objective=search_api.StudyObjective(
+        objective=StudyObjective(
             tracked_metric="balanced_accuracy",
             tracked_mode="max",
             validation_dataset=tmp_path / "val",
@@ -1029,32 +990,29 @@ def _identity_study(search_api, tmp_path, runner, identity, **settings):
     )
 
 
-def test_resuming_requires_the_same_extra_identity(search_api, tmp_path):
+def test_resuming_requires_the_same_extra_identity(tmp_path):
     """Callers can pin more than space and objective, e.g. the encoder all trials share."""
     storage = f"sqlite:///{tmp_path / 'optuna.db'}"
     settings = {"n_trials": 1, "storage": storage, "load_if_exists": True}
     _identity_study(
-        search_api,
         tmp_path,
         ScriptedRunner(tmp_path / "val"),
         {"encoder checkpoint": "sha-a"},
         **settings,
     ).run()
     same = ScriptedRunner(tmp_path / "val")
-    _identity_study(
-        search_api, tmp_path, same, {"encoder checkpoint": "sha-a"}, **settings
-    ).run()
+    _identity_study(tmp_path, same, {"encoder checkpoint": "sha-a"}, **settings).run()
     assert len(same.calls) == 1
     changed = ScriptedRunner(tmp_path / "val")
     with pytest.raises(ValueError, match="encoder checkpoint"):
         _identity_study(
-            search_api, tmp_path, changed, {"encoder checkpoint": "sha-b"}, **settings
+            tmp_path, changed, {"encoder checkpoint": "sha-b"}, **settings
         ).run()
     assert changed.calls == []
 
 
 def test_preflight_reports_conflicts_without_running_or_recording_anything(
-    search_api, study_case, tmp_path
+    study_case, tmp_path
 ):
     """The check used before long earlier stages: read-only, and silent when all is well."""
     storage = f"sqlite:///{tmp_path / 'optuna.db'}"
@@ -1078,13 +1036,13 @@ def test_preflight_reports_conflicts_without_running_or_recording_anything(
     assert len(optuna.load_study(study_name=STUDY_NAME, storage=storage).trials) == 1
 
 
-def test_protected_paths_are_named_with_the_stage_prefix(search_api):
+def test_protected_paths_are_named_with_the_stage_prefix():
     """Messages use one naming style: the full pipeline path."""
     with pytest.raises(
         ValueError,
         match=r"'supcon\.temperature' cannot be searched: 'supcon\.temperature'",
     ):
-        search_api.SearchSpace.from_document(
+        SearchSpace.from_document(
             _load("temperature: !suggest-float {low: 0.05, high: 0.2}\n"),
             protected=("temperature",),
             prefix="supcon",

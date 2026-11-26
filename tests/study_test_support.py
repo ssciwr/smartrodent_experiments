@@ -7,14 +7,6 @@ import pytest
 import yaml
 
 
-@pytest.fixture
-def search_api():
-    """Import the study module lazily so collection of other tests keeps working."""
-    from smartrodent import hyperparameter_search
-
-    return hyperparameter_search
-
-
 @pytest.fixture(autouse=True)
 def quiet_optuna():
     """Keep Optuna's per-trial INFO logging out of test output."""

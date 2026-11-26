@@ -879,10 +879,7 @@ class SupConExperiment:
 
 def _load_run_mappings(config_path: Path) -> list[dict]:
     """Load custom YAML tags and expand them into concrete run mappings."""
-    configuration = yaml.load(
-        config_path.read_text(encoding="utf-8"),
-        Loader=config_utils.get_loader(),
-    )
+    configuration = config_utils.load_yaml(config_path)
     if not isinstance(configuration, Mapping):
         raise ValueError("Training configuration must be a YAML mapping")
     return config_utils.ConfigHandler(dict(configuration)).run_configs

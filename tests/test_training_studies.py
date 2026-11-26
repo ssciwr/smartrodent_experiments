@@ -5,34 +5,25 @@ resolution, stage configuration validation, Optuna, and reports stay real. A few
 tests run the real CPU trainers to prove the per-epoch pruning hook end to end.
 """
 
-from copy import deepcopy
+import hashlib
 import math
-from pathlib import Path
 import sys
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import optuna
 import pytest
 import torch
 import yaml
+from study_test_support import STUDY_NAME, study_report, tuning
 
+# Reuse the calibrated temporary CPU fixtures of the existing suites.
 from smartrodent.classifier_training import ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult
 from smartrodent.supcon_training import SupConExperiment
+from smartrodent.training_studies import ClassifierStudy, SupConStudy
 from smartrodent.two_stage_training import TwoStageConfiguration, TwoStageExperiment
-
-# Reuse the calibrated temporary CPU fixtures of the existing suites.
-from test_classifier_training import (
-    classifier_assets,
-    classifier_configuration,
-    controlled_scores,
-    training_api,
-)
-from test_supcon_experiment import experiment_configuration, validation_configuration
-from test_training_tracking import tracking_store
-from test_two_stage_training import pipeline_document
-from study_test_support import quiet_optuna, search_api, study_report, tuning
-
 
 LR_TAG = "!suggest-float {low: 1.0e-4, high: 1.0e-2, log: true}"
 
@@ -52,6 +43,16 @@ def _write(path: Path, document, tags) -> Path:
     return path
 
 
+def _encoder_study_root(root: Path, checkpoint: Path) -> Path:
+    """Return the pipeline classifier study directory of one selected encoder."""
+    return Path(root) / "classifier" / _encoder_key(checkpoint)
+
+
+def _encoder_key(checkpoint: Path) -> str:
+    """Return the short checksum that names a selected encoder's classifier study."""
+    return hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()[:12]
+
+
 def _peak_score(rate: float) -> float:
     """A smooth, deterministic objective peaking at a learning rate of 1e-3."""
     return -abs(math.log10(rate) + 3.0)
@@ -66,8 +67,9 @@ def recorded_trials(monkeypatch):
         directory = directory / "weights" if weights else directory
         directory.mkdir(parents=True, exist_ok=True)
         best, last = directory / "best.pt", directory / "last.pt"
-        torch.save({"epoch": 1}, best)
-        torch.save({"epoch": 2}, last)
+        # Bytes depend on the run directory: different winners are different encoders.
+        torch.save({"epoch": 1, "run": str(directory)}, best)
+        torch.save({"epoch": 2, "run": str(directory)}, last)
         return best, last
 
     def run_supcon(self, *, parent_run_id=None, epoch_callback=None):
@@ -153,11 +155,11 @@ def supcon_document(validation_configuration):
 
 
 def test_supcon_study_trains_each_sampled_configuration_in_its_own_trial(
-    search_api, supcon_document, recorded_trials, tmp_path
+    supcon_document, recorded_trials, tmp_path
 ):
     """Only searched values vary; every trial is a fully validated standalone configuration."""
     path = _write(tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG})
-    result = search_api.SupConStudy.from_yaml(path).run()
+    result = SupConStudy.from_yaml(path).run()
     root = Path(supcon_document["output_directory"])
     calls = recorded_trials.supcon
     assert [call.configuration.output_directory for call in calls] == [
@@ -258,7 +260,7 @@ def test_supcon_script_keeps_grid_sweeps_for_configurations_without_tuning(
     ],
 )
 def test_supcon_study_rejects_searching_comparability_settings(
-    search_api, supcon_document, recorded_trials, tmp_path, key, placeholder_at, tag
+    supcon_document, recorded_trials, tmp_path, key, placeholder_at, tag
 ):
     """Fixed objective, data, outputs and temperature keep trials comparable (as in sweeps)."""
     node = supcon_document
@@ -270,7 +272,7 @@ def test_supcon_study_rejects_searching_comparability_settings(
         tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG, "__P__": tag}
     )
     with pytest.raises(ValueError, match=key):
-        search_api.SupConStudy.from_yaml(path).run()
+        SupConStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
@@ -287,7 +289,7 @@ def test_supcon_study_rejects_searching_comparability_settings(
     ids=["samples_per_class", "dropout", "classes_per_batch"],
 )
 def test_supcon_study_validates_every_bound_and_choice_before_any_trial(
-    search_api, supcon_document, recorded_trials, tmp_path, placeholder_at, tag
+    supcon_document, recorded_trials, tmp_path, placeholder_at, tag
 ):
     """A value no trial could ever use is a configuration error, found before training."""
     supcon_document[placeholder_at[0]] = "__P__"
@@ -295,13 +297,13 @@ def test_supcon_study_validates_every_bound_and_choice_before_any_trial(
         tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG, "__P__": tag}
     )
     with pytest.raises(ValueError, match=placeholder_at[0]):
-        search_api.SupConStudy.from_yaml(path).run()
+        SupConStudy.from_yaml(path).run()
     assert recorded_trials.events == []
     assert not Path(supcon_document["output_directory"]).exists()
 
 
 def test_supcon_invalid_sampled_combinations_fail_only_their_trial(
-    search_api, supcon_document, recorded_trials, tmp_path
+    supcon_document, recorded_trials, tmp_path
 ):
     """Each value is valid alone (checked around the first choice); one combination is not.
 
@@ -324,7 +326,7 @@ def test_supcon_invalid_sampled_combinations_fail_only_their_trial(
             "__E__": "!suggest-categorical {choices: [8, 4]}",
         },
     )
-    result = search_api.SupConStudy.from_yaml(path).run()
+    result = SupConStudy.from_yaml(path).run()
     trials = study_report(supcon_document["output_directory"])["trials"]
     states = {
         (t["params"]["samples_per_class"], t["params"]["samples_per_epoch"]): t["state"]
@@ -340,7 +342,7 @@ def test_supcon_invalid_sampled_combinations_fail_only_their_trial(
 
 
 def test_supcon_study_requires_validation_data_for_ranking(
-    search_api, supcon_document, recorded_trials, tmp_path
+    supcon_document, recorded_trials, tmp_path
 ):
     """Like sweep selection, a study cannot rank training-only runs."""
     # A valid training-only configuration, so only the study-specific rule can reject it.
@@ -352,7 +354,7 @@ def test_supcon_study_requires_validation_data_for_ranking(
     )
     path = _write(tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG})
     with pytest.raises(ValueError, match=r"(?i)study.*validation|validation.*study"):
-        search_api.SupConStudy.from_yaml(path).run()
+        SupConStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
@@ -370,24 +372,24 @@ def test_tags_without_a_tuning_section_are_rejected_by_sweep_loading(
 
 
 def test_a_tuning_section_without_tags_is_rejected(
-    search_api, supcon_document, recorded_trials, tmp_path
+    supcon_document, recorded_trials, tmp_path
 ):
     """A study over an empty space would train identical trials."""
     supcon_document["optimizer"] = {"lr": 0.001}
     path = _write(tmp_path / "supcon.yaml", supcon_document, {})
     with pytest.raises(ValueError, match="empty"):
-        search_api.SupConStudy.from_yaml(path).run()
+        SupConStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
 def test_tracked_supcon_study_parents_every_trial_to_one_study_run(
-    search_api, supcon_document, recorded_trials, tracking_store, tmp_path
+    supcon_document, recorded_trials, tracking_store, tmp_path
 ):
     """A standalone study owns one MLflow parent run holding the report and best score."""
     store = tracking_store
     supcon_document["mlflow"] = deepcopy(store.configuration)
     path = _write(tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG})
-    result = search_api.SupConStudy.from_yaml(path).run()
+    result = SupConStudy.from_yaml(path).run()
     (parent,) = store.client.search_runs(
         [store.experiment_id]
     )  # trials are recorded fakes
@@ -405,7 +407,7 @@ def test_tracked_supcon_study_parents_every_trial_to_one_study_run(
 
 
 def test_supcon_study_rejects_searching_tracking_settings(
-    search_api, supcon_document, recorded_trials, tracking_store, tmp_path
+    supcon_document, recorded_trials, tracking_store, tmp_path
 ):
     """Tracking identity is shared by all trials and cannot be searched."""
     supcon_document["mlflow"] = {
@@ -418,12 +420,12 @@ def test_supcon_study_rejects_searching_tracking_settings(
         {"__LR__": LR_TAG, "__P__": "!suggest-categorical {choices: [one, two]}"},
     )
     with pytest.raises(ValueError, match="mlflow"):
-        search_api.SupConStudy.from_yaml(path).run()
+        SupConStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
 def test_real_supcon_trials_write_complete_run_artifacts(
-    search_api, validation_configuration, tmp_path
+    validation_configuration, tmp_path
 ):
     """Real CPU training: every completed trial is a normal SupCon run with its concrete config."""
     torch.set_num_threads(2)
@@ -438,7 +440,7 @@ def test_real_supcon_trials_write_complete_run_artifacts(
         tuning=tuning(n_trials=2),
     )
     path = _write(tmp_path / "supcon.yaml", document, {"__LR__": LR_TAG})
-    result = search_api.SupConStudy.from_yaml(path).run()
+    result = SupConStudy.from_yaml(path).run()
     report = study_report(document["output_directory"])
     assert [trial["state"] for trial in report["trials"]] == ["COMPLETE", "COMPLETE"]
     for trial in report["trials"]:
@@ -480,11 +482,11 @@ CLASSIFIER_TAGS = {
 
 
 def test_classifier_study_trains_each_sampled_configuration_in_its_own_trial(
-    search_api, classifier_document, recorded_trials, tmp_path
+    classifier_document, recorded_trials, tmp_path
 ):
     """Sampled native options and coupled settings reach each standalone classifier run."""
     path = _write(tmp_path / "classifier.yaml", classifier_document, CLASSIFIER_TAGS)
-    result = search_api.ClassifierStudy.from_yaml(path).run()
+    result = ClassifierStudy.from_yaml(path).run()
     root = Path(classifier_document["output_directory"])
     calls = recorded_trials.classifier
     assert [call.configuration.output_directory for call in calls] == [
@@ -565,7 +567,6 @@ def test_classifier_script_reports_the_study_winner(
     ],
 )
 def test_classifier_study_rejects_invalid_spaces_before_any_trial(
-    search_api,
     classifier_document,
     recorded_trials,
     tmp_path,
@@ -585,12 +586,12 @@ def test_classifier_study_rejects_invalid_spaces_before_any_trial(
         {**CLASSIFIER_TAGS, "__P__": tag},
     )
     with pytest.raises(ValueError, match=match):
-        search_api.ClassifierStudy.from_yaml(path).run()
+        ClassifierStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
 def test_classifier_study_prevalidates_coupled_values_with_their_choice(
-    search_api, classifier_document, recorded_trials, tmp_path
+    classifier_document, recorded_trials, tmp_path
 ):
     """A coupled value is checked together with the categorical choice it belongs to."""
     tags = {
@@ -599,12 +600,12 @@ def test_classifier_study_prevalidates_coupled_values_with_their_choice(
     }
     path = _write(tmp_path / "classifier.yaml", classifier_document, tags)
     with pytest.raises(ValueError, match="encoder_batchnorm"):
-        search_api.ClassifierStudy.from_yaml(path).run()
+        ClassifierStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
 def test_classifier_study_requires_validation_data_for_ranking(
-    search_api, classifier_document, recorded_trials, tmp_path
+    classifier_document, recorded_trials, tmp_path
 ):
     """Training-only CE is valid on its own, but a study cannot rank it."""
     classifier_document.update(
@@ -615,12 +616,12 @@ def test_classifier_study_requires_validation_data_for_ranking(
     )
     path = _write(tmp_path / "classifier.yaml", classifier_document, CLASSIFIER_TAGS)
     with pytest.raises(ValueError, match=r"(?i)study.*validation|validation.*study"):
-        search_api.ClassifierStudy.from_yaml(path).run()
+        ClassifierStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
 def test_real_classifier_pruning_stops_native_training_of_weak_trials(
-    search_api, classifier_configuration, controlled_scores, tmp_path
+    classifier_configuration, controlled_scores, tmp_path
 ):
     """The pruner, fed by the native epoch hook, stops a weak trial after its first epoch."""
     document = classifier_configuration.to_dict()
@@ -644,7 +645,7 @@ def test_real_classifier_pruning_stops_native_training_of_weak_trials(
         document,
         {"__LR0__": "!suggest-categorical {choices: [0.002, 0.004]}"},
     )
-    result = search_api.ClassifierStudy.from_yaml(path).run()
+    result = ClassifierStudy.from_yaml(path).run()
     trials = {
         t["params"]["train_kwargs.lr0"]: t
         for t in study_report(document["output_directory"])["trials"]
@@ -660,7 +661,7 @@ def test_real_classifier_pruning_stops_native_training_of_weak_trials(
 
 
 def test_tracked_classifier_study_nests_trials_and_promotes_only_the_winner(
-    search_api, classifier_configuration, controlled_scores, tracking_store, tmp_path
+    classifier_configuration, controlled_scores, tracking_store, tmp_path
 ):
     """One study parent run, one child per trial; every completed trial registers, the best is champion."""
     store = tracking_store
@@ -684,7 +685,7 @@ def test_tracked_classifier_study_nests_trials_and_promotes_only_the_winner(
         document,
         {"__LR0__": "!suggest-categorical {choices: [0.002, 0.004]}"},
     )
-    result = search_api.ClassifierStudy.from_yaml(path).run()
+    result = ClassifierStudy.from_yaml(path).run()
     runs = store.client.search_runs([store.experiment_id])
     parents = [run for run in runs if "mlflow.parentRunId" not in run.data.tags]
     children = [run for run in runs if "mlflow.parentRunId" in run.data.tags]
@@ -787,9 +788,10 @@ def test_classifier_study_runs_on_the_encoder_selected_by_a_supcon_sweep(
     root = Path(study_pipeline["output_directory"])
     assert recorded_trials.events == ["supcon"] * 2 + ["classifier"] * 4
     winner = result.selected_supcon.best_checkpoint.resolve()
+    study_root = _encoder_study_root(root, winner)
     assert [
         call.configuration.output_directory for call in recorded_trials.classifier
-    ] == [root / "classifier" / f"trial_{number:04d}" for number in range(4)]
+    ] == [study_root / f"trial_{number:04d}" for number in range(4)]
     for call in recorded_trials.classifier:
         assert call.configuration.initialization["encoder"] == {
             "source": "supcon",
@@ -800,7 +802,9 @@ def test_classifier_study_runs_on_the_encoder_selected_by_a_supcon_sweep(
     assert result.selected_classifier.best_value == max(
         item.best_value for item in result.classifier_results
     )
-    assert (root / "classifier" / "study.yaml").is_file()
+    assert study_report(study_root)["study_name"] == (
+        f"{STUDY_NAME}-{_encoder_key(winner)}"
+    )
 
 
 def test_both_stages_can_run_as_studies(study_pipeline, recorded_trials, tmp_path):
@@ -987,19 +991,19 @@ def test_grid_sweeps_inside_a_study_stage_are_rejected(
 
 
 def test_invalid_base_settings_are_not_blamed_on_a_search_parameter(
-    search_api, supcon_document, recorded_trials, tmp_path
+    supcon_document, recorded_trials, tmp_path
 ):
     """A mistake in a fixed setting is reported as such, not as a bad sampled value."""
     supcon_document["epochz"] = 3
     path = _write(tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG})
     with pytest.raises(ValueError, match="epochz") as error:
-        search_api.SupConStudy.from_yaml(path).run()
+        SupConStudy.from_yaml(path).run()
     assert "Search parameter" not in str(error.value)
     assert recorded_trials.events == []
 
 
 def test_real_classifier_freeze_combinations_that_do_not_fit_fail_only_their_trial(
-    search_api, classifier_configuration, tmp_path
+    classifier_configuration, tmp_path
 ):
     """Freeze validity depends on the head mode and network depth, known only at trial time.
 
@@ -1029,7 +1033,7 @@ def test_real_classifier_freeze_combinations_that_do_not_fit_fail_only_their_tri
             "__HEAD__": "!suggest-categorical {choices: [linear, full]}",
         },
     )
-    result = search_api.ClassifierStudy.from_yaml(path).run()
+    result = ClassifierStudy.from_yaml(path).run()
     trials = study_report(document["output_directory"])["trials"]
     states = {
         (t["params"]["freeze"], t["params"]["initialization.head.replace"]): t
@@ -1062,8 +1066,12 @@ def test_pipeline_study_parameters_use_full_document_paths_like_sweeps(
         tmp_path,
         studies={"classifier": tuning()},
     )
-    TwoStageExperiment(config).run()
-    report = study_report(Path(study_pipeline["output_directory"]) / "classifier")
+    result = TwoStageExperiment(config).run()
+    report = study_report(
+        _encoder_study_root(
+            study_pipeline["output_directory"], result.selected_supcon.best_checkpoint
+        )
+    )
     assert all(
         set(trial["params"])
         == {"classifier.train_kwargs.lr0", "classifier.initialization.head.replace"}
@@ -1098,7 +1106,7 @@ def test_a_pipeline_tuning_section_must_name_a_stage(
 
 
 def test_an_invalid_reference_document_names_the_reference_values(
-    search_api, supcon_document, recorded_trials, tmp_path
+    supcon_document, recorded_trials, tmp_path
 ):
     """A cross-field error at the low end still says which values were used."""
     supcon_document.update(
@@ -1110,52 +1118,120 @@ def test_an_invalid_reference_document_names_the_reference_values(
         {"__LR__": LR_TAG, "__M__": "!suggest-int {low: 3, high: 4}"},
     )
     with pytest.raises(ValueError, match="samples_per_class.*3"):
-        search_api.SupConStudy.from_yaml(path).run()
+        SupConStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
 
 def test_resumed_classifier_studies_refuse_a_changed_encoder(
-    search_api, classifier_document, classifier_assets, recorded_trials, tmp_path
+    classifier_document, classifier_assets, recorded_trials, tmp_path
 ):
     """Trials trained on different encoder bytes are not comparable."""
     classifier_document["tuning"] = tuning(
         n_trials=1, storage=f"sqlite:///{tmp_path / 'optuna.db'}", load_if_exists=True
     )
     path = _write(tmp_path / "classifier.yaml", classifier_document, CLASSIFIER_TAGS)
-    search_api.ClassifierStudy.from_yaml(path).run()
-    search_api.ClassifierStudy.from_yaml(path).run()  # same encoder: resumes
+    ClassifierStudy.from_yaml(path).run()
+    ClassifierStudy.from_yaml(path).run()  # same encoder: resumes
     assert len(recorded_trials.classifier) == 2
     with classifier_assets.supcon.open("ab") as stream:  # test-owned fixture file
         stream.write(b"retrained")
     with pytest.raises(ValueError, match="encoder checkpoint"):
-        search_api.ClassifierStudy.from_yaml(path).run()
+        ClassifierStudy.from_yaml(path).run()
     assert len(recorded_trials.classifier) == 2
 
 
 @pytest.mark.parametrize("conflict", ["foreign_report", "existing_study"])
-def test_classifier_study_conflicts_are_found_before_supcon_trains(
+def test_supcon_study_conflicts_are_found_before_any_training(
     study_pipeline, recorded_trials, tmp_path, conflict
 ):
-    """Storage and output conflicts of the later stage must not wait for the SupCon stage."""
+    """Storage and output conflicts are reported before the pipeline trains anything."""
     storage = f"sqlite:///{tmp_path / 'optuna.db'}"
     root = Path(study_pipeline["output_directory"])
     if conflict == "foreign_report":
-        (root / "classifier").mkdir(parents=True)
-        (root / "classifier" / "study.yaml").write_text(
+        (root / "supcon").mkdir(parents=True)
+        (root / "supcon" / "study.yaml").write_text(
             yaml.safe_dump({"study_name": "other"})
         )
         match = "study_name"
     elif conflict == "existing_study":
-        optuna.create_study(study_name="ce", storage=storage, direction="maximize")
+        optuna.create_study(study_name="sc", storage=storage, direction="maximize")
         match = "load_if_exists"
     else:
         raise AssertionError(conflict)
     config = _pipeline(
         study_pipeline,
-        {"__LR__": "!sweep {values: [0.001, 0.002]}", "__LR0__": LR_TAG},
+        {"__LR__": LR_TAG, "__LR0__": "0.004"},
         tmp_path,
-        studies={"classifier": tuning(study_name="ce", storage=storage)},
+        studies={"supcon": tuning(study_name="sc", storage=storage)},
     )
     with pytest.raises(ValueError, match=match):
         TwoStageExperiment(config).run()
     assert recorded_trials.events == []
+
+
+# --- Decision (b): one classifier study per selected encoder ---
+
+
+def test_pipeline_classifier_studies_are_kept_per_selected_encoder(
+    study_pipeline, recorded_trials, tmp_path
+):
+    """An unchanged SupCon winner resumes its classifier study; a new winner starts its own."""
+    root = Path(study_pipeline["output_directory"])
+    storage = f"sqlite:///{tmp_path / 'optuna.db'}"
+    studies = {
+        "classifier": tuning(
+            study_name="ce", n_trials=2, storage=storage, load_if_exists=True
+        )
+    }
+
+    def run(supcon_rates):
+        config = _pipeline(
+            study_pipeline,
+            {"__LR__": f"!sweep {{values: {supcon_rates}}}", "__LR0__": LR_TAG},
+            tmp_path,
+            studies=studies,
+        )
+        return TwoStageExperiment(config).run()
+
+    first = run([0.001, 0.004])  # run_001 wins: the score peaks at lr=1e-3
+    first_root = _encoder_study_root(root, first.selected_supcon.best_checkpoint)
+    second = run([0.001, 0.004])  # same winner, same bytes: resumes
+    assert (
+        _encoder_study_root(root, second.selected_supcon.best_checkpoint) == first_root
+    )
+    assert [t["number"] for t in study_report(first_root)["trials"]] == [0, 1, 2, 3]
+    assert len(second.classifier_results) == 4
+    third = run([0.004, 0.001])  # run_002 wins: a different encoder
+    third_root = _encoder_study_root(root, third.selected_supcon.best_checkpoint)
+    assert third_root != first_root
+    assert [t["number"] for t in study_report(third_root)["trials"]] == [0, 1]
+    assert len(study_report(first_root)["trials"]) == 4  # earlier study untouched
+    for result in (first, third):
+        assert all(
+            item.output_directory.parent
+            == _encoder_study_root(root, result.selected_supcon.best_checkpoint)
+            for item in result.classifier_results
+        )
+
+
+def test_resumed_classifier_studies_check_every_searched_encoder(
+    classifier_document, classifier_assets, recorded_trials, tmp_path
+):
+    """When the encoder itself is searched, a change to any choice's bytes is refused."""
+    other = tmp_path / "other-encoder.pt"
+    other.write_bytes(classifier_assets.supcon.read_bytes())
+    classifier_document["initialization"]["encoder"]["checkpoint"] = "__ENC__"
+    classifier_document["tuning"] = tuning(
+        n_trials=1, storage=f"sqlite:///{tmp_path / 'optuna.db'}", load_if_exists=True
+    )
+    tags = {
+        **CLASSIFIER_TAGS,
+        "__ENC__": f"!suggest-categorical {{choices: [{classifier_assets.supcon}, {other}]}}",
+    }
+    path = _write(tmp_path / "classifier.yaml", classifier_document, tags)
+    ClassifierStudy.from_yaml(path).run()
+    with other.open("ab") as stream:  # the second, non-reference choice changes
+        stream.write(b"retrained")
+    with pytest.raises(ValueError, match="encoder checkpoints"):
+        ClassifierStudy.from_yaml(path).run()
+    assert len(recorded_trials.classifier) == 1
