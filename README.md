@@ -107,7 +107,7 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | --- | --- |
 | [`inaturalist.py`](src/smartrodent/inaturalist.py) | `InaturalistDataset`: observation selection, licensed image acquisition, metadata, caching, and retries. |
 | [`lila.py`](src/smartrodent/lila.py) | `LilaDataset`: license-aware camera-trap selection using LILA metadata and taxonomy. |
-| [`filter.py`](src/smartrodent/filter.py) | `VLMFilter`, `FilterOllama`, `FilterVLLM`: label per-species image records without modifying originals. |
+| [`filter.py`](src/smartrodent/filter.py) | `VLMFilter`, `FilterOllama`, `FilterVLLM`: filter  per-species image records with a text prompt without modifying originals. |
 | [`dataset_splitting.py`](src/smartrodent/dataset_splitting.py) | `DatasetSplitter` and `TrainingDatasetSampler`: split metadata and sample training rows. |
 | [`yolo_dataset_creation.py`](src/smartrodent/yolo_dataset_creation.py) | SpeciesNet-backed detector/classifier dataset creators. |
 | [`datasets.py`](src/smartrodent/datasets.py) | `ImageDataset`, `MultiViewImageDataset`, `collate_views`: class mappings, image indexing, and two-view batching. |
