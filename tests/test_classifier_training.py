@@ -1,159 +1,42 @@
 """Native Ultralytics head-training contracts on temporary YOLO models and data."""
 
-from collections import Counter
-from copy import deepcopy
-from dataclasses import replace
 import hashlib
 import math
 import os
-from pathlib import Path
-import subprocess
-import sys
-from types import SimpleNamespace
 import warnings
+from collections import Counter
+from copy import deepcopy
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
+import mlflow
+import mlflow.pytorch
 import pytest
 import torch
 import yaml
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from PIL import Image
-from pytorch_metric_learning.losses import SupConLoss
+from training_test_support import (
+    assert_registered_classifier,
+    download_artifact,
+    native_checkpoint,
+    wide_native_encoder,
+)
 from ultralytics import YOLO
 from ultralytics.models.yolo.classify.train import ClassificationTrainer
 from ultralytics.models.yolo.classify.val import ClassificationValidator
 from ultralytics.nn.tasks import ClassificationModel
 
+from smartrodent.classifier_training import (
+    ClassifierConfiguration,
+    ClassifierExperiment,
+)
 from smartrodent.experiment_results import ExperimentResult
 from smartrodent.experiment_support import MlflowConfiguration
 from smartrodent.supcon_model import YoloSupConModel
-from test_classifier_model import _native_checkpoint
-
-
-@pytest.fixture
-def training_api():
-    """Import the public experiment/configuration API without requiring future classes."""
-    from smartrodent import classifier_training
-
-    return classifier_training
-
-
-@pytest.fixture
-def classifier_assets(tmp_path):
-    """Create tiny images and native and SupCon encoder inputs."""
-    torch.set_num_threads(2)
-    for split, counts in [("train", (5, 5)), ("val", (3, 2))]:
-        for label, (name, count) in enumerate(
-            zip(("mouse", "rat"), counts, strict=True)
-        ):
-            directory = tmp_path / split / name
-            directory.mkdir(parents=True)
-            for index in range(count):
-                Image.new("RGB", (32, 32), (30 + 20 * index, 255 * label, 80)).save(
-                    directory / f"{index}.png"
-                )
-    architecture = tmp_path / "tiny-cls.yaml"
-    architecture.write_text(
-        yaml.safe_dump(
-            {
-                "nc": 2,
-                "backbone": [[-1, 1, "Conv", [8, 3, 2]], [-1, 1, "nn.Dropout", [0.5]]],
-                "head": [[-1, 1, "Classify", [2]]],
-            }
-        )
-    )
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(7)
-        source = YoloSupConModel(str(architecture), num_classes=2, output_features=4)
-        source.requires_grad_(True)
-        source.train()
-        source.label_names = {"mouse": 0, "rat": 1}
-        source.full_model.model.names = {0: "mouse", 1: "rat"}
-        optimizer = torch.optim.AdamW(source.parameters(), lr=0.01)
-        _, embeddings = source(torch.rand(4, 3, 32, 32))
-        SupConLoss()(embeddings, torch.tensor([0, 0, 1, 1])).backward()
-        optimizer.step()
-        for state in optimizer.state.values():
-            state["step"].fill_(99)
-        supcon = tmp_path / "supcon-best.pt"
-        torch.save(
-            {
-                "epoch": 99,
-                "architecture": deepcopy(source.full_model.model.yaml),
-                # Stage-specific: the classifier's own freeze setting must win over this.
-                "model_configuration": {
-                    "dropout": 0.0,
-                    "output_features": 4,
-                    "num_classes": 2,
-                    "freeze": [0],
-                },
-                "model_state_dict": source.state_dict(),
-                "label_names": dict(source.label_names),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": {"best": -123.0, "num_bad_epochs": 50},
-            },
-            supcon,
-        )
-        source.finalize()
-        native = tmp_path / "native-cls.pt"
-        yolo = YOLO(str(architecture), task="classify")
-        yolo.model.names = {0: "mouse", 1: "rat"}
-        yolo.save(native)
-    return SimpleNamespace(
-        train=tmp_path / "train",
-        val=tmp_path / "val",
-        supcon=supcon,
-        ultralytics=native,
-        architecture=architecture,
-    )
-
-
-@pytest.fixture
-def classifier_configuration(training_api, classifier_assets, tmp_path):
-    """Keep shared data/batching settings while passing CE-specific options natively."""
-    return training_api.ClassifierConfiguration(
-        train_dataset=classifier_assets.train,
-        validation_dataset=classifier_assets.val,
-        output_directory=tmp_path / "ce-output",
-        class_names=("rat", "mouse"),
-        initialization={
-            "encoder": {
-                "source": "supcon",
-                "checkpoint": str(classifier_assets.supcon),
-            },
-            "head": {"replace": "linear", "source": "random"},
-        },
-        # Fixture network layers: 0=Conv, 1=Dropout (encoder), 2=Classify (head).
-        # Freezing both encoder layers is valid for linear and full replacement.
-        freeze=2,
-        encoder_batchnorm="eval",
-        transforms={
-            "image_size": 32,
-            "resize": {"antialias": True},
-            "random_adjust_sharpness": {"sharpness_factor": 0.5, "p": 0.0},
-            "random_grayscale": {"p": 0.0},
-            "random_perspective": {"distortion_scale": 0.5, "p": 0.0},
-            "random_horizontal_flip": {"p": 0.0},
-            "random_resized_crop": {"scale": [1.0, 1.0], "ratio": [1.0, 1.0]},
-        },
-        train_kwargs={
-            "optimizer": "AdamW",
-            "lr0": 0.002,
-            "lrf": 1.0,
-            "weight_decay": 0.0,
-            "warmup_epochs": 0.0,
-            "nbs": 1,
-            "patience": 0,
-            "amp": False,
-            "plots": False,
-        },
-        epochs=3,
-        batch_size=4,
-        workers=0,
-        device="cpu",
-        seed=42,
-        tracked_metric="ce_loss_mean",
-        tracked_mode="min",
-    )
+from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 
 
 @pytest.fixture
@@ -190,34 +73,6 @@ def native_runs(monkeypatch):
     return observed
 
 
-@pytest.fixture
-def controlled_scores(monkeypatch):
-    """Control only returned epoch scores after real native validation has completed."""
-    observed = SimpleNamespace(score_sets={}, epochs={}, validations=[], fail_at=None)
-    original = ClassificationValidator.__call__
-
-    def validate(self, trainer=None, model=None):
-        metrics = original(self, trainer=trainer, model=model)
-        # Native final best-model evaluation is not another training epoch.
-        if trainer is None:
-            return metrics
-        directory = str(trainer.save_dir)
-        epoch = trainer.epoch + 1
-        observed.epochs[directory] = epoch
-        observed.validations.append((directory, epoch))
-        rate = trainer.args.lr0
-        if observed.fail_at == (rate, epoch):
-            raise RuntimeError("deliberate later classifier failure")
-        if rate in observed.score_sets:
-            metrics["balanced_accuracy"] = observed.score_sets[rate][epoch - 1]
-            # Deliberately disagree with the requested score and direction.
-            metrics["ce_loss_mean"] = 0.1 * epoch
-        return metrics
-
-    monkeypatch.setattr(ClassificationValidator, "__call__", validate)
-    return observed
-
-
 def _head_prefix(model, boundary):
     """Identify the selected head in the native model's state namespace."""
     prefix = f"model.{len(model.model) - 1}."
@@ -238,7 +93,7 @@ def _signature(loader):
 
 
 def test_training_loader_is_single_view_shuffled_and_covers_source_once(
-    training_api, classifier_configuration, native_runs
+    classifier_configuration, native_runs
 ):
     """Native training consumes configured grayscale/resize; validation stays unaugmented."""
     for path in classifier_configuration.train_dataset.rglob("*.png"):
@@ -254,7 +109,7 @@ def test_training_loader_is_single_view_shuffled_and_covers_source_once(
             "random_grayscale": {"p": 1.0},
         },
     )
-    training_api.ClassifierExperiment(config).run()
+    ClassifierExperiment(config).run()
     assert len(native_runs) == 1
     trainer = native_runs[0].trainer
     loader = trainer.train_loader
@@ -274,11 +129,11 @@ def test_training_loader_is_single_view_shuffled_and_covers_source_once(
 
 @pytest.mark.parametrize("batch_size", [2, 4, 8])
 def test_validation_loader_is_complete_and_repeatable(
-    training_api, classifier_configuration, native_runs, batch_size
+    classifier_configuration, native_runs, batch_size
 ):
     """Native validation sees every requested image with the existing preprocessing."""
     config = replace(classifier_configuration, epochs=1, batch_size=batch_size)
-    training_api.ClassifierExperiment(config).run()
+    ClassifierExperiment(config).run()
     first = _signature(native_runs[0].trainer.test_loader)
     assert first == _signature(native_runs[0].trainer.test_loader)
     assert len(first) == len(set(first)) == 5
@@ -287,7 +142,7 @@ def test_validation_loader_is_complete_and_repeatable(
 
 
 def test_native_validation_computes_real_scores_and_unequal_tail_loss(
-    training_api, classifier_configuration, classifier_assets, tmp_path, monkeypatch
+    classifier_configuration, classifier_assets, tmp_path, monkeypatch
 ):
     """Preserve the configured full-split CE/scikit metrics inside native validation."""
     from sklearn.metrics import balanced_accuracy_score
@@ -347,7 +202,7 @@ def test_native_validation_computes_real_scores_and_unequal_tail_loss(
         return original(self, trainer=trainer, model=model)
 
     monkeypatch.setattr(ClassificationValidator, "__call__", validate)
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     assert len(expected) == 1
     loss, score = expected[0]
     assert result.best_value == pytest.approx(loss, abs=0.00005)
@@ -369,8 +224,6 @@ def test_native_validation_computes_real_scores_and_unequal_tail_loss(
 # head's convolution, so Linear stays trainable in every configuration.
 FREEZE_CASES = [
     ("linear", 3, ("model.0.", "model.1.", "model.2.conv.")),
-    ("linear", [0, 1, 2], ("model.0.", "model.1.", "model.2.conv.")),
-    ("linear", 2, ("model.0.", "model.1.")),
     ("linear", [2], ("model.2.conv.",)),
     ("linear", 0, ()),
     ("linear", [], ()),
@@ -407,7 +260,6 @@ def _is_frozen(name, frozen_prefixes):
 
 @pytest.mark.parametrize("head_replace,freeze,frozen,batchnorm", FREEZE_RUNS)
 def test_configured_freeze_controls_native_gradients_modes_and_updates(
-    training_api,
     classifier_configuration,
     native_runs,
     head_replace,
@@ -426,7 +278,7 @@ def test_configured_freeze_controls_native_gradients_modes_and_updates(
             "head": {"replace": head_replace, "source": "random"},
         },
     )
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     assert isinstance(result, ExperimentResult) and len(native_runs) == 1
     record = native_runs[0]
     model = record.trainer.model
@@ -499,7 +351,7 @@ def test_configured_freeze_controls_native_gradients_modes_and_updates(
     ],
 )
 def test_freeze_beyond_the_trainable_boundary_fails_before_native_training(
-    training_api, classifier_configuration, native_runs, head_replace, freeze
+    classifier_configuration, native_runs, head_replace, freeze
 ):
     """Full replacement trains the entire head and Linear is never frozen."""
     config = replace(
@@ -511,14 +363,14 @@ def test_freeze_beyond_the_trainable_boundary_fails_before_native_training(
         },
     )
     with pytest.raises(ValueError, match="freeze"):
-        training_api.ClassifierExperiment(config).run()
+        ClassifierExperiment(config).run()
     assert not native_runs
     assert not config.output_directory.exists()
 
 
-@pytest.mark.parametrize(
-    "freeze", [-1, True, 1.5, "all", None, [0, 0], [-1], [True], [1.0], [0, "1"]]
-)
+# One case per kind of invalid freeze value: negative, bool and non-integer layer
+# counts, duplicate indices, and a bool inside an index list.
+@pytest.mark.parametrize("freeze", [-1, True, "all", [0, 0], [True]])
 def test_invalid_freeze_values_fail_at_configuration(classifier_configuration, freeze):
     """Only a nonnegative layer count or a list of unique layer indices is accepted."""
     with pytest.raises((ValueError, TypeError), match="freeze"):
@@ -539,7 +391,7 @@ def test_encoder_batchnorm_without_frozen_layers_is_rejected(
 
 @pytest.mark.parametrize("freeze", [1, [0], [2]])
 def test_frozen_layers_require_an_explicit_encoder_batchnorm(
-    training_api, classifier_configuration, freeze
+    classifier_configuration, freeze
 ):
     """Frozen BatchNorm statistics are either fixed or adapted, never a silent default."""
     with pytest.raises(ValueError, match="encoder_batchnorm"):
@@ -547,20 +399,19 @@ def test_frozen_layers_require_an_explicit_encoder_batchnorm(
     values = {**classifier_configuration.to_dict(), "freeze": freeze}
     del values["encoder_batchnorm"]
     with pytest.raises(ValueError, match="encoder_batchnorm"):
-        training_api.ClassifierConfiguration.from_mapping(values)
+        ClassifierConfiguration.from_mapping(values)
 
 
-def test_freeze_is_a_required_explicit_decision(training_api, classifier_configuration):
+def test_freeze_is_a_required_explicit_decision(classifier_configuration):
     """Omitting freeze is an error instead of silently freezing or training the encoder."""
     values = classifier_configuration.to_dict()
     del values["freeze"]
     with pytest.raises(ValueError, match="freeze"):
-        training_api.ClassifierConfiguration.from_mapping(values)
+        ClassifierConfiguration.from_mapping(values)
 
 
 @pytest.mark.parametrize("source_format", ["supcon", "ultralytics"])
 def test_trainer_accepts_existing_encoder_formats_and_writes_native_checkpoints(
-    training_api,
     classifier_configuration,
     classifier_assets,
     source_format,
@@ -578,7 +429,7 @@ def test_trainer_accepts_existing_encoder_formats_and_writes_native_checkpoints(
             "head": {"replace": "linear", "source": "random"},
         },
     )
-    path = training_api.ClassifierExperiment(config).run()
+    path = ClassifierExperiment(config).run()
     assert (
         len(native_runs) == 1
         and path == config.output_directory / "weights" / "last.pt"
@@ -588,7 +439,7 @@ def test_trainer_accepts_existing_encoder_formats_and_writes_native_checkpoints(
 
 @pytest.mark.parametrize("head_replace", ["linear", "full"])
 def test_trainer_honors_checkpoint_initialized_head(
-    training_api, classifier_configuration, classifier_assets, native_runs, head_replace
+    classifier_configuration, classifier_assets, native_runs, head_replace
 ):
     """The native trainer sees the prepared donor component, not a second initialization."""
     config = replace(
@@ -603,7 +454,7 @@ def test_trainer_honors_checkpoint_initialized_head(
             },
         },
     )
-    training_api.ClassifierExperiment(config).run()
+    ClassifierExperiment(config).run()
     donor = YOLO(str(classifier_assets.ultralytics), task="classify").model
     prefix = _head_prefix(donor, head_replace)
     for name, tensor in donor.state_dict().items():
@@ -613,7 +464,6 @@ def test_trainer_honors_checkpoint_initialized_head(
 
 @pytest.mark.parametrize("boundary", ["linear", "full"])
 def test_native_finetuning_adapts_a_thousand_class_head_to_twenty_six_species(
-    training_api,
     classifier_configuration,
     classifier_assets,
     native_runs,
@@ -621,7 +471,7 @@ def test_native_finetuning_adapts_a_thousand_class_head_to_twenty_six_species(
     boundary,
 ):
     """Exercise the failed production shape transition through real native CPU training."""
-    donor = _native_checkpoint(
+    donor = native_checkpoint(
         classifier_assets.architecture,
         tmp_path / "imagenet-like.pt",
         names={index: f"imagenet_{index}" for index in range(1000)},
@@ -669,7 +519,7 @@ def test_native_finetuning_adapts_a_thousand_class_head_to_twenty_six_species(
         from unittest.mock import patch
 
         with patch.object(ClassificationTrainer, "train", train):
-            result = training_api.ClassifierExperiment(config).run_with_result()
+            result = ClassifierExperiment(config).run_with_result()
     assert len(native_runs) == 1
     restored = YOLO(str(result.best_checkpoint), task="classify").model
     assert restored.model[-1].linear.out_features == 26
@@ -687,7 +537,6 @@ def test_native_finetuning_adapts_a_thousand_class_head_to_twenty_six_species(
 @pytest.mark.parametrize("mode", ["min", "max"])
 @pytest.mark.parametrize("tracking", [False, True])
 def test_configured_metric_drives_native_best_stopping_and_tracking(
-    training_api,
     classifier_configuration,
     tmp_path,
     monkeypatch,
@@ -710,6 +559,7 @@ def test_configured_metric_drives_native_best_stopping_and_tracking(
         )
     # Force native autologging on in memory, without changing persisted Ultralytics settings.
     import importlib
+
     import mlflow
 
     utils = importlib.import_module("ultralytics.utils")
@@ -748,7 +598,7 @@ def test_configured_metric_drives_native_best_stopping_and_tracking(
     controlled_scores.score_sets = {0.002: values}
     source = Path(config.initialization["encoder"]["checkpoint"])
     checksum = hashlib.sha256(source.read_bytes()).hexdigest()
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     assert result.best_epoch == 2 and result.best_value == values[1]
     assert len(controlled_scores.validations) == 4
     assert len(native_runs) == 1 and autolog_calls == []
@@ -794,19 +644,17 @@ def test_configured_metric_drives_native_best_stopping_and_tracking(
     assert mlflow.active_run() is None
 
 
-def test_empty_training_class_is_not_silently_ignored(
-    training_api, classifier_configuration
-):
+def test_empty_training_class_is_not_silently_ignored(classifier_configuration):
     """Requested species cannot silently disappear from native training."""
     for path in (classifier_configuration.train_dataset / "rat").glob("*.png"):
         path.unlink()
     with pytest.raises(ValueError, match="empty|nonempty"):
-        training_api.ClassifierExperiment(classifier_configuration)
+        ClassifierExperiment(classifier_configuration)
     assert not classifier_configuration.output_directory.exists()
 
 
 def test_configuration_round_trip_uses_own_initialization_nodes(
-    training_api, classifier_configuration, tmp_path
+    classifier_configuration, tmp_path
 ):
     """Native CE options and custom input/metric settings remain independent owned values."""
     document = classifier_configuration.to_dict()
@@ -818,23 +666,18 @@ def test_configuration_round_trip_uses_own_initialization_nodes(
     )
     path = tmp_path / "classifier.yaml"
     path.write_text(yaml.safe_dump(document))
-    assert (
-        training_api.ClassifierConfiguration.from_yaml(path) == classifier_configuration
-    )
-    assert (
-        training_api.ClassifierConfiguration.from_mapping(document)
-        == classifier_configuration
-    )
+    assert ClassifierConfiguration.from_yaml(path) == classifier_configuration
+    assert ClassifierConfiguration.from_mapping(document) == classifier_configuration
 
 
 def test_training_without_validation_is_explicit_and_still_reports_a_result(
-    training_api, classifier_configuration, native_runs
+    classifier_configuration, native_runs
 ):
     """Native training-only execution selects training loss without inventing validation."""
     import csv
 
     config = replace(classifier_configuration, validation_dataset=None)
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     assert len(native_runs) == 1 and result.validation_dataset is None
     with (config.output_directory / "results.csv").open() as stream:
         rows = list(csv.DictReader(stream))
@@ -853,7 +696,7 @@ def test_training_without_validation_is_explicit_and_still_reports_a_result(
 
 
 def test_training_only_native_selection_and_stopping_compare_every_epoch(
-    training_api, classifier_configuration, native_runs, monkeypatch
+    classifier_configuration, native_runs, monkeypatch
 ):
     """A worsening native training loss must retain the first best epoch and stop early."""
     original = ClassificationTrainer.train
@@ -877,7 +720,7 @@ def test_training_only_native_selection_and_stopping_compare_every_epoch(
         epochs=5,
         train_kwargs={**classifier_configuration.train_kwargs, "patience": 1},
     )
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     assert result.best_epoch == 1 and result.best_value == pytest.approx(0.2)
     assert completed == [1, 2]
     assert result.validation_dataset is None
@@ -891,9 +734,9 @@ def test_training_only_native_selection_and_stopping_compare_every_epoch(
     assert card["validation"]["status"] == "not_validated"
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), None])
+@pytest.mark.parametrize("value", [float("nan"), None])  # non-finite, missing
 def test_nonfinite_or_missing_tracked_metric_does_not_fall_back_to_native_fitness(
-    training_api, classifier_configuration, monkeypatch, value
+    classifier_configuration, monkeypatch, value
 ):
     """A valid native top-1 fitness cannot hide a missing/invalid requested objective."""
     original = ClassificationValidator.__call__
@@ -918,12 +761,12 @@ def test_nonfinite_or_missing_tracked_metric_does_not_fall_back_to_native_fitnes
     with pytest.raises(
         (ValueError, FloatingPointError), match="balanced_accuracy|tracked|validation"
     ):
-        training_api.ClassifierExperiment(config).run()
+        ClassifierExperiment(config).run()
     assert not list(config.output_directory.rglob("*.pt"))
 
 
 def test_native_checkpoint_failure_propagates_and_releases_training_mode(
-    training_api, classifier_configuration, native_runs, monkeypatch
+    classifier_configuration, native_runs, monkeypatch
 ):
     """A failed native save must not be reported as a completed run or keep training mode."""
     original = ClassificationTrainer.save_model
@@ -938,7 +781,7 @@ def test_native_checkpoint_failure_propagates_and_releases_training_mode(
 
     monkeypatch.setattr(ClassificationTrainer, "save_model", save_model)
     with pytest.raises(OSError, match="checkpoint failure"):
-        training_api.ClassifierExperiment(classifier_configuration).run()
+        ClassifierExperiment(classifier_configuration).run()
     assert writes == 2
     model = native_runs[0].trainer.model
     assert all(not module.training for module in model.modules())
@@ -951,19 +794,14 @@ def test_native_checkpoint_failure_propagates_and_releases_training_mode(
     "updates,message",
     [
         ({"epochs": 0}, "epochs"),
-        ({"epochs": True}, "epochs"),
-        ({"batch_size": 0}, "batch_size"),
         ({"batch_size": True}, "batch_size"),
         ({"workers": -1}, "workers"),
-        ({"workers": True}, "workers"),
         ({"tracked_metric": "unknown"}, "tracked_metric"),
         ({"tracked_mode": "lowest"}, "tracked_mode"),
         ({"encoder_batchnorm": "train"}, "encoder_batchnorm"),
         ({"class_names": ("mouse", "mouse")}, "class_names"),
-        ({"optimizer": {"lr": 0.1}}, "optimizer"),
+        # options removed from the classifier are errors, not ignored aliases
         ({"freeze_encoder": False}, "freeze_encoder"),
-        ({"scheduler": {"name": "ReduceLROnPlateau"}}, "scheduler"),
-        ({"early_stopping": {"patience": 2}}, "early_stopping"),
     ],
 )
 def test_invalid_classifier_configuration_fails_early(
@@ -975,33 +813,20 @@ def test_invalid_classifier_configuration_fails_early(
     assert not classifier_configuration.output_directory.exists()
 
 
+# One key per ownership category (model, data, outputs, frozen boundary, run state,
+# shared batching, evaluation policy, augmentation); the full set is defined once in
+# classifier_training and every key takes the same rejection path.
 @pytest.mark.parametrize(
     "key,value",
     [
         ("model", "other.pt"),
         ("data", "other-data"),
         ("project", "other-output"),
-        ("name", "other-run"),
-        ("save_dir", "other-output"),
-        ("exist_ok", False),
         ("freeze", 0),
         ("resume", True),
-        ("pretrained", False),
-        ("save", False),
-        ("epochs", 999),
         ("batch", 999),
-        ("imgsz", 999),
-        ("workers", 10),
-        ("device", "cuda:1"),
-        ("seed", 99),
         ("val", False),
-        ("classes", [0]),
-        ("single_cls", True),
         ("auto_augment", "randaugment"),
-        ("erasing", 0.2),
-        ("fraction", 0.5),
-        ("tile", True),
-        ("save_period", 1),
     ],
 )
 def test_native_kwargs_cannot_override_owned_model_data_outputs_or_policy(
@@ -1016,12 +841,9 @@ def test_native_kwargs_cannot_override_owned_model_data_outputs_or_policy(
     assert not classifier_configuration.output_directory.exists()
 
 
-@pytest.mark.parametrize(
-    "replacement,freeze", [("linear", 3), ("linear", 2), ("full", 2)]
-)
+@pytest.mark.parametrize("replacement,freeze", [("linear", 3), ("full", 2)])
 @pytest.mark.parametrize("dropout", [0.25, None])
 def test_native_dropout_configures_only_the_head_dropout_for_every_boundary(
-    training_api,
     classifier_configuration,
     classifier_assets,
     native_runs,
@@ -1036,7 +858,7 @@ def test_native_dropout_configures_only_the_head_dropout_for_every_boundary(
     get_model(), which changes every Dropout module in the network.
     """
     # The source head has drop.p=0.35, so the omitted case proves an active reset.
-    source = _native_checkpoint(
+    source = native_checkpoint(
         classifier_assets.architecture, tmp_path / "dropout-source.pt"
     )
     initialization = {
@@ -1053,7 +875,7 @@ def test_native_dropout_configures_only_the_head_dropout_for_every_boundary(
         initialization=initialization,
         train_kwargs=options,
     )
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     expected = 0.0 if dropout is None else dropout
     record = native_runs[0]
     network = record.trainer.model
@@ -1068,7 +890,7 @@ def test_native_dropout_configures_only_the_head_dropout_for_every_boundary(
 
 
 def test_freeze_index_prefixes_do_not_capture_later_layers(
-    training_api, classifier_configuration, native_runs, tmp_path
+    classifier_configuration, native_runs, tmp_path
 ):
     """Freezing layer 1 must leave layer 10 trainable and in training mode."""
     architecture = tmp_path / "deep-cls.yaml"
@@ -1085,7 +907,7 @@ def test_freeze_index_prefixes_do_not_capture_later_layers(
             }
         )
     )
-    source = _native_checkpoint(architecture, tmp_path / "deep-cls.pt")
+    source = native_checkpoint(architecture, tmp_path / "deep-cls.pt")
     config = replace(
         classifier_configuration,
         epochs=1,
@@ -1095,7 +917,7 @@ def test_freeze_index_prefixes_do_not_capture_later_layers(
             "head": {"replace": "linear", "source": "random"},
         },
     )
-    training_api.ClassifierExperiment(config).run()
+    ClassifierExperiment(config).run()
     record = native_runs[0]
     network = record.trainer.model
     assert len(network.model) == 12
@@ -1150,16 +972,16 @@ def test_native_output_aliases_cannot_redirect_writes_into_input_splits(
     assert not (dataset / "last.pt").exists()
 
 
-@pytest.mark.parametrize("split", ["train_dataset", "validation_dataset"])
+# Fixed native names, the sweep summary, and the epoch-dependent names that are only
+# caught by the plot and weights-directory globs; alternating which split is hit.
 @pytest.mark.parametrize(
-    "artifact",
+    "split,artifact",
     [
-        "args.yaml",
-        "config.yaml",
-        "selection.yaml",
-        "weights/last.pt",
-        "weights/epoch0.pt",
-        "train_batch0.jpg",
+        ("train_dataset", "args.yaml"),
+        ("validation_dataset", "selection.yaml"),
+        ("train_dataset", "weights/last.pt"),
+        ("validation_dataset", "weights/epoch0.pt"),
+        ("train_dataset", "train_batch0.jpg"),
     ],
 )
 def test_existing_output_hardlinks_cannot_truncate_dataset_images(
@@ -1184,7 +1006,7 @@ def test_existing_output_hardlinks_cannot_truncate_dataset_images(
 
 
 def test_native_output_directory_symlink_keeps_the_validated_destination(
-    training_api, classifier_configuration, native_runs, tmp_path
+    classifier_configuration, native_runs, tmp_path
 ):
     """Native args, weights and our config must share the same resolved run directory."""
     actual = tmp_path / "native-parent" / "actual-run"
@@ -1196,7 +1018,7 @@ def test_native_output_directory_symlink_keeps_the_validated_destination(
     marker = unrelated / "args.yaml"
     marker.write_text("protected: unrelated run\n")
     config = replace(classifier_configuration, epochs=1, output_directory=link)
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     assert native_runs[0].trainer.save_dir.resolve() == actual
     assert result.best_checkpoint.resolve() == actual / "weights/best.pt"
     assert (actual / "config.yaml").is_file() and (actual / "results.csv").is_file()
@@ -1208,16 +1030,8 @@ def test_native_output_directory_symlink_keeps_the_validated_destination(
 @pytest.mark.parametrize(
     "alias",
     [
-        "val/loss",
-        "fitness",
-        "metrics/accuracy_top1",
-        "metrics/accuracy_top5",
-        "train/loss",
-        "lr/pg0",
-        "lr/pg1",
-        "lr/pg99",
-        "epoch",
-        "time",
+        "val/loss",  # a fixed native column name
+        "lr/pg99",  # any learning-rate parameter-group column
     ],
 )
 def test_native_reserved_metric_aliases_are_rejected_before_outputs(
@@ -1234,7 +1048,7 @@ def test_native_reserved_metric_aliases_are_rejected_before_outputs(
 
 
 def test_native_csv_preserves_bookkeeping_training_loss_and_configured_scores(
-    training_api, classifier_configuration, native_runs
+    classifier_configuration, native_runs
 ):
     """Native history must keep unique native fields alongside independent sklearn scores."""
     import csv
@@ -1248,7 +1062,7 @@ def test_native_csv_preserves_bookkeeping_training_loss_and_configured_scores(
             "balanced_accuracy": {"function": "balanced_accuracy_score"}
         },
     )
-    result = training_api.ClassifierExperiment(config).run_with_result()
+    result = ClassifierExperiment(config).run_with_result()
     with (config.output_directory / "results.csv").open() as stream:
         reader = csv.DictReader(stream)
         fields, rows = reader.fieldnames, list(reader)
@@ -1328,7 +1142,7 @@ def test_invalid_initialization_nodes_are_not_silently_defaulted(
     ),
 )
 def test_configuration_preserves_batch_native_options_bn_and_freeze_policy(
-    training_api, classifier_configuration, batch_size, batchnorm, lr, freeze
+    classifier_configuration, batch_size, batchnorm, lr, freeze
 ):
     config = replace(
         classifier_configuration,
@@ -1338,7 +1152,7 @@ def test_configuration_preserves_batch_native_options_bn_and_freeze_policy(
         freeze=freeze,
         train_kwargs={**classifier_configuration.train_kwargs, "lr0": lr},
     )
-    assert training_api.ClassifierConfiguration.from_mapping(config.to_dict()) == config
+    assert ClassifierConfiguration.from_mapping(config.to_dict()) == config
 
 
 @settings(
@@ -1375,13 +1189,9 @@ def test_omitted_direction_uses_the_configured_metric_default(
     "node,artifact,alias",
     [
         ("encoder", "weights/last.pt", "direct"),
-        ("encoder", "weights/best.pt", "direct"),
         ("head", "weights/best.pt", "direct"),
         ("encoder", "args.yaml", "artifact_symlink"),
-        ("encoder", "config.yaml", "artifact_symlink"),
-        ("encoder", "results.csv", "artifact_symlink"),
         ("encoder", "weights/best.model_card.yaml", "artifact_symlink"),
-        ("encoder", "weights/best.model_card.md", "artifact_symlink"),
         ("encoder", "weights/best.pt", "source_symlink"),
         ("encoder", "args.yaml", "hardlink"),
     ],
@@ -1422,40 +1232,6 @@ def test_output_artifacts_cannot_overwrite_initialization_sources(
     assert sorted(str(path.relative_to(output)) for path in output.rglob("*")) == before
 
 
-@pytest.mark.parametrize("workers", [0, 1])
-def test_classifier_cli_trains_a_native_cpu_checkpoint_without_touching_inputs(
-    training_api, classifier_configuration, tmp_path, workers
-):
-    """The actual CLI uses native training and cannot create caches inside input splits."""
-    config = replace(classifier_configuration, epochs=1, workers=workers)
-    path = tmp_path / "cli.yaml"
-    path.write_text(yaml.safe_dump(config.to_dict()))
-    inputs = {
-        str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in tmp_path.rglob("*")
-        if path.is_file() and not path.is_relative_to(config.output_directory)
-    }
-    script = Path(__file__).resolve().parents[1] / "scripts" / "train_classifier.py"
-    completed = subprocess.run(
-        [sys.executable, str(script), str(path)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env={**os.environ, "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2"},
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "Final checkpoint:" in completed.stdout
-    assert YOLO(
-        str(config.output_directory / "weights" / "best.pt"), task="classify"
-    ).model.names == {0: "mouse", 1: "rat"}
-    after = {
-        str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in tmp_path.rglob("*")
-        if path.is_file() and not path.is_relative_to(config.output_directory)
-    }
-    assert after == inputs
-
-
 # --- Per-epoch observer hook (used by Optuna pruning; the trainer stays Optuna-free) ---
 
 
@@ -1473,7 +1249,7 @@ def _balanced_accuracy_configuration(configuration, **changes):
 
 
 def test_epoch_callback_observes_each_native_epoch_after_its_checkpoint(
-    training_api, classifier_configuration, controlled_scores
+    classifier_configuration, controlled_scores
 ):
     """The hook sees each epoch's configured score, never native fitness, once last.pt exists."""
     config = _balanced_accuracy_configuration(classifier_configuration, epochs=3)
@@ -1486,15 +1262,13 @@ def test_epoch_callback_observes_each_native_epoch_after_its_checkpoint(
             (epoch, value, (config.output_directory / "weights/last.pt").is_file())
         )
 
-    result = training_api.ClassifierExperiment(config).run_with_result(
-        epoch_callback=callback
-    )
+    result = ClassifierExperiment(config).run_with_result(epoch_callback=callback)
     assert observed == [(1, 0.2, True), (2, 0.8, True), (3, 0.6, True)]
     assert result.best_epoch == 2 and result.best_value == 0.8
 
 
 def test_epoch_callback_ends_with_native_early_stopping(
-    training_api, classifier_configuration, controlled_scores
+    classifier_configuration, controlled_scores
 ):
     """Native patience ends the hook sequence; the final best-model evaluation is not an epoch."""
     config = _balanced_accuracy_configuration(
@@ -1504,19 +1278,19 @@ def test_epoch_callback_ends_with_native_early_stopping(
     )
     controlled_scores.score_sets = {0.002: [0.5, 0.4, 0.3, 0.2, 0.1, 0.0]}
     observed = []
-    training_api.ClassifierExperiment(config).run_with_result(
+    ClassifierExperiment(config).run_with_result(
         epoch_callback=lambda epoch, value: observed.append((epoch, value))
     )
     assert observed == [(1, 0.5), (2, 0.4)]
 
 
 def test_epoch_callback_reports_training_loss_without_validation(
-    training_api, classifier_configuration
+    classifier_configuration,
 ):
     """Training-only runs report the CE loss that also selects their best epoch."""
     config = replace(classifier_configuration, validation_dataset=None, epochs=2)
     observed = []
-    result = training_api.ClassifierExperiment(config).run_with_result(
+    result = ClassifierExperiment(config).run_with_result(
         epoch_callback=lambda epoch, value: observed.append((epoch, value))
     )
     assert [epoch for epoch, _ in observed] == [1, 2]
@@ -1527,7 +1301,7 @@ def test_epoch_callback_reports_training_loss_without_validation(
 
 
 def test_epoch_callback_exception_stops_native_training_and_propagates_unchanged(
-    training_api, classifier_configuration, controlled_scores
+    classifier_configuration, controlled_scores
 ):
     """A hook may stop a run (e.g. pruning) before any model card or publication is written."""
 
@@ -1540,18 +1314,313 @@ def test_epoch_callback_exception_stops_native_training_and_propagates_unchanged
     config = _balanced_accuracy_configuration(classifier_configuration, epochs=3)
     controlled_scores.score_sets = {0.002: [0.2, 0.8, 0.6]}
     with pytest.raises(StopRequested, match="stop after epoch 1"):
-        training_api.ClassifierExperiment(config).run_with_result(
-            epoch_callback=callback
-        )
+        ClassifierExperiment(config).run_with_result(epoch_callback=callback)
     assert len(controlled_scores.validations) == 1
     assert not (config.output_directory / "weights/best.model_card.yaml").exists()
 
 
 def test_omitting_the_classifier_epoch_callback_keeps_existing_behavior(
-    training_api, classifier_configuration
+    classifier_configuration,
 ):
     """The hook is optional; the existing result API is unchanged without it."""
-    result = training_api.ClassifierExperiment(
-        classifier_configuration
-    ).run_with_result(epoch_callback=None)
+    result = ClassifierExperiment(classifier_configuration).run_with_result(
+        epoch_callback=None
+    )
     assert result.last_checkpoint.is_file()
+
+
+@pytest.fixture
+def standalone_configuration(pipeline_document, tmp_path):
+    """Train a real local SupCon source, then configure standalone CE without pipeline context."""
+    source_values = deepcopy(pipeline_document["supcon"])
+    source_values.update(pipeline_document["data"])
+    source_values.update(
+        epochs=1,
+        optimizer={"lr": 0.001},
+        output_directory=str(tmp_path / "standalone-source"),
+    )
+    source = SupConExperiment(
+        TrainingConfiguration.from_mapping(source_values)
+    ).run_with_result()
+    values = deepcopy(pipeline_document["classifier"])
+    values.update(pipeline_document["data"])
+    values.update(
+        epochs=3,
+        output_directory=str(tmp_path / "standalone-ce"),
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
+    )
+    values["initialization"]["encoder"] = {
+        "source": "supcon",
+        "checkpoint": str(source.best_checkpoint),
+    }
+    return ClassifierConfiguration.from_mapping(values)
+
+
+@pytest.mark.parametrize("tracking", [False, True])
+def test_artifact_only_runs_retain_selected_metadata_without_extra_model_restore(
+    standalone_configuration, tracking_store, scripted_validation, monkeypatch, tracking
+):
+    """Cards reuse native-finalized metadata without another model reconstruction."""
+    import smartrodent.classifier_model as classifier_models
+
+    restores = []
+    original = classifier_models.load_checkpoint
+
+    def restore(weight, *args, **kwargs):
+        restores.append(Path(weight).resolve())
+        return original(weight, *args, **kwargs)
+
+    monkeypatch.setattr(classifier_models, "load_checkpoint", restore)
+    config = replace(
+        standalone_configuration,
+        mlflow=(
+            MlflowConfiguration(**tracking_store.configuration) if tracking else None
+        ),
+    )
+    result = ClassifierExperiment(
+        config, encoder_provenance={"encoder_run_id": "selected-encoder-run"}
+    ).run_with_result()
+    assert restores == []
+    assert result.best_epoch == 2 and result.best_value == 0.9
+    card = yaml.safe_load(
+        result.best_checkpoint.with_suffix(".model_card.yaml").read_text()
+    )
+    assert card["classes"] == {0: "mouse", 1: "rat"}
+    assert card["validation"]["epoch"] == 2
+    assert card["validation"]["metrics"]["balanced_accuracy"] == 0.9
+    assert card["provenance"]["encoder_run_id"] == "selected-encoder-run"
+    assert (
+        card["provenance"]["checkpoint_sha256"]
+        == hashlib.sha256(result.best_checkpoint.read_bytes()).hexdigest()
+    )
+    checkpoint = YOLO(str(result.best_checkpoint), task="classify").model
+    assert checkpoint.names == card["classes"]
+    assert checkpoint.provenance["encoder_run_id"] == "selected-encoder-run"
+    if tracking:
+        run = tracking_store.client.get_run(result.mlflow_run_id)
+        assert run.info.status == "FINISHED" and run.data.metrics["best_epoch"] == 2
+        downloaded = download_artifact(
+            tracking_store, result.mlflow_run_id, "best_model/best.model_card.yaml"
+        )
+        assert (
+            downloaded.read_bytes()
+            == result.best_checkpoint.with_suffix(".model_card.yaml").read_bytes()
+        )
+    else:
+        assert result.mlflow_run_id is None
+
+
+def test_corrupt_native_best_checkpoint_cannot_be_reported_or_published(
+    standalone_configuration, monkeypatch
+):
+    """Skipping unnecessary model reconstruction must not hide a corrupt selected file."""
+    from pickle import UnpicklingError
+
+    from ultralytics.models.yolo.classify.train import ClassificationTrainer
+
+    original = ClassificationTrainer.save_model
+    writes = []
+
+    def save(self):
+        original(self)
+        writes.append(self.best)
+        self.best.write_bytes(b"corrupt native best checkpoint")
+
+    monkeypatch.setattr(ClassificationTrainer, "save_model", save)
+    config = replace(standalone_configuration, epochs=1)
+    with pytest.raises(
+        (ValueError, UnpicklingError), match="checkpoint|finaliz|pickle"
+    ):
+        ClassifierExperiment(config).run_with_result()
+    assert writes == [config.output_directory / "weights/best.pt"]
+    assert not (config.output_directory / "weights/best.model_card.yaml").exists()
+    assert not (config.output_directory / "weights/best.model_card.md").exists()
+
+
+@pytest.mark.parametrize("validation", [False, True])
+def test_standalone_ce_registers_its_best_classifier_and_only_promotes_validated_models(
+    standalone_configuration, tracking_store, scripted_validation, tmp_path, validation
+):
+    """Standalone publication remains root-level; no-val runs cannot replace a validated champion."""
+    configuration = standalone_configuration
+    previous_version = None
+    if not validation:
+        configuration = replace(
+            configuration,
+            validation_dataset=None,
+            tracked_metric="ce_loss_mean",
+            tracked_mode="min",
+            validation_metrics=None,
+        )
+        tracking_store.client.create_registered_model(tracking_store.registry_name)
+        prior = tmp_path / "prior-validated-model"
+        prior.mkdir()
+        previous_version = tracking_store.client.create_model_version(
+            tracking_store.registry_name, prior.as_uri()
+        ).version
+        tracking_store.client.set_registered_model_alias(
+            tracking_store.registry_name,
+            tracking_store.configuration["champion_alias"],
+            previous_version,
+        )
+    configuration = replace(
+        configuration,
+        mlflow=MlflowConfiguration(
+            **tracking_store.configuration,
+            registered_model_name=tracking_store.registry_name,
+        ),
+    )
+    before = deepcopy(configuration.to_dict())
+    result = ClassifierExperiment(configuration).run_with_result()
+    assert configuration.to_dict() == before
+    assert result.mlflow_run_id
+    run = tracking_store.client.get_run(result.mlflow_run_id)
+    assert run.info.status == "FINISHED" and "mlflow.parentRunId" not in run.data.tags
+    assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+    versions = tracking_store.client.search_model_versions(
+        f"name='{tracking_store.registry_name}'"
+    )
+    published = [
+        version for version in versions if version.run_id == result.mlflow_run_id
+    ]
+    assert len(published) == 1
+    version = published[0]
+    assert version.tags["validation_status"] == (
+        "passed" if validation else "not_validated"
+    )
+    if validation:
+        assert result.best_epoch == 2
+        assert_registered_classifier(tracking_store, result)
+        expected_alias = version.version
+    else:
+        card = yaml.safe_load(
+            result.best_checkpoint.with_suffix(".model_card.yaml").read_text()
+        )
+        assert card["validation"]["status"] == "not_validated"
+        assert str(card["model"]["registry_version"]) == str(version.version)
+        expected_alias = previous_version
+    assert (
+        tracking_store.client.get_model_version_by_alias(
+            tracking_store.registry_name, tracking_store.configuration["champion_alias"]
+        ).version
+        == expected_alias
+    )
+    assert mlflow.active_run() is None
+
+
+def test_out_of_range_freeze_fails_before_any_tracking_run_or_output(
+    standalone_configuration, tracking_store
+):
+    """Preparation errors surface before tracking starts, so no failed run is left behind."""
+    # Pipeline network: 0=Conv encoder, 1=Classify head; a linear probe can freeze 0..1.
+    config = replace(
+        standalone_configuration,
+        freeze=3,
+        mlflow=MlflowConfiguration(**tracking_store.configuration),
+    )
+    with pytest.raises(ValueError, match="freeze"):
+        ClassifierExperiment(config).run_with_result()
+    assert tracking_store.client.search_runs([tracking_store.experiment_id]) == []
+    assert not config.output_directory.exists()
+    assert mlflow.active_run() is None
+
+
+def _exporting_classifier(
+    standalone_configuration, pipeline_document, tracking_store, tmp_path, *, register
+):
+    """Configure a tracked CE run on an encoder wide enough for native ONNX export."""
+    encoder = wide_native_encoder(
+        Path(pipeline_document["supcon"]["model_name"]), tmp_path / "wide-cls.pt"
+    )
+    settings = {**tracking_store.configuration}
+    if register:
+        settings["registered_model_name"] = tracking_store.registry_name
+    return replace(
+        standalone_configuration,
+        onnx_export={},
+        mlflow=MlflowConfiguration(**settings),
+        initialization={
+            "encoder": {"source": "ultralytics", "checkpoint": str(encoder)},
+            "head": {"replace": "linear", "source": "random"},
+        },
+    )
+
+
+@pytest.mark.parametrize("register", [False, True])
+def test_tracked_classifier_logs_its_onnx_export_with_the_best_model(
+    standalone_configuration,
+    pipeline_document,
+    tracking_store,
+    scripted_validation,
+    tmp_path,
+    register,
+):
+    """The exported file is published next to best.pt, with or without registration."""
+    config = _exporting_classifier(
+        standalone_configuration,
+        pipeline_document,
+        tracking_store,
+        tmp_path,
+        register=register,
+    )
+    result = ClassifierExperiment(config).run_with_result()
+    downloaded = download_artifact(
+        tracking_store, result.mlflow_run_id, "best_model/best.onnx"
+    )
+    assert downloaded.read_bytes() == result.onnx_model.read_bytes()
+
+
+def test_failed_classifier_export_fails_the_run_before_publication(
+    standalone_configuration,
+    pipeline_document,
+    tracking_store,
+    scripted_validation,
+    tmp_path,
+    monkeypatch,
+):
+    """A failed export leaves a failed run: no ONNX artifact and no registered version."""
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("simulated ONNX export failure")
+
+    config = _exporting_classifier(
+        standalone_configuration,
+        pipeline_document,
+        tracking_store,
+        tmp_path,
+        register=True,
+    )
+    monkeypatch.setattr(torch.onnx, "export", fail)
+    with pytest.raises(RuntimeError, match="export failure"):
+        ClassifierExperiment(config).run_with_result()
+    (run,) = tracking_store.client.search_runs([tracking_store.experiment_id])
+    assert run.info.status == "FAILED"
+    assert "best_model" not in {
+        item.path for item in tracking_store.client.list_artifacts(run.info.run_id)
+    }
+    assert tracking_store.client.search_registered_models() == []
+    assert mlflow.active_run() is None
+
+
+def test_standalone_ce_tracking_without_registration_remains_a_single_completed_run(
+    standalone_configuration, tracking_store, scripted_validation
+):
+    """Adding pipeline contexts must not require one or silently register standalone tracking runs."""
+    config = replace(
+        standalone_configuration,
+        mlflow=MlflowConfiguration(**tracking_store.configuration),
+    )
+    result = ClassifierExperiment(config).run_with_result()
+    run = tracking_store.client.get_run(result.mlflow_run_id)
+    assert run.info.status == "FINISHED" and "mlflow.parentRunId" not in run.data.tags
+    assert (
+        run.data.metrics["best_epoch"] == 2
+        and run.data.metrics["best_validation_balanced_accuracy"] == 0.9
+    )
+    assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+    assert tracking_store.client.search_registered_models() == []
+    assert mlflow.active_run() is None

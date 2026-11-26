@@ -3,6 +3,7 @@ import gc
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,7 +11,6 @@ import ollama
 import pandas as pd
 import yaml
 from tqdm.auto import tqdm
-from concurrent.futures import ThreadPoolExecutor
 
 from .base import Filterable
 
@@ -312,7 +312,9 @@ class FilterOllama(VLMFilter):
             not isinstance(options, Mapping)
             or any(not isinstance(key, str) or not key for key in options)
         ):
-            raise ValueError("Ollama options must be a mapping with nonempty string keys")
+            raise ValueError(
+                "Ollama options must be a mapping with nonempty string keys"
+            )
 
         self.client = ollama.Client()
         self.model = model

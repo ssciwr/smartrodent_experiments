@@ -16,7 +16,6 @@ from pydantic import (
     with_config,
 )
 
-
 type Flag = Annotated[bool, Field(strict=True)]
 type Count = Annotated[int, Field(strict=True, gt=0)]
 type NonnegativeInt = Annotated[int, Field(strict=True, ge=0)]
@@ -63,9 +62,9 @@ def _unique_layers(indices):
 
 # Ultralytics' convention: a count N freezes layers 0..N-1, a list names layers.
 # The value is kept as given (not normalized) so saved configs match their source.
-type FreezeLayers = NonnegativeInt | Annotated[
-    list[NonnegativeInt], AfterValidator(_unique_layers)
-]
+type FreezeLayers = (
+    NonnegativeInt | Annotated[list[NonnegativeInt], AfterValidator(_unique_layers)]
+)
 
 
 @with_config(ConfigDict(extra="allow"))

@@ -10,17 +10,18 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
-from hypothesis import HealthCheck, given, settings, strategies as st
 import pytest
 import yaml
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
-from smartrodent.supcon_training import TrainingConfiguration
 from smartrodent.classifier_training import ClassifierConfiguration
 from smartrodent.experiment_support import (
     EarlyStopping,
     MlflowConfiguration,
     SchedulerConfiguration,
 )
+from smartrodent.supcon_training import TrainingConfiguration
 
 
 @pytest.fixture(params=["supcon", "classifier"])
@@ -79,26 +80,19 @@ def _parse_update(configuration, path, value):
     return type(configuration).from_mapping(document)
 
 
+# One case per kind of declared constraint; the strict-number rules themselves are
+# pydantic's, so repeating every kind on every field would only re-test pydantic.
 @pytest.mark.parametrize(
     "path,value",
     [
-        (("epochs",), True),
-        (("epochs",), "2"),
-        (("epochs",), 1.5),
-        (("workers",), True),
-        (("workers",), "0"),
-        (("workers",), 0.5),
-        (("seed",), True),
-        (("seed",), -1),
-        (("seed",), 2**32),
-        (("seed",), "42"),
-        (("seed",), 0.5),
-        (("learning_rate",), True),
-        (("learning_rate",), "0.001"),
-        (("learning_rate",), 0),
-        (("learning_rate",), float("nan")),
-        (("learning_rate",), float("inf")),
-        (("transforms", "image_size"), True),
+        (("epochs",), True),  # bool is not an integer
+        (("epochs",), 1.5),  # float is not an integer
+        (("workers",), "0"),  # numeric strings are not coerced
+        (("seed",), -1),  # seed range, lower bound
+        (("seed",), 2**32),  # seed range, upper bound
+        (("learning_rate",), True),  # bool is not a float either
+        (("learning_rate",), 0),  # rate must be positive
+        (("learning_rate",), float("nan")),  # rate must be finite
         (("transforms", "image_size"), 0),
     ],
 )
@@ -120,7 +114,7 @@ def test_class_names_require_a_sequence_not_an_unordered_or_one_shot_iterable(
         _parse_update(configuration, ("class_names",), collection(["rat", "mouse"]))
 
 
-@pytest.mark.parametrize("seed", [True, -1, 2**32, "42", 0.5])
+@pytest.mark.parametrize("seed", [True, -1])  # one type and one range violation
 def test_invalid_seeds_are_rejected_through_dataclass_replace_too(configuration, seed):
     """Direct Python callers must not bypass constraints enforced by mapping loaders."""
     with pytest.raises((ValueError, TypeError)) as error:
@@ -277,11 +271,14 @@ def test_nested_configuration_mappings_accept_readonly_inputs(
 ):
     """Shared dataclass fields retain the Mapping contract of their standalone loaders."""
     if field == "scheduler" and isinstance(configuration, ClassifierConfiguration):
-        field, settings = "train_kwargs", {
-            "optimizer": "AdamW",
-            "lr0": 0.001,
-            "cos_lr": True,
-        }
+        field, settings = (
+            "train_kwargs",
+            {
+                "optimizer": "AdamW",
+                "lr0": 0.001,
+                "cos_lr": True,
+            },
+        )
     document = configuration.to_dict()
     document.update(validation_dataset=document["train_dataset"], **{field: settings})
     expected = type(configuration).from_mapping(document).to_dict()

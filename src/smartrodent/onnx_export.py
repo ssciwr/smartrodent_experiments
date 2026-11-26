@@ -1,8 +1,8 @@
 """Write shareable ONNX files for trained CE classifiers and SupCon encoders."""
 
+import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
-import hashlib
 from pathlib import Path
 
 import onnx

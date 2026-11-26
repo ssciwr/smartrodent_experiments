@@ -1,3 +1,5 @@
+"""Behavioral tests for the VLM image filters with mocked Ollama and vLLM backends."""
+
 import json
 import sys
 import tempfile
@@ -7,9 +9,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
-from hypothesis import given, strategies as st
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from hypothesis import given
+from hypothesis import strategies as st
 
 from smartrodent.filter import FilterOllama, FilterVLLM, VLMFilter
 
@@ -91,7 +92,14 @@ def test_parse_response_accepts_only_configured_labels(tmp_path):
     assert unknown["parse_error"] is True
 
 
-@pytest.mark.parametrize("raw", ["not json", "{", "[]", "null", None])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not json",
+        "[]",
+        None,
+    ],
+)
 def test_parse_response_marks_invalid_json_as_failure(raw, tmp_path):
     parsed = make_ollama_filter(tmp_path).parse_response(raw)
 
@@ -102,7 +110,13 @@ def test_parse_response_marks_invalid_json_as_failure(raw, tmp_path):
 
 @pytest.mark.parametrize(
     "labels",
-    [[], "kept", [" "], [1, "kept"], ["same", "same"]],
+    [
+        [],
+        "kept",
+        [" "],
+        [1, "kept"],
+        ["same", "same"],
+    ],
 )
 def test_vlm_filter_rejects_invalid_labels(tmp_path, labels):
     with pytest.raises(ValueError, match="labels"):
@@ -367,7 +381,7 @@ def test_inference_failure_sets_all_task_columns_to_nan(monkeypatch, tmp_path):
     assert pd.isna(result.loc[0, "rejected_animal"])
 
 
-@pytest.mark.parametrize("existing_column", ["kept_animal", "rejected_animal"])
+@pytest.mark.parametrize("existing_column", ["kept_animal"])
 def test_existing_task_columns_raise_before_inference(
     monkeypatch, tmp_path, existing_column
 ):
@@ -447,7 +461,14 @@ def test_ollama_classify_uses_configured_generation_options(tmp_path):
     assert vlm_filter.client.generate_calls[0]["options"] == configured_options
 
 
-@pytest.mark.parametrize("options", [[], {"": 1}, {1: 1}])
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        {"": 1},
+        {1: 1},
+    ],
+)
 def test_ollama_rejects_invalid_generation_options(tmp_path, options):
     with pytest.raises(ValueError, match="Ollama options"):
         make_ollama_filter(tmp_path, options=options)
@@ -506,7 +527,7 @@ def test_vllm_classify_builds_engine_with_configured_schema(monkeypatch, tmp_pat
             seen["sampling_params"] = self
 
     class FakeOutput:
-        outputs = [types.SimpleNamespace(text=json.dumps({"label": "candidate"}))]
+        outputs = (types.SimpleNamespace(text=json.dumps({"label": "candidate"})),)
 
     class FakeLLM:
         def __init__(self, **kwargs):

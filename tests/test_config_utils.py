@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from study_test_support import load_tagged_yaml
 
-import smartrodent.config_utils as config_utils
+from smartrodent import config_utils
 
 
 def test_custom_yaml_tags_and_config_expansion():
@@ -70,3 +71,18 @@ def test_coupled_sweep_requires_matching_lengths():
 
     with pytest.raises(ValueError, match="Incompatible lengths"):
         config_utils.ConfigHandler(config)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "lr: !suggest-float {low: 0.1, high: 0.9}\n",
+        "optimizer:\n  lr: !suggest-float {low: 0.1, high: 0.9}\n",
+        "scale: [!suggest-float {low: 0.5, high: 0.9}, 1.0]\n",
+        "seed: !sweep {values: [1, 2]}\nhead: !suggest-categorical {choices: [a, b]}\n",
+    ],
+)
+def test_grid_sweep_expansion_rejects_suggest_tags_without_a_study(text):
+    """Decision: tags outside a study fail clearly instead of leaking into a run config."""
+    with pytest.raises(ValueError, match="tuning"):
+        config_utils.ConfigHandler(load_tagged_yaml(text))

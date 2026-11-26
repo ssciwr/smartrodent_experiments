@@ -260,7 +260,7 @@ class ConfigHandler:
             ]
         else:
             # postprocess the coupled targets to augment the sweep targets
-            for k, v in coupled_targets.items():
+            for v in coupled_targets.values():
                 if len(v["values"]) != len(sweep_targets[tuple(v["target"])]["values"]):
                     raise ValueError(
                         f"Incompatible lengths for coupled-sweep {v['target']}"
@@ -488,8 +488,7 @@ class ConfigHandler:
         for v in sweep_targets.values():
             lookup_keys.append(v["path"])
             if "partner_path" in v:
-                for p in v["partner_path"]:
-                    lookup_keys.append(p)
+                lookup_keys.extend(v["partner_path"])
 
         # TODO: look into getting rid of this step. There's optimization potential here,
         # but it works for now.
@@ -497,7 +496,7 @@ class ConfigHandler:
         lists = [
             (
                 sweep_targets[k]["values"],
-                sweep_targets[k]["partner"] if "partner" in sweep_targets[k] else None,
+                sweep_targets[k].get("partner", None),
             )
             for k in sweep_keys
         ]

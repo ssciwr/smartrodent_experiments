@@ -406,17 +406,17 @@ class SupConExperiment:
             batch_size=config.batch_size,
             length_before_new_iter=config.samples_per_epoch,
         )
-        options = dict(
-            dataset=dataset,
-            sampler=sampler,
-            batch_size=config.batch_size,
-            num_workers=config.workers,
-            pin_memory=torch.device(config.device).type == "cuda",
-            drop_last=True,
-            collate_fn=collate_views,
-            generator=torch.Generator().manual_seed(config.seed),
-            persistent_workers=config.workers > 0,
-        )
+        options = {
+            "dataset": dataset,
+            "sampler": sampler,
+            "batch_size": config.batch_size,
+            "num_workers": config.workers,
+            "pin_memory": torch.device(config.device).type == "cuda",
+            "drop_last": True,
+            "collate_fn": collate_views,
+            "generator": torch.Generator().manual_seed(config.seed),
+            "persistent_workers": config.workers > 0,
+        }
         if config.workers > 0:
             options["prefetch_factor"] = config.prefetch_factor
         return dataset, DataLoader(**options)
@@ -443,16 +443,16 @@ class SupConExperiment:
             indices = list(sampler)
         finally:
             np.random.set_state(numpy_state)
-        options = dict(
-            dataset=dataset,
-            sampler=indices,
-            batch_size=config.batch_size,
-            num_workers=config.workers,
-            pin_memory=torch.device(config.device).type == "cuda",
-            drop_last=True,
-            generator=torch.Generator().manual_seed(config.seed),
-            persistent_workers=config.workers > 0,
-        )
+        options = {
+            "dataset": dataset,
+            "sampler": indices,
+            "batch_size": config.batch_size,
+            "num_workers": config.workers,
+            "pin_memory": torch.device(config.device).type == "cuda",
+            "drop_last": True,
+            "generator": torch.Generator().manual_seed(config.seed),
+            "persistent_workers": config.workers > 0,
+        }
         if config.workers > 0:
             options["prefetch_factor"] = config.prefetch_factor
         return DataLoader(**options)

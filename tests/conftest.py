@@ -1,7 +1,19 @@
-"""Shared temporary-image fixtures for inference and dataset creation tests."""
+"""Shared fixtures for the whole suite.
+
+Fixtures used by more than one test module live here or in the support plugins
+below; test modules request them by parameter name and never import them, so no
+test module depends on another test module. Plugin autouse fixtures (such as
+``quiet_optuna``) therefore apply to every test.
+"""
 
 import pytest
 from PIL import Image
+
+pytest_plugins = [
+    "bundle_test_support",
+    "study_test_support",
+    "training_test_support",
+]
 
 
 @pytest.fixture

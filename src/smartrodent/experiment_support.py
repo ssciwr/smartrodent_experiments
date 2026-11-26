@@ -7,23 +7,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import ConfigDict, validate_call
-from pydantic.dataclasses import dataclass
-
 import mlflow
 import mlflow.pytorch
-from mlflow import MlflowClient
 import numpy as np
 import sklearn.metrics
 import torch
-from smartrodent.training_validation import (
-    Count,
-    Nonblank,
-    NonnegativeNumber,
-    PlateauSettings,
-    ValidationMetrics,
-    parse_settings,
-)
+from mlflow import MlflowClient
+from pydantic import ConfigDict, validate_call
+from pydantic.dataclasses import dataclass
 from torchvision.transforms.v2 import (
     Compose,
     PILToTensor,
@@ -34,6 +25,15 @@ from torchvision.transforms.v2 import (
     RandomResizedCrop,
     Resize,
     ToDtype,
+)
+
+from smartrodent.training_validation import (
+    Count,
+    Nonblank,
+    NonnegativeNumber,
+    PlateauSettings,
+    ValidationMetrics,
+    parse_settings,
 )
 
 

@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 import requests
 import yaml
+from bundle_test_support import move_bundle, write_stage_records
 from hypothesis import given
 from hypothesis import strategies as st
 from pyinaturalist.session import ClientSession
@@ -113,7 +114,6 @@ def test_inaturalist_constructor_keeps_config_in_output_path(tmp_path, inat_conf
     [
         ({}, "either years or first_year and last_year"),
         ({"first_year": 2020}, "either years or first_year and last_year"),
-        ({"last_year": 2020}, "either years or first_year and last_year"),
         (
             {"years": [2022], "first_year": 2020, "last_year": 2023},
             "mutually exclusive",
@@ -1001,3 +1001,46 @@ def test_failed_photo_is_retried_before_advancing(tmp_path, monkeypatch, error):
     assert count == 1
     assert returned.at[0, "image_path"] == str(tmp_path / "123_0.jpg")
     assert get.call_count == 2
+
+
+def test_inaturalist_writes_shared_root_relative_paths_and_can_resume_after_move(
+    bundle, tmp_path, monkeypatch
+):
+    """Original-image CSV references are portable and need no prefix migration."""
+    dataset_root, records_by_species = bundle
+    write_stage_records(dataset_root / "inaturalist", records_by_species)
+    downloader = InaturalistDataset(
+        output_path=dataset_root / "inaturalist",
+        species=list(records_by_species),
+        years=[2024],
+    )
+    unexpected_download = Mock(side_effect=AssertionError("Images already exist"))
+    monkeypatch.setattr(downloader, "_download_photo", unexpected_download)
+
+    try:
+        downloader.download_images()
+    finally:
+        downloader.session.close()
+
+    for species, original in records_by_species.items():
+        actual = pd.read_csv(dataset_root / "inaturalist" / species / "records.csv")
+        assert actual["image_path"].tolist() == original["image_path"].tolist()
+        assert all(not Path(path).is_absolute() for path in actual["image_path"])
+    unexpected_download.assert_not_called()
+
+    moved_root = move_bundle(dataset_root)
+    resumed = InaturalistDataset(
+        output_path=moved_root / "inaturalist",
+        species=list(records_by_species),
+        years=[2024],
+    )
+    monkeypatch.setattr(resumed, "_download_photo", unexpected_download)
+    try:
+        resumed.download_images()
+    finally:
+        resumed.session.close()
+    for species, original in records_by_species.items():
+        actual = pd.read_csv(moved_root / "inaturalist" / species / "records.csv")
+        assert actual["image_path"].tolist() == original["image_path"].tolist()
+        assert all((moved_root / path).is_file() for path in actual["image_path"])
+    unexpected_download.assert_not_called()

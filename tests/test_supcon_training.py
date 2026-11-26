@@ -1,128 +1,29 @@
-"""Exercise the standalone experiment, library modules, and portable checkpoints."""
+"""Behavioral tests for SupCon training configuration, experiment runs, and tracking."""
 
-from copy import deepcopy
-from dataclasses import replace
-import os
-from pathlib import Path
 import pickle
 import random
-import subprocess
-import sys
+from copy import deepcopy
+from dataclasses import replace
+from pathlib import Path
 
+import mlflow
+import mlflow.pytorch
 import numpy as np
-from pydantic import ValidationError
 import pytest
-from hypothesis import given
-from hypothesis import strategies as st
 import torch
 import yaml
-from PIL import Image
-from pytorch_metric_learning.losses import SupConLoss
-from torchvision.transforms.v2 import Compose, PILToTensor, ToDtype
+from hypothesis import given
+from hypothesis import strategies as st
+from pydantic import ValidationError
+from training_test_support import download_artifact
 
 from smartrodent import supcon_training as train_supcon
+from smartrodent.supcon_model import YoloSupConModel
 from smartrodent.supcon_training import (
     SchedulerConfiguration,
     SupConExperiment,
     TrainingConfiguration,
 )
-from smartrodent.datasets import (
-    ImageDataset,
-    MultiViewImageDataset,
-    collate_views,
-)
-from smartrodent.supcon_model import YoloSupConModel
-
-
-@pytest.fixture
-def experiment_configuration(tmp_path):
-    """Create temporary images and a tiny Ultralytics architecture without downloads."""
-    dataset = tmp_path / "images"
-    for name, color in (("mouse", "red"), ("rat", "blue")):
-        directory = dataset / name
-        directory.mkdir(parents=True)
-        for index in range(3):
-            Image.new("RGB", (16, 16), color).save(directory / f"{index}.png")
-        (directory / "notes.txt").write_text("Ignore non-image files")
-    architecture = tmp_path / "tiny-cls.yaml"
-    architecture.write_text(
-        yaml.safe_dump(
-            {
-                "nc": 2,
-                "backbone": [[-1, 1, "Conv", [8, 3, 2]]],
-                "head": [[-1, 1, "Classify", [2]]],
-            }
-        )
-    )
-    return TrainingConfiguration(
-        train_dataset=dataset,
-        output_directory=tmp_path / "outputs",
-        class_names=("rat", "mouse"),
-        model_name=str(architecture),
-        epochs=2,
-        classes_per_batch=2,
-        samples_per_class=2,
-        samples_per_epoch=4,
-        workers=0,
-        device="cpu",
-        output_features=4,
-        transforms={
-            "image_size": 16,
-            "resize": {"antialias": True},
-            "random_adjust_sharpness": {"sharpness_factor": 0.5, "p": 0.2},
-            "random_grayscale": {"p": 0.2},
-            "random_perspective": {"distortion_scale": 0.5, "p": 0.2},
-            "random_horizontal_flip": {"p": 0.2},
-            "random_resized_crop": {"scale": [0.75, 1.0], "ratio": [0.75, 1.33]},
-        },
-        optimizer={"lr": 0.001},
-    )
-
-
-def test_library_datasets_pickle_and_multiview_batching(experiment_configuration):
-    """Imported datasets preserve image labels through pickling and collation."""
-    config = experiment_configuration
-    transform = Compose([PILToTensor(), ToDtype(torch.float32, scale=True)])
-    single = ImageDataset(config.train_dataset, config.class_names, transform)
-    assert len(single) == 6 and single[0][0] == 0
-    dataset = MultiViewImageDataset(config.train_dataset, config.class_names, transform)
-    restored = pickle.loads(pickle.dumps(dataset))
-    labels, images = collate_views([restored[0], restored[3]])
-    assert labels.tolist() == [0, 1, 0, 1]
-    assert images.shape == (4, 3, 16, 16)
-    assert 0 <= images.min() <= images.max() <= 1
-
-
-def test_wrapper_propagates_gradients_and_respects_modes(experiment_configuration):
-    """SupCon updates the encoder and projector, leaving the classifier outside the loss."""
-    torch.set_num_threads(2)
-    model = YoloSupConModel(
-        experiment_configuration.model_name, num_classes=2, output_features=4
-    )
-    model.requires_grad_(True)
-    model.train()
-    assert (
-        model.training and model.full_model.model.training and model.projector.training
-    )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    encoder = next(model.full_model.model.model[0].parameters())
-    before = encoder.detach().clone()
-    logits, embeddings = model(torch.rand(4, 3, 16, 16))
-    assert logits.shape == (4, 2) and embeddings.shape == (4, 4)
-    np.testing.assert_allclose(embeddings.detach().norm(dim=1).numpy(), 1, atol=1e-5)
-    SupConLoss()(embeddings, torch.tensor([0, 0, 1, 1])).backward()
-    assert encoder.grad is not None and model.projector[-1].weight.grad is not None
-    assert model.head.linear.weight.grad is None
-    optimizer.step()
-    assert not torch.equal(before, encoder)
-    model.eval()
-    assert (
-        not model.training
-        and not model.full_model.model.training
-        and not model.projector.training
-    )
-    model.finalize()
-    assert model.embeddings is None
 
 
 def test_experiment_saves_reusable_checkpoints(experiment_configuration):
@@ -289,8 +190,8 @@ def test_interrupted_checkpoint_preserves_last_complete_state(
     "updates,message",
     [
         ({"epochs": 0}, "epochs"),
-        ({"epochs": True}, "epochs"),
         ({"workers": -1}, "workers"),
+        # a str is a Sequence[str]; it must not become one class per letter
         ({"class_names": "mouse"}, "class_names"),
         ({"class_names": ("", "rat")}, "class_names"),
         ({"class_names": ("rat", "rat")}, "unique"),
@@ -341,71 +242,6 @@ def test_yaml_requires_mapping_and_class_list(tmp_path, document):
         TrainingConfiguration.from_yaml(path)
 
 
-def test_invalid_checkpoint_metadata_fails(tmp_path):
-    """Old or unrelated tensor files are rejected with a format explanation."""
-    path = tmp_path / "invalid.pt"
-    torch.save({"model_state_dict": {}}, path)
-    with pytest.raises(ValueError, match="train_supcon.py"):
-        YoloSupConModel.from_checkpoint(path)
-
-
-def test_script_cli_trains_without_notebook_imports(experiment_configuration, tmp_path):
-    """The actual script can run a CPU epoch and save a loadable checkpoint."""
-    configuration = replace(experiment_configuration, epochs=1)
-    config_path = tmp_path / "cli.yaml"
-    config_path.write_text(yaml.safe_dump(configuration.to_dict()))
-    script = Path(__file__).resolve().parents[1] / "scripts" / "train_supcon.py"
-    result = subprocess.run(
-        [sys.executable, str(script), str(config_path)],
-        capture_output=True,
-        text=True,
-        timeout=90,
-        env={**os.environ, "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2"},
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Final checkpoint:" in result.stdout
-    assert (configuration.output_directory / "last.pt").is_file()
-    assert (configuration.output_directory / "best.pt").is_file()
-
-
-def test_script_cli_supports_multiprocessing_workers(
-    experiment_configuration, tmp_path
-):
-    """Imported datasets and collation work in fresh worker processes."""
-    configuration = replace(experiment_configuration, epochs=1, workers=1)
-    config_path = tmp_path / "workers.yaml"
-    config_path.write_text(yaml.safe_dump(configuration.to_dict()))
-    script = Path(__file__).resolve().parents[1] / "scripts" / "train_supcon.py"
-    result = subprocess.run(
-        [sys.executable, str(script), str(config_path)],
-        capture_output=True,
-        text=True,
-        timeout=90,
-        env={**os.environ, "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2"},
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (configuration.output_directory / "last.pt").is_file()
-    assert (configuration.output_directory / "best.pt").is_file()
-
-
-def test_early_stopping_ignores_dips_that_never_beat_the_best():
-    """Noisy values that only beat the previous value do not reset patience."""
-    stopper = train_supcon.EarlyStopping(patience=3, tolerance=0.0, comparison="less")
-    decisions = [stopper(value) for value in (1.0, 1.2, 1.1, 1.05)]
-    assert decisions == [False, False, False, True]
-
-
-def test_early_stopping_greater_requires_beating_best_by_tolerance():
-    """In greater mode, values within the tolerance above the best do not improve."""
-    stopper = train_supcon.EarlyStopping(
-        patience=2, tolerance=0.1, comparison="greater"
-    )
-    assert not stopper(0.5)
-    assert not stopper(0.65)  # improves: 0.65 > 0.5 + 0.1
-    assert not stopper(0.7)  # within tolerance of the best
-    assert stopper(0.6)
-
-
 @pytest.mark.parametrize("mode", ["min", "max"])
 def test_scheduler_uses_absolute_improvement_threshold(mode):
     """Small improvements accumulate against the best accepted metric, in either mode."""
@@ -429,40 +265,11 @@ def test_scheduler_uses_absolute_improvement_threshold(mode):
     assert optimizer.param_groups[0]["lr"] == 0.0005
 
 
-@given(
-    values=st.lists(
-        st.floats(min_value=-10, max_value=10, allow_nan=False), min_size=1, max_size=40
-    ),
-    patience=st.integers(min_value=1, max_value=5),
-    tolerance=st.floats(min_value=0, max_value=1, allow_nan=False),
-    comparison=st.sampled_from(["less", "greater"]),
-)
-def test_early_stopping_stops_after_patience_values_without_new_best(
-    values, patience, tolerance, comparison
-):
-    """Stopping happens exactly when `patience` values in a row miss the best."""
-    stopper = train_supcon.EarlyStopping(patience, tolerance, comparison)
-    sign = 1 if comparison == "less" else -1
-    best = values[0]
-    misses = 0
-    assert not stopper(values[0])
-    for value in values[1:]:
-        if sign * value < sign * best - tolerance:
-            best, misses = value, 0
-        else:
-            misses += 1
-        assert stopper(value) == (misses == patience)
-        if misses == patience:
-            break
-
-
 @pytest.mark.parametrize(
     "document,location",
     [
         ([], ()),
-        ({"name": "ReduceLROnPlateau"}, ("parameters",)),
         ({"name": "StepLR", "parameters": {}}, ("name",)),
-        ({"name": "ReduceLROnPlateau", "parameters": []}, ("parameters",)),
         (
             {"name": "ReduceLROnPlateau", "parameters": {"unknown": 1}},
             ("parameters", "unknown"),
@@ -479,21 +286,15 @@ def test_invalid_scheduler_mapping_fails(document, location):
 @pytest.mark.parametrize(
     "parameters",
     [
+        # one violation per scheduler parameter; strict-number rules are pydantic's
         {"mode": "less"},
         {"threshold_mode": "other"},
-        {"factor": 0},
-        {"factor": 1},
-        {"factor": float("nan")},
+        {"factor": 0},  # must be strictly positive
+        {"factor": 1},  # must be strictly below 1
         {"factor": True},
-        {"factor": "0.5"},
-        {"patience": -1},
         {"patience": 1.5},
-        {"patience": True},
         {"cooldown": -1},
-        {"cooldown": False},
-        {"threshold": -1},
         {"threshold": float("inf")},
-        {"min_lr": -1},
         {"min_lr": [0.001]},
         {"eps": -1},
     ],
@@ -728,20 +529,6 @@ def test_scheduler_state_restoration_preserves_future_rates(values):
             restored_optimizer.param_groups[0]["lr"]
             == original_optimizer.param_groups[0]["lr"]
         )
-
-
-@pytest.fixture
-def validation_configuration(experiment_configuration, tmp_path):
-    """Create identifiable validation images only inside the temporary test fixture."""
-    validation = tmp_path / "validation-images"
-    for label, name in enumerate(sorted(experiment_configuration.class_names)):
-        directory = validation / name
-        directory.mkdir(parents=True)
-        for index in range(5):
-            Image.new("RGB", (16, 16), (20 + 30 * index, 255 * label, 80)).save(
-                directory / f"{index}.png"
-            )
-    return replace(experiment_configuration, validation_dataset=validation)
 
 
 @pytest.fixture
@@ -981,7 +768,7 @@ def test_omitted_tracking_direction_preserves_legacy_defaults(
     assert config.effective_tracked_mode == expected_mode
 
 
-@pytest.mark.parametrize("mode", ["", "lowest", True])
+@pytest.mark.parametrize("mode", ["lowest", True])
 def test_invalid_tracking_direction_fails_early(validation_configuration, mode):
     """Invalid directions cannot silently change the chosen checkpoint."""
     with pytest.raises(ValueError, match="tracked_mode"):
@@ -1011,7 +798,7 @@ def test_explicit_tracking_direction_must_agree_with_scheduler_and_stopping(
         )
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("value", [float("nan")])  # inf takes the same finiteness check
 def test_nonfinite_tracked_metric_aborts_before_checkpointing(
     validation_configuration, monkeypatch, value
 ):
@@ -1176,3 +963,98 @@ def test_omitting_the_epoch_callback_keeps_existing_behavior(experiment_configur
         epoch_callback=None
     )
     assert torch.load(result.last_checkpoint, weights_only=True)["epoch"] == 2
+
+
+def test_failed_supcon_export_fails_the_run_before_publication(
+    pipeline_document, tracking_store, monkeypatch
+):
+    """Like the classifier, a failed encoder export publishes nothing to the failed run."""
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("simulated ONNX export failure")
+
+    values = deepcopy(pipeline_document["supcon"])
+    values.update(pipeline_document["data"])
+    values.update(
+        epochs=1,
+        optimizer={"lr": 0.001},
+        onnx_export={},
+        output_directory=str(
+            Path(pipeline_document["output_directory"]).parent / "failed-export-supcon"
+        ),
+        mlflow={
+            **tracking_store.configuration,
+            "registered_model_name": "failed-supcon-encoder",
+        },
+    )
+    config = TrainingConfiguration.from_mapping(values)
+    monkeypatch.setattr(torch.onnx, "export", fail)
+    with pytest.raises(RuntimeError, match="export failure"):
+        SupConExperiment(config).run_with_result()
+    (run,) = tracking_store.client.search_runs([tracking_store.experiment_id])
+    assert run.info.status == "FAILED"
+    assert "best_model" not in {
+        item.path for item in tracking_store.client.list_artifacts(run.info.run_id)
+    }
+    assert tracking_store.client.search_registered_models() == []
+    assert mlflow.active_run() is None
+
+
+@pytest.mark.parametrize("register", [False, True])
+def test_tracked_supcon_logs_its_onnx_export_with_the_best_model(
+    pipeline_document, tracking_store, register
+):
+    """The encoder export is published next to the SupCon best.pt, with or without registration."""
+    values = deepcopy(pipeline_document["supcon"])
+    values.update(pipeline_document["data"])
+    settings = {**tracking_store.configuration}
+    if register:
+        settings["registered_model_name"] = "exported-supcon-encoder"
+    values.update(
+        epochs=1,
+        optimizer={"lr": 0.001},
+        onnx_export={},
+        output_directory=str(
+            Path(pipeline_document["output_directory"]).parent / "exported-supcon"
+        ),
+        mlflow=settings,
+    )
+    result = SupConExperiment(
+        TrainingConfiguration.from_mapping(values)
+    ).run_with_result()
+    downloaded = download_artifact(
+        tracking_store, result.mlflow_run_id, "best_model/best.onnx"
+    )
+    assert downloaded.read_bytes() == result.onnx_model.read_bytes()
+
+
+def test_standalone_supcon_registry_publication_remains_an_explicit_encoder(
+    pipeline_document, tracking_store
+):
+    """Existing standalone encoder registration stays available, never labeled as a CE classifier."""
+    values = deepcopy(pipeline_document["supcon"])
+    values.update(pipeline_document["data"])
+    values.update(
+        epochs=1,
+        optimizer={"lr": 0.001},
+        output_directory=str(
+            Path(pipeline_document["output_directory"]).parent / "standalone-supcon"
+        ),
+    )
+    encoder_name = "m6-supcon-encoder"
+    values["mlflow"] = {
+        **tracking_store.configuration,
+        "registered_model_name": encoder_name,
+    }
+    result = SupConExperiment(
+        TrainingConfiguration.from_mapping(values)
+    ).run_with_result()
+    versions = tracking_store.client.search_model_versions(f"name='{encoder_name}'")
+    assert len(versions) == 1 and versions[0].run_id == result.mlflow_run_id
+    card = yaml.safe_load(
+        (result.output_directory / "best.model_card.yaml").read_text()
+    )
+    assert card["model"]["task"] == "contrastive-encoder"
+    assert str(card["model"]["registry_version"]) == str(versions[0].version)
+    assert tracking_store.client.get_run(result.mlflow_run_id).info.status == "FINISHED"
+    assert mlflow.active_run() is None

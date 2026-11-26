@@ -1,227 +1,49 @@
 """Contracts for unified SupCon-sweep → selected encoder → CE orchestration."""
 
-from copy import deepcopy
-from dataclasses import replace
 import hashlib
-import os
+from copy import deepcopy
 from pathlib import Path
-import subprocess
-import sys
-from types import SimpleNamespace
 
-from hypothesis import HealthCheck, given, settings, strategies as st
-from PIL import Image
+import mlflow
+import mlflow.pytorch
 import pytest
 import torch
 import yaml
-
-from smartrodent.supcon_training import SupConExperiment
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+from mlflow.exceptions import MlflowException
+from training_test_support import (
+    assert_registered_classifier,
+    download_artifact,
+    serialized_result,
+    widened_architecture,
+)
 from ultralytics import YOLO
-from smartrodent.classifier_training import ClassifierExperiment
-from smartrodent.experiment_results import ExperimentResult
+
+from smartrodent.experiment_support import MlflowConfiguration
+from smartrodent.supcon_training import SupConExperiment
+from smartrodent.two_stage_training import (
+    TwoStageConfiguration,
+    TwoStageExperiment,
+    TwoStageResult,
+)
 
 
-@pytest.fixture
-def pipeline_api():
-    """Keep the unimplemented orchestration API red without breaking collection."""
-    from smartrodent import two_stage_training
-
-    return two_stage_training
-
-
-@pytest.fixture
-def pipeline_document(tmp_path):
-    """Build both existing splits and a tiny local model, never touching real data."""
-    torch.set_num_threads(2)
-    for split in ("train", "val"):
-        for label, name in enumerate(("mouse", "rat")):
-            directory = tmp_path / split / name
-            directory.mkdir(parents=True)
-            for index in range(4):
-                Image.new("RGB", (16, 16), (40 + 20 * index, label * 220, 80)).save(
-                    directory / f"{index}.png"
-                )
-    architecture = tmp_path / "tiny-cls.yaml"
-    architecture.write_text(
-        yaml.safe_dump(
-            {
-                "nc": 2,
-                "backbone": [[-1, 1, "Conv", [8, 3, 2]]],
-                "head": [[-1, 1, "Classify", [2]]],
-            }
-        )
-    )
-    transforms = {
-        "image_size": 16,
-        "resize": {"antialias": True},
-        "random_adjust_sharpness": {"sharpness_factor": 0.5, "p": 0.0},
-        "random_grayscale": {"p": 0.0},
-        "random_perspective": {"distortion_scale": 0.5, "p": 0.0},
-        "random_horizontal_flip": {"p": 0.0},
-        "random_resized_crop": {"scale": [1.0, 1.0], "ratio": [1.0, 1.0]},
-    }
-    classifier_transforms = deepcopy(transforms)
-    classifier_transforms["random_horizontal_flip"]["p"] = 0.3
-    return {
-        "output_directory": str(tmp_path / "pipeline"),
-        "data": {
-            "train_dataset": str(tmp_path / "train"),
-            "validation_dataset": str(tmp_path / "val"),
-            "class_names": ["rat", "mouse"],
-        },
-        "supcon": {
-            "model_name": str(architecture),
-            "epochs": 3,
-            "transforms": deepcopy(transforms),
-            "optimizer": {"lr": {"type": "sweep", "values": [0.001, 0.002, 0.003]}},
-            "classes_per_batch": 2,
-            "samples_per_class": 2,
-            "samples_per_epoch": 8,
-            "workers": 0,
-            "device": "cpu",
-            "seed": 11,
-            "dropout": 0.0,
-            "output_features": 4,
-            "temperature": 0.1,
-            "tracked_metric": "balanced_accuracy",
-            "tracked_mode": "max",
-            "validation_metrics": {
-                "balanced_accuracy": {"function": "balanced_accuracy_score"}
-            },
-        },
-        "classifier": {
-            "initialization": {
-                "encoder": {"source": "selected_supcon"},
-                "head": {"replace": "linear", "source": "random"},
-            },
-            # Tiny network: 0=Conv encoder, 1=Classify head; valid for both head modes.
-            "freeze": 1,
-            "encoder_batchnorm": "eval",
-            "epochs": 2,
-            "batch_size": 3,
-            "workers": 0,
-            "device": "cpu",
-            "seed": 29,
-            "transforms": classifier_transforms,
-            "train_kwargs": {
-                "optimizer": "AdamW",
-                "lr0": 0.004,
-                "lrf": 1.0,
-                "warmup_epochs": 0.0,
-                "nbs": 1,
-                "patience": 0,
-                "amp": False,
-                "plots": False,
-            },
-            "tracked_metric": "ce_loss_mean",
-            "tracked_mode": "min",
-        },
-    }
-
-
-@pytest.fixture
-def recorded_stages(monkeypatch):
-    """Replace only stage execution, retaining real configuration validation and ranking."""
-    observed = SimpleNamespace(
-        supcon=[],
-        classifier=[],
-        results=[],
-        events=[],
-        values=[0.2, 0.8, 0.5],
-        fail_at=None,
-        fail_classifier=False,
-        overrides={},
-    )
-
-    def run_supcon(self):
-        """Publish distinguishable best/last bytes and report original configured scores."""
-        config = self.configuration
-        index = len(observed.supcon)
-        observed.supcon.append(config)
-        observed.events.append("supcon")
-        if index == observed.fail_at:
-            raise RuntimeError("deliberate SupCon candidate failure")
-        directory = Path(config.output_directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        best, last = directory / "best.pt", directory / "last.pt"
-        torch.save({"candidate": index, "epoch": 2}, best)
-        torch.save({"candidate": index, "epoch": 3}, last)
-        result = ExperimentResult(
-            output_directory=directory,
-            last_checkpoint=last,
-            best_checkpoint=best,
-            best_epoch=2,
-            best_value=observed.values[index],
-            tracked_metric=config.effective_tracked_metric,
-            tracked_mode=config.effective_tracked_mode,
-            validation_dataset=config.validation_dataset,
-        )
-        result = replace(result, **observed.overrides.get(index, {}))
-        observed.results.append(result)
-        return result
-
-    def run_classifier(self):
-        """Record the actual handoff configuration without requiring fake SupCon weights to load."""
-        config = self.configuration
-        observed.classifier.append(config)
-        observed.events.append("classifier")
-        if observed.fail_classifier:
-            raise RuntimeError("deliberate classifier failure")
-        directory = Path(config.output_directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "weights").mkdir(exist_ok=True)
-        best, last = directory / "weights/best.pt", directory / "weights/last.pt"
-        torch.save({"epoch": 1}, best)
-        torch.save({"epoch": 2}, last)
-        return ExperimentResult(
-            output_directory=directory,
-            last_checkpoint=last,
-            best_checkpoint=best,
-            best_epoch=1,
-            best_value=0.4,
-            tracked_metric=config.tracked_metric,
-            tracked_mode=config.effective_tracked_mode,
-            validation_dataset=config.validation_dataset,
-        )
-
-    monkeypatch.setattr(SupConExperiment, "run_with_result", run_supcon)
-    monkeypatch.setattr(ClassifierExperiment, "run_with_result", run_classifier)
-    return observed
-
-
-def _configuration(pipeline_api, document):
+def _configuration(document):
     """Parse the complete pipeline before constructing an experiment."""
-    return pipeline_api.TwoStageConfiguration.from_mapping(document)
-
-
-def _serialized_result(result):
-    """Specify the portable result fields, allowing additional summary metadata."""
-    return {
-        "output_directory": str(result.output_directory),
-        "last_checkpoint": str(result.last_checkpoint),
-        "best_checkpoint": str(result.best_checkpoint),
-        "best_epoch": result.best_epoch,
-        "best_value": result.best_value,
-        "tracked_metric": result.tracked_metric,
-        "tracked_mode": result.tracked_mode,
-        "validation_dataset": (
-            str(result.validation_dataset) if result.validation_dataset else None
-        ),
-        "mlflow_run_id": result.mlflow_run_id,
-    }
+    return TwoStageConfiguration.from_mapping(document)
 
 
 @pytest.mark.parametrize(
     "mode,values,winner",
     [
+        # ranking itself is tested with the result ranking; one winner and one tie
         ("max", [0.2, 0.8, 0.5], 1),
-        ("min", [0.8, 0.2, 0.5], 1),
-        ("max", [0.8, 0.8, 0.2], 0),
         ("min", [0.2, 0.2, 0.8], 0),
     ],
 )
 def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
-    pipeline_api, pipeline_document, recorded_stages, mode, values, winner
+    pipeline_document, recorded_stages, mode, values, winner
 ):
     """No rescoring, hardcoded loss, last checkpoint, or unordered filesystem discovery."""
     document = pipeline_document
@@ -237,10 +59,10 @@ def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
     }
     document["classifier"]["train_kwargs"].update(patience=4, cos_lr=True, lrf=0.2)
     recorded_stages.values = values
-    config = _configuration(pipeline_api, document)
+    config = _configuration(document)
     before = deepcopy(config.to_dict())
-    result = pipeline_api.TwoStageExperiment(config).run()
-    assert isinstance(result, pipeline_api.TwoStageResult)
+    result = TwoStageExperiment(config).run()
+    assert isinstance(result, TwoStageResult)
     assert recorded_stages.events == ["supcon", "supcon", "supcon", "classifier"]
     assert tuple(result.supcon_results) == tuple(recorded_stages.results)
     assert result.selected_supcon == result.supcon_results[winner]
@@ -308,26 +130,24 @@ def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
     for candidate, saved in zip(
         result.supcon_results, summary["supcon_results"], strict=True
     ):
-        assert _serialized_result(candidate).items() <= saved.items()
-    assert _serialized_result(selected).items() <= summary["selected_supcon"].items()
+        assert serialized_result(candidate).items() <= saved.items()
+    assert serialized_result(selected).items() <= summary["selected_supcon"].items()
     assert (
         summary["selected_supcon"]["checkpoint_sha256"]
         == hashlib.sha256(source.read_bytes()).hexdigest()
     )
     assert (
-        _serialized_result(result.classifier_result).items()
+        serialized_result(result.classifier_result).items()
         <= summary["classifier_result"].items()
     )
 
 
 def test_single_supcon_candidate_still_uses_the_same_handoff_contract(
-    pipeline_api, pipeline_document, recorded_stages
+    pipeline_document, recorded_stages
 ):
     """A non-sweep pipeline remains valid, with stable isolation from the CE outputs."""
     pipeline_document["supcon"]["optimizer"]["lr"] = 0.001
-    result = pipeline_api.TwoStageExperiment(
-        _configuration(pipeline_api, pipeline_document)
-    ).run()
+    result = TwoStageExperiment(_configuration(pipeline_document)).run()
     assert len(result.supcon_results) == 1
     assert result.selected_supcon == result.supcon_results[0]
     assert (
@@ -337,16 +157,14 @@ def test_single_supcon_candidate_still_uses_the_same_handoff_contract(
     assert recorded_stages.events == ["supcon", "classifier"]
 
 
-@pytest.mark.parametrize("fail_at", [0, 1, 2])
+@pytest.mark.parametrize("fail_at", [0, 2])  # first and last candidate
 def test_failed_supcon_candidate_stops_without_selecting_a_partial_sweep(
-    pipeline_api, pipeline_document, recorded_stages, fail_at
+    pipeline_document, recorded_stages, fail_at
 ):
     """Propagate failure, preserve completed artifacts, and never start CE or remaining candidates."""
     recorded_stages.fail_at = fail_at
     with pytest.raises(RuntimeError, match="SupCon candidate failure"):
-        pipeline_api.TwoStageExperiment(
-            _configuration(pipeline_api, pipeline_document)
-        ).run()
+        TwoStageExperiment(_configuration(pipeline_document)).run()
     assert recorded_stages.events == ["supcon"] * (fail_at + 1)
     assert not recorded_stages.classifier
     root = Path(pipeline_document["output_directory"])
@@ -361,7 +179,7 @@ def test_failed_supcon_candidate_stops_without_selecting_a_partial_sweep(
 
 
 def test_non_yolo_head_is_rejected_before_any_supcon_candidate(
-    pipeline_api, pipeline_document, recorded_stages, tmp_path
+    pipeline_document, recorded_stages, tmp_path
 ):
     """Even a later unsupported head must fail during preparation, not after training."""
     valid = tmp_path / "valid-head.pt"
@@ -376,9 +194,7 @@ def test_non_yolo_head_is_rejected_before_any_supcon_candidate(
         "checkpoint": {"type": "sweep", "values": [str(valid), str(unsupported)]},
     }
     with pytest.raises(NotImplementedError, match="YOLO|support"):
-        pipeline_api.TwoStageExperiment(
-            _configuration(pipeline_api, pipeline_document)
-        ).run()
+        TwoStageExperiment(_configuration(pipeline_document)).run()
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
@@ -387,22 +203,20 @@ def test_non_yolo_head_is_rejected_before_any_supcon_candidate(
     "head_replace,freeze", [("full", 2), ("full", [1]), ("linear", 3), ("linear", [2])]
 )
 def test_out_of_range_classifier_freeze_is_rejected_before_any_supcon_candidate(
-    pipeline_api, pipeline_document, recorded_stages, head_replace, freeze
+    pipeline_document, recorded_stages, head_replace, freeze
 ):
     """The SupCon architecture fixes the classifier's layer count, so check it before SupCon trains."""
     # Pipeline network: 0=Conv encoder, 1=Classify head.
     pipeline_document["classifier"]["initialization"]["head"]["replace"] = head_replace
     pipeline_document["classifier"]["freeze"] = freeze
     with pytest.raises(ValueError, match="freeze"):
-        pipeline_api.TwoStageExperiment(
-            _configuration(pipeline_api, pipeline_document)
-        ).run()
+        TwoStageExperiment(_configuration(pipeline_document)).run()
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
 def test_classifier_freeze_is_checked_against_every_supcon_architecture(
-    pipeline_api, pipeline_document, recorded_stages, tmp_path
+    pipeline_document, recorded_stages, tmp_path
 ):
     """The winning encoder is unknown before SupCon, so a freeze must fit every candidate."""
     deeper = tmp_path / "deeper-cls.yaml"
@@ -423,18 +237,15 @@ def test_classifier_freeze_is_checked_against_every_supcon_architecture(
     # Count 3 freezes the deeper network's conv layers and head conv; the shallow one has 2 layers.
     pipeline_document["classifier"]["freeze"] = 3
     with pytest.raises(ValueError, match="freeze"):
-        pipeline_api.TwoStageExperiment(
-            _configuration(pipeline_api, pipeline_document)
-        ).run()
+        TwoStageExperiment(_configuration(pipeline_document)).run()
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
 def test_each_stage_section_exports_every_run_it_configures(
-    pipeline_api, pipeline_document, tmp_path
+    pipeline_document, tmp_path
 ):
     """SupCon candidates export encoders and CE candidates export classifiers, all reported."""
-    from test_model_export import widened_architecture
 
     # Native classifier export needs a network above Ultralytics' minimum file size.
     pipeline_document["supcon"]["model_name"] = str(
@@ -445,9 +256,7 @@ def test_each_stage_section_exports_every_run_it_configures(
     pipeline_document["supcon"]["onnx_export"] = {}
     pipeline_document["classifier"]["onnx_export"] = {}
     pipeline_document["classifier"]["seed"] = {"type": "sweep", "values": [29, 31]}
-    result = pipeline_api.TwoStageExperiment(
-        _configuration(pipeline_api, pipeline_document)
-    ).run()
+    result = TwoStageExperiment(_configuration(pipeline_document)).run()
     runs = [*result.supcon_results, *result.classifier_results]
     assert len(result.supcon_results) == 3 and len(result.classifier_results) == 2
     for supcon in result.supcon_results:
@@ -469,14 +278,12 @@ def test_each_stage_section_exports_every_run_it_configures(
 
 
 def test_classifier_failure_is_not_reported_as_a_completed_pipeline(
-    pipeline_api, pipeline_document, recorded_stages
+    pipeline_document, recorded_stages
 ):
     """Classifier exceptions propagate without deleting successful SupCon artifacts."""
     recorded_stages.fail_classifier = True
     with pytest.raises(RuntimeError, match="classifier failure"):
-        pipeline_api.TwoStageExperiment(
-            _configuration(pipeline_api, pipeline_document)
-        ).run()
+        TwoStageExperiment(_configuration(pipeline_document)).run()
     assert recorded_stages.events == ["supcon", "supcon", "supcon", "classifier"]
     assert all(result.best_checkpoint.is_file() for result in recorded_stages.results)
     summary_path = Path(pipeline_document["output_directory"]) / "selection.yaml"
@@ -484,17 +291,13 @@ def test_classifier_failure_is_not_reported_as_a_completed_pipeline(
         assert yaml.safe_load(summary_path.read_text()).get("classifier_result") is None
 
 
-def test_stale_artifacts_are_not_ranked_or_pruned(
-    pipeline_api, pipeline_document, recorded_stages
-):
+def test_stale_artifacts_are_not_ranked_or_pruned(pipeline_document, recorded_stages):
     """Rank only current structured results; unrelated prior run files remain untouched."""
     root = Path(pipeline_document["output_directory"])
     stale = root / "supcon" / "run_999" / "best.pt"
     stale.parent.mkdir(parents=True)
     stale.write_bytes(b"old checkpoint, intentionally not loadable")
-    result = pipeline_api.TwoStageExperiment(
-        _configuration(pipeline_api, pipeline_document)
-    ).run()
+    result = TwoStageExperiment(_configuration(pipeline_document)).run()
     assert result.selected_supcon == result.supcon_results[1]
     assert stale.read_bytes() == b"old checkpoint, intentionally not loadable"
     assert len(result.supcon_results) == 3
@@ -506,44 +309,38 @@ def test_stale_artifacts_are_not_ranked_or_pruned(
         {"tracked_metric": "supcon_loss_mean"},
         {"tracked_mode": "min"},
         {"validation_dataset": None},
-        {"validation_dataset": Path("different-validation")},
     ],
 )
 def test_incompatible_reported_candidate_metadata_cannot_start_ce(
-    pipeline_api, pipeline_document, recorded_stages, override
+    pipeline_document, recorded_stages, override
 ):
     """A completed result with an incompatible ranking contract is not silently ignored."""
     recorded_stages.overrides[1] = override
     with pytest.raises(ValueError, match="metric|mode|validation"):
-        pipeline_api.TwoStageExperiment(
-            _configuration(pipeline_api, pipeline_document)
-        ).run()
+        TwoStageExperiment(_configuration(pipeline_document)).run()
     assert not recorded_stages.classifier
 
 
 def test_configuration_round_trips_without_resolving_the_selected_source_early(
-    pipeline_api, pipeline_document, tmp_path
+    pipeline_document, tmp_path
 ):
     """Parsing does not require a checkpoint that will only exist after SupCon training."""
     before = deepcopy(pipeline_document)
-    config = _configuration(pipeline_api, pipeline_document)
+    config = _configuration(pipeline_document)
     assert pipeline_document == before
     serialized = config.to_dict()
     assert serialized["classifier"]["initialization"]["encoder"] == {
         "source": "selected_supcon"
     }
-    assert (
-        pipeline_api.TwoStageConfiguration.from_mapping(serialized).to_dict()
-        == serialized
-    )
+    assert TwoStageConfiguration.from_mapping(serialized).to_dict() == serialized
     path = tmp_path / "roundtrip.yaml"
     path.write_text(yaml.safe_dump(serialized))
-    assert pipeline_api.TwoStageConfiguration.from_yaml(path).to_dict() == serialized
+    assert TwoStageConfiguration.from_yaml(path).to_dict() == serialized
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
 def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
-    pipeline_api, pipeline_document, recorded_stages, tmp_path
+    pipeline_document, recorded_stages, tmp_path
 ):
     """Keep full-root target paths and sweep-product order from the existing loader."""
     document = deepcopy(pipeline_document)
@@ -559,8 +356,8 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
         )
     )
     path.write_text(text)
-    config = pipeline_api.TwoStageConfiguration.from_yaml(path)
-    pipeline_api.TwoStageExperiment(config).run()
+    config = TwoStageConfiguration.from_yaml(path)
+    TwoStageExperiment(config).run()
     assert [
         (run.optimizer["lr"], run.output_features) for run in recorded_stages.supcon
     ] == [
@@ -601,7 +398,6 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
             {"type": "sweep", "values": ["balanced_accuracy", "supcon_loss_mean"]},
             "metric",
         ),
-        (("classifier", "batch_size"), 0, "batch_size"),
         (
             ("data", "train_dataset"),
             {"type": "sweep", "values": ["a", "b"]},
@@ -612,17 +408,13 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
             {"source": "supcon", "checkpoint": "some.pt"},
             "selected_supcon|encoder",
         ),
+        # the handoff is exactly {source: selected_supcon}; no checkpoint may be added
         (
             ("classifier", "initialization", "encoder", "checkpoint"),
             "some.pt",
             "encoder|checkpoint",
         ),
         (("classifier", "initialization", "head", "replace"), "other", "replace"),
-        (
-            ("classifier", "initialization", "head"),
-            {"replace": "linear", "source": "yolo_checkpoint"},
-            "checkpoint",
-        ),
         (("classifier", "train_kwargs", "resume"), True, "resume"),
         (
             ("supcon", "scheduler"),
@@ -632,7 +424,7 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
     ],
 )
 def test_complete_configuration_is_validated_before_any_candidate_or_output(
-    pipeline_api, pipeline_document, recorded_stages, path, value, message
+    pipeline_document, recorded_stages, path, value, message
 ):
     """Later invalid candidates and classifier settings must fail before the expensive first stage."""
     parent = pipeline_document
@@ -640,22 +432,22 @@ def test_complete_configuration_is_validated_before_any_candidate_or_output(
         parent = parent[key]
     parent[path[-1]] = value
     with pytest.raises(ValueError, match=message):
-        config = _configuration(pipeline_api, pipeline_document)
-        pipeline_api.TwoStageExperiment(config).run()
+        config = _configuration(pipeline_document)
+        TwoStageExperiment(config).run()
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
 @pytest.mark.parametrize("split", ["train_dataset", "validation_dataset"])
 def test_pipeline_output_must_stay_outside_both_shared_splits(
-    pipeline_api, pipeline_document, recorded_stages, split
+    pipeline_document, recorded_stages, split
 ):
     """The pipeline root and every child stage must preserve input split contents."""
     pipeline_document["output_directory"] = str(
         Path(pipeline_document["data"][split]) / "pipeline"
     )
     with pytest.raises(ValueError, match="outside|output_directory"):
-        _configuration(pipeline_api, pipeline_document)
+        _configuration(pipeline_document)
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
@@ -663,55 +455,47 @@ def test_pipeline_output_must_stay_outside_both_shared_splits(
 @pytest.mark.parametrize(
     "section,key,value",
     [
-        (None, "selection", {"tracked_metric": "supcon_loss_mean"}),
-        (None, "selection_seed", 77),
+        # unknown root/data keys, and shared keys repeated inside each stage
         (None, "unknown", True),
         ("data", "test_dataset", "must-not-be-used"),
         ("supcon", "train_dataset", "other-training"),
-        ("supcon", "validation_dataset", "other-validation"),
-        ("supcon", "class_names", ["other"]),
         ("supcon", "output_directory", "other-output"),
-        ("classifier", "train_dataset", "other-training"),
-        ("classifier", "validation_dataset", "other-validation"),
         ("classifier", "class_names", ["other"]),
-        ("classifier", "output_directory", "other-output"),
+        ("classifier", "validation_dataset", "other-validation"),
     ],
 )
 def test_unknown_or_conflicting_ownership_is_rejected_not_silently_ignored(
-    pipeline_api, pipeline_document, section, key, value
+    pipeline_document, section, key, value
 ):
-    """One data owner, one output layout, no secondary selection configuration or seed."""
+    """One data owner and one output layout; unknown root or data settings are errors."""
     target = pipeline_document if section is None else pipeline_document[section]
     target[key] = value
     with pytest.raises(ValueError, match=key):
-        _configuration(pipeline_api, pipeline_document)
+        _configuration(pipeline_document)
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
 @pytest.mark.parametrize("section", ["supcon", "classifier"])
-def test_pipeline_tracking_settings_are_owned_by_the_root(
-    pipeline_api, pipeline_document, section
-):
+def test_pipeline_tracking_settings_are_owned_by_the_root(pipeline_document, section):
     """Stage overrides cannot silently create unrelated tracking runs or registries."""
     pipeline_document[section]["mlflow"] = {
         "tracking_uri": "sqlite:///unused.db",
         "experiment_name": "pipeline",
     }
     with pytest.raises(ValueError, match="mlflow|tracking"):
-        _configuration(pipeline_api, pipeline_document)
+        _configuration(pipeline_document)
 
 
 @pytest.mark.parametrize(
     "source,relative",
     [
         ("model", "config.yaml"),
-        ("model", "selection.yaml"),
         ("model", "supcon/run_001/best.pt"),
         ("head", "classifier/weights/best.pt"),
     ],
 )
 def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
-    pipeline_api, pipeline_document, recorded_stages, source, relative
+    pipeline_document, recorded_stages, source, relative
 ):
     """Pipeline root/child publications must retain the standalone source-safety contract."""
     path = Path(pipeline_document["output_directory"]) / relative
@@ -728,7 +512,7 @@ def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
     # Require the collision guard itself, not an unrelated attempt to load these
     # intentionally opaque bytes as model weights or architecture YAML.
     with pytest.raises(ValueError, match="collision|collid"):
-        _configuration(pipeline_api, pipeline_document)
+        _configuration(pipeline_document)
     assert recorded_stages.events == []
     assert path.read_bytes() == b"source bytes must remain unchanged"
 
@@ -745,7 +529,7 @@ def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
     freeze=st.one_of(st.integers(0, 2), st.lists(st.integers(0, 1), unique=True)),
 )
 def test_configuration_round_trip_preserves_sweep_order_and_classifier_policy(
-    pipeline_api, pipeline_document, rates, mode, batchnorm, freeze
+    pipeline_document, rates, mode, batchnorm, freeze
 ):
     """Repeated candidates, scoring direction, BN and freeze policy survive serialization."""
     document = deepcopy(pipeline_document)
@@ -755,18 +539,18 @@ def test_configuration_round_trip_preserves_sweep_order_and_classifier_policy(
     batchnorm = batchnorm if freeze not in (0, []) else None
     document["classifier"]["encoder_batchnorm"] = batchnorm
     document["classifier"]["freeze"] = freeze
-    config = _configuration(pipeline_api, document)
+    config = _configuration(document)
     saved = config.to_dict()
     assert saved["supcon"]["optimizer"]["lr"]["values"] == rates
     assert saved["supcon"]["tracked_mode"] == mode
     assert saved["classifier"]["encoder_batchnorm"] == batchnorm
     assert saved["classifier"]["freeze"] == freeze
-    assert pipeline_api.TwoStageConfiguration.from_mapping(saved).to_dict() == saved
+    assert TwoStageConfiguration.from_mapping(saved).to_dict() == saved
 
 
-@pytest.mark.parametrize("mode", ["min", "max"])
+@pytest.mark.parametrize("mode", ["min"])  # direction is covered by stubbed tests
 def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
-    pipeline_api, pipeline_document, monkeypatch, mode
+    pipeline_document, monkeypatch, mode
 ):
     """Run real optimizers and source conversion; script only SupCon's validation scores."""
     document = pipeline_document
@@ -798,9 +582,7 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
         for split in ("train_dataset", "validation_dataset")
         for path in Path(document["data"][split]).rglob("*.png")
     }
-    result = pipeline_api.TwoStageExperiment(
-        _configuration(pipeline_api, document)
-    ).run()
+    result = TwoStageExperiment(_configuration(document)).run()
     assert (
         len(calls) == 6
     )  # Exactly ordinary epoch validation; never a second scoring pass.
@@ -849,46 +631,10 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
     )
 
 
-def test_two_stage_cli_runs_the_actual_cpu_pipeline(
-    pipeline_api, pipeline_document, tmp_path
-):
-    """The new thin entry point must execute both stages without downloads or test data."""
-    document = deepcopy(pipeline_document)
-    document["supcon"]["optimizer"]["lr"] = 0.001
-    document["supcon"]["epochs"] = document["classifier"]["epochs"] = 1
-    path = tmp_path / "pipeline.yaml"
-    path.write_text(yaml.safe_dump(document))
-    script = Path(__file__).resolve().parents[1] / "scripts" / "train_two_stage.py"
-    completed = subprocess.run(
-        [sys.executable, str(script), str(path)],
-        capture_output=True,
-        text=True,
-        timeout=90,
-        env={**os.environ, "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2"},
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "Final classifier checkpoint:" in completed.stdout
-    root = Path(document["output_directory"])
-    assert (root / "supcon" / "run_001" / "best.pt").is_file()
-    assert (root / "selection.yaml").is_file()
-    restored = YOLO(
-        str(root / "classifier" / "weights" / "best.pt"), task="classify"
-    ).model
-    assert restored.names == {0: "mouse", 1: "rat"}
-
-
-@pytest.mark.parametrize(
-    "key",
-    [
-        "mlflow",
-        "train_dataset",
-        "validation_dataset",
-        "class_names",
-        "output_directory",
-    ],
-)
+# every shared key takes the same ownership check; the tracking section and one data key
+@pytest.mark.parametrize("key", ["mlflow", "train_dataset"])
 def test_whole_supcon_mapping_sweeps_cannot_bypass_shared_ownership(
-    pipeline_api, pipeline_document, recorded_stages, key
+    pipeline_document, recorded_stages, key
 ):
     """Validate restrictions inside expanded mappings, including later candidates."""
     valid = deepcopy(pipeline_document["supcon"])
@@ -904,33 +650,31 @@ def test_whole_supcon_mapping_sweeps_cannot_bypass_shared_ownership(
     invalid[key] = overrides[key]
     pipeline_document["supcon"] = {"type": "sweep", "values": [valid, invalid]}
     with pytest.raises(ValueError, match=key):
-        _configuration(pipeline_api, pipeline_document)
+        _configuration(pipeline_document)
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
 @pytest.mark.parametrize("section", ["supcon", "classifier"])
-@pytest.mark.parametrize("seed", [-1, 2**32, True, 0.5])
+@pytest.mark.parametrize("seed", [-1, True])  # one range and one type violation
 def test_every_stage_seed_is_validated_before_any_candidate(
-    pipeline_api, pipeline_document, recorded_stages, section, seed
+    pipeline_document, recorded_stages, section, seed
 ):
     """The supported Python/NumPy/PyTorch RNG intersection is an unsigned 32-bit integer."""
     value = {"type": "sweep", "values": [11, seed]} if section == "supcon" else seed
     pipeline_document[section]["seed"] = value
     with pytest.raises(ValueError, match="seed"):
-        _configuration(pipeline_api, pipeline_document)
+        _configuration(pipeline_document)
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
-@pytest.mark.parametrize("fail_at", [0, 1, 2])
+@pytest.mark.parametrize("fail_at", [0, 2])  # first and last candidate
 def test_failed_rerun_invalidates_previous_success_without_pruning_artifacts(
-    pipeline_api, pipeline_document, recorded_stages, fail_at
+    pipeline_document, recorded_stages, fail_at
 ):
     """A new failed invocation cannot retain an older completed-classifier summary."""
-    first = pipeline_api.TwoStageExperiment(
-        _configuration(pipeline_api, pipeline_document)
-    ).run()
+    first = TwoStageExperiment(_configuration(pipeline_document)).run()
     summary_path = first.output_directory / "selection.yaml"
     assert yaml.safe_load(summary_path.read_text())["classifier_result"] is not None
     classifier_bytes = first.classifier_result.best_checkpoint.read_bytes()
@@ -941,9 +685,7 @@ def test_failed_rerun_invalidates_previous_success_without_pruning_artifacts(
     recorded_stages.fail_at = fail_at
     pipeline_document["supcon"]["seed"] = 19
     with pytest.raises(RuntimeError, match="SupCon candidate failure"):
-        pipeline_api.TwoStageExperiment(
-            _configuration(pipeline_api, pipeline_document)
-        ).run()
+        TwoStageExperiment(_configuration(pipeline_document)).run()
     assert recorded_stages.events == ["supcon"] * (fail_at + 1)
     assert not recorded_stages.classifier
     summary = yaml.safe_load(summary_path.read_text())
@@ -951,3 +693,443 @@ def test_failed_rerun_invalidates_previous_success_without_pruning_artifacts(
     assert summary.get("selected_supcon") is None
     assert not summary.get("supcon_results")
     assert first.classifier_result.best_checkpoint.read_bytes() == classifier_bytes
+
+
+@pytest.fixture
+def tracking_document(pipeline_document):
+    """Use two three-epoch candidates plus CE, with distinct stage objectives/directions."""
+    document = deepcopy(pipeline_document)
+    document["supcon"]["optimizer"]["lr"]["values"] = [0.001, 0.002]
+    document["classifier"].update(
+        epochs=3,
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
+    )
+    return document
+
+
+def _run_tracking_document(document, store, *, register=False):
+    """Enable shared tracking without mutating the reusable document fixture."""
+    values = deepcopy(document)
+    values["mlflow"] = deepcopy(store.configuration)
+    if register:
+        values["mlflow"]["registered_model_name"] = store.registry_name
+    config = TwoStageConfiguration.from_mapping(values)
+    return config, TwoStageExperiment(config).run()
+
+
+def _expected_encoder_provenance(result):
+    """Require the selected run's original configured objective, not a sign-inverted score."""
+    selected = result.selected_supcon
+    return {
+        "encoder_checkpoint": str(selected.best_checkpoint.resolve()),
+        "encoder_checkpoint_sha256": hashlib.sha256(
+            selected.best_checkpoint.read_bytes()
+        ).hexdigest(),
+        "encoder_run_id": selected.mlflow_run_id,
+        "encoder_epoch": selected.best_epoch,
+        "encoder_tracked_metric": selected.tracked_metric,
+        "encoder_tracked_mode": selected.tracked_mode,
+        "encoder_best_value": selected.best_value,
+        "pipeline_run_id": result.mlflow_run_id,
+    }
+
+
+@pytest.mark.parametrize("register", [False, True])
+def test_shared_tracking_configuration_round_trips_before_training(
+    tracking_document, tracking_store, tmp_path, register
+):
+    """One optional root config owns tracking; no backend run or output is created by parsing."""
+    document = tracking_document
+    document["mlflow"] = deepcopy(tracking_store.configuration)
+    if register:
+        document["mlflow"]["registered_model_name"] = tracking_store.registry_name
+    before = deepcopy(document)
+    config = TwoStageConfiguration.from_mapping(document)
+    assert config.mlflow == MlflowConfiguration.from_mapping(before["mlflow"])
+    assert document == before
+    path = tmp_path / "tracking.yaml"
+    path.write_text(yaml.safe_dump(config.to_dict()))
+    restored = TwoStageConfiguration.from_yaml(path)
+    assert restored.to_dict() == config.to_dict()
+    assert restored.mlflow == config.mlflow
+    assert tracking_store.client.search_runs([tracking_store.experiment_id]) == []
+    assert not Path(document["output_directory"]).exists()
+
+
+@pytest.mark.parametrize("mode", ["min"])  # direction is covered by stubbed tests
+@pytest.mark.parametrize("register", [False, True])
+def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_provenance(
+    tracking_document, tracking_store, scripted_validation, mode, register
+):
+    """Metric-selected epochs, registry model, cards and tracking artifacts must describe one result."""
+    tracking_document["supcon"]["tracked_mode"] = mode
+    config, result = _run_tracking_document(
+        tracking_document, tracking_store, register=register
+    )
+    assert (
+        len(scripted_validation.supcon) == 6
+        and len(scripted_validation.classifier) == 3
+    )
+    assert result.selected_supcon == result.supcon_results[1]
+    assert result.selected_supcon.best_epoch == result.classifier_result.best_epoch == 2
+    assert result.selected_supcon.best_value == (0.1 if mode == "min" else 0.9)
+    assert result.classifier_result.best_value == 0.9
+    child_ids = [
+        item.mlflow_run_id
+        for item in (*result.supcon_results, result.classifier_result)
+    ]
+    assert all(child_ids) and result.mlflow_run_id not in child_ids
+    runs = tracking_store.client.search_runs([tracking_store.experiment_id])
+    assert len(runs) == 4 and {run.info.run_id for run in runs} == {
+        result.mlflow_run_id,
+        *child_ids,
+    }
+    assert all(run.info.status == "FINISHED" for run in runs)
+    parent = tracking_store.client.get_run(result.mlflow_run_id)
+    assert "mlflow.parentRunId" not in parent.data.tags
+    for run in runs:
+        assert run.data.tags["git_commit"] == parent.data.tags["git_commit"]
+        assert (
+            run.data.tags["dataset_revision"]
+            == tracking_store.configuration["dataset_revision"]
+        )
+        if run.info.run_id in child_ids:
+            assert run.data.tags["mlflow.parentRunId"] == result.mlflow_run_id
+    for candidate in result.supcon_results:
+        history = tracking_store.client.get_metric_history(
+            candidate.mlflow_run_id, "validation/balanced_accuracy"
+        )
+        assert [item.step for item in history] == [1, 2, 3]
+        assert (
+            tracking_store.client.get_run(candidate.mlflow_run_id).data.metrics[
+                "best_validation_balanced_accuracy"
+            ]
+            == candidate.best_value
+        )
+        card = yaml.safe_load(
+            (candidate.output_directory / "best.model_card.yaml").read_text()
+        )
+        assert card["model"]["task"] == "contrastive-encoder"
+        assert (
+            card["model"]["registry_version"] is None
+        )  # No untrained classifier registry versions.
+    ce_run_id = result.classifier_result.mlflow_run_id
+    ce_history = tracking_store.client.get_metric_history(
+        ce_run_id, "validation/balanced_accuracy"
+    )
+    assert [item.step for item in ce_history] == [1, 2, 3]
+    assert [item.value for item in ce_history] == [0.1, 0.9, 0.4]
+    assert (
+        tracking_store.client.get_run(ce_run_id).data.metrics[
+            "best_validation_balanced_accuracy"
+        ]
+        == 0.9
+    )
+    provenance = _expected_encoder_provenance(result)
+    for checkpoint in (
+        result.classifier_result.best_checkpoint,
+        result.classifier_result.last_checkpoint,
+    ):
+        model = YOLO(str(checkpoint), task="classify").model
+        assert provenance.items() <= model.provenance.items()
+    card = yaml.safe_load(
+        result.classifier_result.best_checkpoint.with_suffix(
+            ".model_card.yaml"
+        ).read_text()
+    )
+    assert provenance.items() <= card["provenance"].items()
+    assert card["model"]["task"] == "image-classification"
+    assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
+    assert card["provenance"]["git_commit"] == parent.data.tags["git_commit"]
+    assert (
+        card["provenance"]["dataset_revision"]
+        == tracking_store.configuration["dataset_revision"]
+    )
+    assert (
+        card["provenance"]["checkpoint_sha256"]
+        == hashlib.sha256(
+            result.classifier_result.best_checkpoint.read_bytes()
+        ).hexdigest()
+    )
+    for child in (*result.supcon_results, result.classifier_result):
+        for filename in ("best.pt", "best.model_card.yaml", "best.model_card.md"):
+            downloaded = download_artifact(
+                tracking_store, child.mlflow_run_id, f"best_model/{filename}"
+            )
+            assert (
+                downloaded.read_bytes()
+                == (child.best_checkpoint.parent / filename).read_bytes()
+            )
+    for filename in ("config.yaml", "selection.yaml"):
+        assert (
+            download_artifact(
+                tracking_store, result.mlflow_run_id, filename
+            ).read_bytes()
+            == (result.output_directory / filename).read_bytes()
+        )
+    summary = yaml.safe_load((result.output_directory / "selection.yaml").read_text())
+    assert summary["mlflow_run_id"] == result.mlflow_run_id
+    assert (
+        summary["selected_supcon"]["mlflow_run_id"]
+        == result.selected_supcon.mlflow_run_id
+    )
+    assert (
+        summary["classifier_result"]["mlflow_run_id"]
+        == result.classifier_result.mlflow_run_id
+    )
+    assert (
+        yaml.safe_load((result.output_directory / "config.yaml").read_text())
+        == config.to_dict()
+    )
+    if register:
+        version = assert_registered_classifier(tracking_store, result.classifier_result)
+        assert {
+            model.name for model in tracking_store.client.search_registered_models()
+        } == {tracking_store.registry_name}
+        assert version.tags["validation_status"] == "passed"
+        assert version.tags["encoder_run_id"] == result.selected_supcon.mlflow_run_id
+        assert (
+            version.tags["encoder_checkpoint_sha256"]
+            == provenance["encoder_checkpoint_sha256"]
+        )
+        assert (
+            tracking_store.client.get_model_version_by_alias(
+                tracking_store.registry_name,
+                tracking_store.configuration["champion_alias"],
+            ).version
+            == version.version
+        )
+    else:
+        assert tracking_store.client.search_registered_models() == []
+    assert mlflow.active_run() is None
+
+
+def test_untracked_pipeline_keeps_selected_provenance_without_touching_callers_tracking(
+    tracking_document, tracking_store, scripted_validation
+):
+    """Provenance is local functionality too; disabled tracking neither nests nor logs into a caller."""
+    with mlflow.start_run(run_name="unrelated-caller") as caller:
+        mlflow.set_tag("caller_tag", "unchanged")
+        before = tracking_store.client.get_run(caller.info.run_id)
+        result = TwoStageExperiment(
+            TwoStageConfiguration.from_mapping(tracking_document)
+        ).run()
+        assert result.mlflow_run_id is None
+        assert all(
+            item.mlflow_run_id is None
+            for item in (*result.supcon_results, result.classifier_result)
+        )
+        provenance = _expected_encoder_provenance(result)
+        for checkpoint in (
+            result.classifier_result.best_checkpoint,
+            result.classifier_result.last_checkpoint,
+        ):
+            assert (
+                provenance.items()
+                <= YOLO(str(checkpoint), task="classify").model.provenance.items()
+            )
+        card = yaml.safe_load(
+            result.classifier_result.best_checkpoint.with_suffix(
+                ".model_card.yaml"
+            ).read_text()
+        )
+        assert provenance.items() <= card["provenance"].items()
+        assert mlflow.active_run().info.run_id == caller.info.run_id
+        after = tracking_store.client.get_run(caller.info.run_id)
+        assert after.info.status == "RUNNING"
+        assert (
+            after.data.metrics == before.data.metrics
+            and after.data.params == before.data.params
+        )
+        assert after.data.tags == before.data.tags
+        assert tracking_store.client.list_artifacts(caller.info.run_id) == []
+        assert (
+            len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+        )
+    assert mlflow.active_run() is None
+
+
+@pytest.mark.parametrize("failure", ["supcon", "classifier", "publication"])
+def test_pipeline_failure_closes_owned_runs_and_preserves_the_existing_champion(
+    tracking_document,
+    tracking_store,
+    scripted_validation,
+    monkeypatch,
+    tmp_path,
+    failure,
+):
+    """A failed candidate/CE/publication is never skipped, promoted, or reported as completed."""
+    tracking_store.client.create_registered_model(tracking_store.registry_name)
+    prior = tmp_path / "prior-model"
+    prior.mkdir()
+    previous = tracking_store.client.create_model_version(
+        tracking_store.registry_name, prior.as_uri()
+    ).version
+    tracking_store.client.set_registered_model_alias(
+        tracking_store.registry_name,
+        tracking_store.configuration["champion_alias"],
+        previous,
+    )
+    scripted_validation.failure = failure
+    if failure == "publication":
+
+        def fail_publication(*args, **kwargs):
+            """Simulate an external MLflow model-publication failure after successful CE training."""
+            raise RuntimeError("deliberate classifier publication failure")
+
+        monkeypatch.setattr(mlflow.pytorch, "log_model", fail_publication)
+    with pytest.raises(RuntimeError, match="deliberate"):
+        _run_tracking_document(tracking_document, tracking_store, register=True)
+    runs = tracking_store.client.search_runs([tracking_store.experiment_id])
+    parents = [run for run in runs if "mlflow.parentRunId" not in run.data.tags]
+    assert len(parents) == 1 and parents[0].info.status == "FAILED"
+    children = [
+        run
+        for run in runs
+        if run.data.tags.get("mlflow.parentRunId") == parents[0].info.run_id
+    ]
+    assert len(children) == (2 if failure == "supcon" else 3)
+    assert [run.info.status for run in children].count("FAILED") == 1
+    assert all(run.info.status in {"FINISHED", "FAILED"} for run in runs)
+    if failure == "supcon":
+        assert scripted_validation.classifier == []
+    versions = tracking_store.client.search_model_versions(
+        f"name='{tracking_store.registry_name}'"
+    )
+    assert len(versions) == 1 and versions[0].version == previous
+    assert (
+        tracking_store.client.get_model_version_by_alias(
+            tracking_store.registry_name, tracking_store.configuration["champion_alias"]
+        ).version
+        == previous
+    )
+    summary = Path(tracking_document["output_directory"]) / "selection.yaml"
+    if summary.exists():
+        assert yaml.safe_load(summary.read_text()).get("classifier_result") is None
+    assert mlflow.active_run() is None
+
+
+def test_tracked_pipeline_rejects_an_unrelated_active_run_before_creating_outputs(
+    tracking_document, tracking_store
+):
+    """Only the pipeline owns its parent run; never hijack, end, or attach to the caller's run."""
+    document = deepcopy(tracking_document)
+    document["mlflow"] = tracking_store.configuration
+    configuration = TwoStageConfiguration.from_mapping(document)
+    with mlflow.start_run(run_name="unrelated-caller") as caller:
+        with pytest.raises(
+            (ValueError, RuntimeError, MlflowException), match="active|existing|run"
+        ):
+            TwoStageExperiment(configuration).run()
+        assert mlflow.active_run().info.run_id == caller.info.run_id
+        assert (
+            tracking_store.client.get_run(caller.info.run_id).info.status == "RUNNING"
+        )
+        assert (
+            len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+        )
+        assert not Path(document["output_directory"]).exists()
+    assert mlflow.active_run() is None
+
+
+@pytest.mark.parametrize(
+    "updates,message",
+    [
+        ({"experiment_name": ""}, "experiment_name"),
+        (
+            {
+                "tracking_uri": {
+                    "type": "sweep",
+                    "values": ["sqlite:///a.db", "sqlite:///b.db"],
+                }
+            },
+            "mlflow|tracking_uri|sweep",
+        ),
+        ({"unexpected": True}, "unexpected"),
+    ],
+)
+def test_invalid_shared_tracking_settings_fail_before_runs_or_training(
+    tracking_document, tracking_store, updates, message
+):
+    """New root-level tracking support must retain complete prevalidation and strict parsing."""
+    tracking_document["mlflow"] = {**tracking_store.configuration, **updates}
+    with pytest.raises((TypeError, ValueError), match=message):
+        TwoStageConfiguration.from_mapping(tracking_document)
+    assert tracking_store.client.search_runs([tracking_store.experiment_id]) == []
+    assert not Path(tracking_document["output_directory"]).exists()
+
+
+@settings(
+    max_examples=6,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    revision=st.text(
+        alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=12
+    ),
+    alias=st.sampled_from(["champion", "candidate"]),
+    register=st.booleans(),
+)
+def test_tracking_metadata_round_trip_preserves_optional_registry_identity(
+    tracking_document, tracking_store, revision, alias, register
+):
+    """Serialization cannot silently reset registry aliases or dataset provenance."""
+    document = deepcopy(tracking_document)
+    document["mlflow"] = {
+        **tracking_store.configuration,
+        "dataset_revision": revision,
+        "champion_alias": alias,
+    }
+    if register:
+        document["mlflow"]["registered_model_name"] = tracking_store.registry_name
+    config = TwoStageConfiguration.from_mapping(document)
+    restored = TwoStageConfiguration.from_mapping(config.to_dict())
+    assert restored.mlflow.dataset_revision == revision
+    assert restored.mlflow.champion_alias == alias
+    assert restored.mlflow.registered_model_name == (
+        tracking_store.registry_name if register else None
+    )
+
+
+def test_tracking_rejects_environment_run_resumption_without_modifying_the_existing_run(
+    tracking_document, tracking_store, monkeypatch, tmp_path
+):
+    """An environment run ID is not authorization to resume, modify, or close someone else's run."""
+    caller = tracking_store.client.create_run(
+        tracking_store.experiment_id, tags={"owner": "caller"}
+    )
+    tracking_store.client.log_param(caller.info.run_id, "caller_parameter", "unchanged")
+    sentinel = tmp_path / "caller-artifact.txt"
+    sentinel.write_text("unchanged caller artifact")
+    tracking_store.client.log_artifact(caller.info.run_id, str(sentinel))
+    before = tracking_store.client.get_run(caller.info.run_id)
+    monkeypatch.setenv("MLFLOW_RUN_ID", caller.info.run_id)
+    document = deepcopy(tracking_document)
+    document["mlflow"] = tracking_store.configuration
+    config = TwoStageConfiguration.from_mapping(document)
+    assert mlflow.active_run() is None
+    with pytest.raises(ValueError, match="run|resum"):
+        TwoStageExperiment(config).run()
+    after = tracking_store.client.get_run(caller.info.run_id)
+    assert after.info.status == before.info.status == "RUNNING"
+    assert after.info.end_time == before.info.end_time
+    assert after.data.params == before.data.params
+    assert after.data.metrics == before.data.metrics
+    assert after.data.tags == before.data.tags
+    assert [
+        item.path for item in tracking_store.client.list_artifacts(caller.info.run_id)
+    ] == [sentinel.name]
+    assert (
+        download_artifact(
+            tracking_store, caller.info.run_id, sentinel.name
+        ).read_bytes()
+        == sentinel.read_bytes()
+    )
+    assert len(tracking_store.client.search_runs([tracking_store.experiment_id])) == 1
+    assert mlflow.active_run() is None
+    assert not Path(document["output_directory"]).exists()

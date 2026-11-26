@@ -1,9 +1,9 @@
 """Build native YOLO CE classifier networks from SupCon or Ultralytics encoders."""
 
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from pickle import UnpicklingError
-import warnings
 
 import torch
 from ultralytics.nn.modules import Classify

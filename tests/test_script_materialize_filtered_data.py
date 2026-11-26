@@ -6,8 +6,13 @@ from tempfile import TemporaryDirectory
 import pandas as pd
 import pytest
 import yaml
-from hypothesis import given, strategies as st
+from bundle_test_support import move_bundle, write_stage_config, write_stage_records
+from hypothesis import given
+from hypothesis import strategies as st
 
+from scripts import (
+    materialize_filtered_data,
+)
 from scripts.materialize_filtered_data import main, parse_args
 
 
@@ -359,3 +364,86 @@ def test_partition_matches_any_rejected_flag(flags):
         assert rejected["photo_id"].tolist() == [
             i for i, pair in enumerate(flags) if any(pair)
         ]
+
+
+@pytest.mark.parametrize("absolute_input", [False, True])
+def test_materialized_csvs_and_symlinks_remain_portable_after_bundle_move(
+    bundle, tmp_path, absolute_input
+):
+    """Both partitions reference originals through relative CSV entries and links."""
+    dataset_root, records_by_species = bundle
+    input_root = dataset_root / "stage3_filtered"
+    for records in records_by_species.values():
+        records["rejected_animal"] = [False] * 5 + [True]
+    input_records = {
+        species: frame.copy(deep=True) for species, frame in records_by_species.items()
+    }
+    if absolute_input:
+        for records in input_records.values():
+            records["image_path"] = records["image_path"].map(
+                lambda path: str(dataset_root / path)
+            )
+    write_stage_records(input_root, input_records)
+    output_root = dataset_root / "stage4_materialized"
+    config = write_stage_config(
+        tmp_path / "materialize.yaml",
+        {"input_dir": str(input_root), "output_directory": str(output_root)},
+    )
+
+    materialize_filtered_data.main(config)
+
+    for partition in ("kept", "rejected"):
+        links = list((output_root / partition).glob("*/imgs/*"))
+        assert links
+        assert all(
+            link.is_symlink() and not link.readlink().is_absolute() for link in links
+        )
+    moved_root = move_bundle(dataset_root)
+    for partition, selection in (("kept", slice(0, 5)), ("rejected", slice(5, 6))):
+        for species, original in records_by_species.items():
+            directory = moved_root / output_root.name / partition / species
+            actual = pd.read_csv(directory / "records.csv")
+            expected_paths = original.iloc[selection]["image_path"].tolist()
+            assert actual["image_path"].tolist() == expected_paths
+            for path in expected_paths:
+                link = directory / "imgs" / Path(path).name
+                assert link.resolve(strict=True) == moved_root / path
+                assert link.read_bytes() == (moved_root / path).read_bytes()
+            pd.testing.assert_frame_equal(
+                pd.read_csv(moved_root / input_root.name / species / "records.csv"),
+                input_records[species],
+            )
+
+
+@given(species=st.from_regex(r"[a-z][a-z0-9 ]{0,12}", fullmatch=True))
+def test_generated_species_names_keep_materialized_links_portable(species):
+    """Shared-root resolution and relative links also work with species-name spaces."""
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        dataset_root = root / "dataset"
+        source = dataset_root / "inaturalist" / species / "imgs" / "photo.jpg"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"original image")
+        records = pd.DataFrame(
+            {"image_path": [source.relative_to(dataset_root).as_posix()]}
+        )
+        write_stage_records(dataset_root / "stage3_filtered", {species: records})
+        config = write_stage_config(
+            root / "materialize.yaml",
+            {
+                "input_dir": str(dataset_root / "stage3_filtered"),
+                "output_directory": str(dataset_root / "stage4_materialized"),
+            },
+        )
+
+        materialize_filtered_data.main(config)
+
+        moved_root = move_bundle(dataset_root)
+        link = (
+            moved_root / "stage4_materialized" / "kept" / species / "imgs" / source.name
+        )
+        assert link.is_symlink()
+        assert not link.readlink().is_absolute()
+        assert link.read_bytes() == b"original image"
+        actual = pd.read_csv(link.parent.parent / "records.csv")
+        assert actual["image_path"].tolist() == records["image_path"].tolist()

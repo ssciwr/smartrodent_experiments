@@ -1,8 +1,11 @@
+"""Opt-in integration tests of the VLM filters against a real Ollama or vLLM backend."""
+
 import os
 from pathlib import Path
 
 import pytest
-from smartrodent.filter import FilterVLLM, FilterOllama
+
+from smartrodent.filter import FilterOllama, FilterVLLM
 
 os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")

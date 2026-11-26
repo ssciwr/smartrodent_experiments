@@ -1,8 +1,6 @@
-import sys
 from pathlib import Path
 
-from smartrodent import resolve_data_path
-import smartrodent.utils as utils
+from smartrodent import resolve_data_path, utils
 
 
 def test_resolve_data_path_returns_absolute_path_unchanged(tmp_path):

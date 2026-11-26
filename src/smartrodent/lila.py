@@ -41,8 +41,18 @@ class LilaDataset(DatasetLoader):
     """
 
     # Most to least specific: a label goes to the first rank that is a configured class.
-    RANKS = ("species", "subgenus", "genus", "tribe", "subfamily", "family",
-             "superfamily", "suborder", "order", "class")
+    RANKS = (
+        "species",
+        "subgenus",
+        "genus",
+        "tribe",
+        "subfamily",
+        "family",
+        "superfamily",
+        "suborder",
+        "order",
+        "class",
+    )
 
     def __init__(
         self,
@@ -119,16 +129,26 @@ class LilaDataset(DatasetLoader):
             ValueError: If a metadata zip does not hold exactly one JSON file.
             requests.HTTPError: If an index, taxonomy, or metadata request fails.
         """
-        missing = [c for c in self.classes if not (self.output_path / c / "records.csv").is_file()]
+        missing = [
+            c
+            for c in self.classes
+            if not (self.output_path / c / "records.csv").is_file()
+        ]
         if not missing:
             return
-        index = pd.read_csv(self._fetch(self.index_url), dtype=str, keep_default_na=False)
+        index = pd.read_csv(
+            self._fetch(self.index_url), dtype=str, keep_default_na=False
+        )
         index = index.set_index("name")
-        taxonomy = pd.read_csv(self._fetch(self.taxonomy_url), dtype=str, keep_default_na=False)
+        taxonomy = pd.read_csv(
+            self._fetch(self.taxonomy_url), dtype=str, keep_default_na=False
+        )
         selected: dict[str, list[pd.DataFrame]] = {c: [] for c in missing}
         for name, license in self.datasets.items():
             if license not in self.allowed_licenses:
-                self.logger.info("Skipping %s: license %s is not allowed", name, license)
+                self.logger.info(
+                    "Skipping %s: license %s is not allowed", name, license
+                )
                 continue
             rows = taxonomy[taxonomy["dataset_name"] == name].drop_duplicates("query")
             labels = rows.set_index("query").to_dict("index")
@@ -140,7 +160,9 @@ class LilaDataset(DatasetLoader):
             if frames:
                 records = pd.concat(frames, ignore_index=True)
             else:
-                records = pd.DataFrame(columns=["id", "photo.id", "image_url", "image_file"])
+                records = pd.DataFrame(
+                    columns=["id", "photo.id", "image_url", "image_file"]
+                )
             (self.output_path / class_name).mkdir(exist_ok=True)
             records.to_csv(self.output_path / class_name / "records.csv", index=False)
 
@@ -168,10 +190,12 @@ class LilaDataset(DatasetLoader):
         data = self._load_json(info["metadata_url_gcp"])
         category = {c["id"]: c["name"] for c in data["categories"]}
         annotations = pd.DataFrame(data["annotations"]).reindex(
-            columns=["image_id", "category_id", "bbox"])
+            columns=["image_id", "category_id", "bbox"]
+        )
         annotations["category"] = annotations["category_id"].map(category)
         annotations["class_name"] = annotations["category"].map(
-            lambda label: self._match(label, labels.get(label, {})))
+            lambda label: self._match(label, labels.get(label, {}))
+        )
         annotations = annotations.dropna(subset=["class_name"])
         if annotations.empty:
             return {}
@@ -182,14 +206,27 @@ class LilaDataset(DatasetLoader):
         group = images["seq_id"] if "seq_id" in images else images["location"]
         images["id"] = name + "/" + group.astype(str)
         images["photo.id"] = name + "/" + images["image_id"].astype(str)
-        images["image_url"] = (info["image_base_url_gcp"].rstrip("/") + "/"
-                               + images["file_name"].map(urllib.parse.quote))
-        images["image_file"] = info["short_name"] + "_" + images["file_name"].str.replace("/", "__")
+        images["image_url"] = (
+            info["image_base_url_gcp"].rstrip("/")
+            + "/"
+            + images["file_name"].map(urllib.parse.quote)
+        )
+        images["image_file"] = (
+            info["short_name"] + "_" + images["file_name"].str.replace("/", "__")
+        )
 
-        rows = annotations.groupby(["image_id", "class_name"]).agg(
-            category=("category", lambda s: "|".join(sorted(set(s)))),
-            bbox=("bbox", lambda s: json.dumps([b for b in s if isinstance(b, list)])),
-        ).reset_index().merge(images, on="image_id")
+        rows = (
+            annotations.groupby(["image_id", "class_name"])
+            .agg(
+                category=("category", lambda s: "|".join(sorted(set(s)))),
+                bbox=(
+                    "bbox",
+                    lambda s: json.dumps([b for b in s if isinstance(b, list)]),
+                ),
+            )
+            .reset_index()
+            .merge(images, on="image_id")
+        )
         rows["dataset"] = name
         rows["license"] = license
         return {c: self._cap(frame, name, c) for c, frame in rows.groupby("class_name")}
@@ -213,7 +250,9 @@ class LilaDataset(DatasetLoader):
                 return lookup[candidate.lower()]
         return None
 
-    def _cap(self, frame: pd.DataFrame, dataset_name: str, class_name: str) -> pd.DataFrame:
+    def _cap(
+        self, frame: pd.DataFrame, dataset_name: str, class_name: str
+    ) -> pd.DataFrame:
         """Take whole sequences in seeded random order until ``max_img_num`` rows.
 
         Only the last sequence taken may be cut. Seeding with dataset and class
@@ -286,8 +325,11 @@ class LilaDataset(DatasetLoader):
             images_path.mkdir(exist_ok=True)
             found = [
                 self._download_image(url, images_path / file)
-                for url, file in tqdm(zip(records["image_url"], records["image_file"]),
-                                      total=len(records), desc=class_name)
+                for url, file in tqdm(
+                    zip(records["image_url"], records["image_file"]),
+                    total=len(records),
+                    desc=class_name,
+                )
             ]
             records = records.loc[found].copy()
             records["image_path"] = [

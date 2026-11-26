@@ -35,5 +35,7 @@ def main(config_path: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", type=Path, help="Path to the downsampling YAML config.")
+    parser.add_argument(
+        "config", type=Path, help="Path to the downsampling YAML config."
+    )
     main(parser.parse_args().config)

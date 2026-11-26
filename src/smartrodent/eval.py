@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 import numpy as np
 import torch
+from matplotlib.colors import ListedColormap
 from PIL import Image
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
@@ -159,9 +159,10 @@ class FeatureExtractor:
             raise ValueError(
                 "network must have parameters to determine its device and dtype"
             )
-        if self.projector is not None:
-            if any(p.device != parameter.device for p in self.projector.parameters()):
-                raise ValueError("projector and network must be on the same device")
+        if self.projector is not None and any(
+            p.device != parameter.device for p in self.projector.parameters()
+        ):
+            raise ValueError("projector and network must be on the same device")
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -302,7 +303,7 @@ class TsneComparison:
         baseline: EvaluationFeatures,
         trained: EvaluationFeatures,
         figsize: tuple[int, int] = (18, 6),
-        markersize: int = 12
+        markersize: int = 12,
     ) -> tuple[plt.Figure, dict[str, np.ndarray]]:
         """Plot the three feature spaces for identical images and species labels.
 
@@ -343,7 +344,11 @@ class TsneComparison:
         tab20c_colors = plt.get_cmap("tab20c").colors
 
         # Combine them and slice out exactly how many classes you have (25)
-        colors = ListedColormap(np.vstack((tab20_colors, tab20b_colors, tab20c_colors))[: len(trained.label_names)])
+        colors = ListedColormap(
+            np.vstack((tab20_colors, tab20b_colors, tab20c_colors))[
+                : len(trained.label_names)
+            ]
+        )
 
         names = sorted(trained.label_names, key=trained.label_names.get)
         for axis, (title, points) in zip(axes, coordinates.items()):

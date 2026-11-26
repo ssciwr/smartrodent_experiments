@@ -14,11 +14,11 @@ import torch
 import yaml
 from PIL import Image
 from speciesnet import DEFAULT_MODEL, SpeciesNet
+from tqdm import tqdm
 from ultralytics.utils.metrics import box_iou
 
 from .base import YoloDatasetCreatorBase
 from .utils import path_component
-from tqdm import tqdm
 
 
 class _SpeciesNetDatasetMixin:
@@ -401,11 +401,11 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
                 raise ValueError(f"{name} must be a nonempty path string")
 
         class_names = settings.get("class_names")
-        if class_names is not None:
-            if not isinstance(class_names, list) or any(
-                not isinstance(name, str) for name in class_names
-            ):
-                raise TypeError("class_names must be a list of strings or null")
+        if class_names is not None and (
+            not isinstance(class_names, list)
+            or any(not isinstance(name, str) for name in class_names)
+        ):
+            raise TypeError("class_names must be a list of strings or null")
         model_name = settings.get("model_name")
         if model_name is not None:
             if not isinstance(model_name, str):

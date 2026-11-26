@@ -18,7 +18,6 @@ import torch
 import yaml
 from study_test_support import STUDY_NAME, study_report, tuning
 
-# Reuse the calibrated temporary CPU fixtures of the existing suites.
 from smartrodent.classifier_training import ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult
 from smartrodent.supcon_training import SupConExperiment
@@ -180,6 +179,10 @@ def test_supcon_study_trains_each_sampled_configuration_in_its_own_trial(
     )
 
 
+# The two SupCon script-dispatch tests below and
+# test_classifier_script_reports_the_study_winner exercise scripts/train_supcon.py and
+# scripts/train_classifier.py but stay here: they need this module's study fixtures,
+# which would otherwise have to become suite-wide plugins.
 def test_supcon_script_runs_a_study_when_the_configuration_has_a_tuning_section(
     supcon_document, recorded_trials, tmp_path, monkeypatch, capsys
 ):
@@ -223,21 +226,6 @@ def test_supcon_script_keeps_grid_sweeps_for_configurations_without_tuning(
     [
         ("temperature", ("temperature",), "!suggest-float {low: 0.05, high: 0.2}"),
         (
-            "tracked_metric",
-            ("tracked_metric",),
-            "!suggest-categorical {choices: [balanced_accuracy, supcon_loss_mean]}",
-        ),
-        (
-            "tracked_mode",
-            ("tracked_mode",),
-            "!suggest-categorical {choices: [max, min]}",
-        ),
-        (
-            "validation_metrics",
-            ("validation_metrics", "balanced_accuracy", "function"),
-            "!suggest-categorical {choices: [balanced_accuracy_score, accuracy_score]}",
-        ),
-        (
             "class_names",
             ("class_names", 0),
             "!suggest-categorical {choices: [rat, vole]}",
@@ -245,16 +233,6 @@ def test_supcon_script_keeps_grid_sweeps_for_configurations_without_tuning(
         (
             "train_dataset",
             ("train_dataset",),
-            "!suggest-categorical {choices: [@TMP@/a, @TMP@/b]}",
-        ),
-        (
-            "validation_dataset",
-            ("validation_dataset",),
-            "!suggest-categorical {choices: [@TMP@/a, @TMP@/b]}",
-        ),
-        (
-            "output_directory",
-            ("output_directory",),
             "!suggest-categorical {choices: [@TMP@/a, @TMP@/b]}",
         ),
     ],
@@ -507,6 +485,7 @@ def test_classifier_study_trains_each_sampled_configuration_in_its_own_trial(
     )
 
 
+# Script-dispatch test kept here for its study fixtures (see the SupCon section).
 def test_classifier_script_reports_the_study_winner(
     classifier_document, recorded_trials, tmp_path, monkeypatch, capsys
 ):
@@ -530,16 +509,6 @@ def test_classifier_script_reports_the_study_winner(
             "tracked_metric",
         ),
         (
-            ("tracked_mode",),
-            "!suggest-categorical {choices: [max, min]}",
-            "tracked_mode",
-        ),
-        (
-            ("validation_metrics", "balanced_accuracy", "function"),
-            "!suggest-categorical {choices: [balanced_accuracy_score, accuracy_score]}",
-            "validation_metrics",
-        ),
-        (
             ("train_dataset",),
             "!suggest-categorical {choices: [@TMP@/a, @TMP@/b]}",
             "train_dataset",
@@ -548,11 +517,6 @@ def test_classifier_script_reports_the_study_winner(
             ("validation_dataset",),
             "!suggest-categorical {choices: [@TMP@/a, @TMP@/b]}",
             "validation_dataset",
-        ),
-        (
-            ("output_directory",),
-            "!suggest-categorical {choices: [@TMP@/a, @TMP@/b]}",
-            "output_directory",
         ),
         (
             ("class_names", 0),
@@ -929,12 +893,6 @@ def test_invalid_pipeline_studies_fail_before_any_stage_trains(
             "temperature",
         ),
         (
-            "supcon",
-            ("tracked_metric",),
-            "!suggest-categorical {choices: [balanced_accuracy, supcon_loss_mean]}",
-            "tracked_metric",
-        ),
-        (
             "classifier",
             ("tracked_mode",),
             "!suggest-categorical {choices: [min, max]}",
@@ -985,9 +943,6 @@ def test_grid_sweeps_inside_a_study_stage_are_rejected(
         )
         TwoStageExperiment(config).run()
     assert recorded_trials.events == []
-
-
-# --- Review round 1 additions ---
 
 
 def test_invalid_base_settings_are_not_blamed_on_a_search_parameter(
@@ -1086,7 +1041,11 @@ def test_pipeline_study_parameters_use_full_document_paths_like_sweeps(
 
 
 @pytest.mark.parametrize(
-    "studies", [{}, {"supcon": None}, {"supcon": None, "classifier": None}]
+    "studies",
+    [
+        {},
+        {"supcon": None, "classifier": None},
+    ],
 )
 def test_a_pipeline_tuning_section_must_name_a_stage(
     study_pipeline, recorded_trials, tmp_path, studies
@@ -1100,9 +1059,6 @@ def test_a_pipeline_tuning_section_must_name_a_stage(
             studies=studies,
         )
     assert recorded_trials.events == []
-
-
-# --- Review round 2 additions ---
 
 
 def test_an_invalid_reference_document_names_the_reference_values(

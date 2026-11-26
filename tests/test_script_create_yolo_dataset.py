@@ -1,19 +1,19 @@
 """Verify script dispatch using real creators and an external SpeciesNet stub."""
 
-from pathlib import Path
 import json
 import runpy
+from pathlib import Path
 
 import pandas as pd
 import pytest
 import yaml
+from speciesnet_test_support import SpeciesNetStub, detection
 
 from smartrodent import yolo_dataset_creation
 from smartrodent.yolo_dataset_creation import (
     YoloClassifierDatasetCreatorFromSpeciesnet,
     YoloDetectorDatasetCreatorFromSpeciesnet,
 )
-from speciesnet_test_support import SpeciesNetStub, detection
 
 
 @pytest.fixture(

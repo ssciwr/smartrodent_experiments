@@ -6,11 +6,11 @@ against the PyTorch checkpoint they were exported from.
 """
 
 import ast
-from dataclasses import replace
 import hashlib
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,26 +19,21 @@ import onnxruntime
 import onnxslim
 import pytest
 import torch
-import yaml
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from PIL import Image
-from hypothesis import HealthCheck, given, settings, strategies as st
+from training_test_support import wide_native_encoder
 from ultralytics import YOLO
 from ultralytics.utils.export.engine import best_onnx_opset
 
+from smartrodent.classifier_training import (
+    ClassifierConfiguration,
+    ClassifierExperiment,
+)
 from smartrodent.experiment_support import ImageTransforms
 from smartrodent.supcon_model import YoloSupConModel
 from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
-from test_classifier_model import _native_checkpoint
-from test_classifier_training import (
-    classifier_assets,
-    classifier_configuration,
-    training_api,
-)  # noqa: F401
-from test_supcon_experiment import experiment_configuration  # noqa: F401
 
-# Ultralytics' native exporter rejects files below 0.1 MB, so classifier exports
-# need wider networks than the 8-channel fixtures used elsewhere.
-EXPORT_WIDTH = 32
 SUPPORTED_EXPORT_KEYS = {"dynamic", "simplify"}
 
 
@@ -79,23 +74,8 @@ print(json.dumps(result))
 """
 
 
-def widened_architecture(architecture, path):
-    """Write a copy of a tiny architecture with an exportable first-layer width."""
-    document = yaml.safe_load(architecture.read_text())
-    document["backbone"][0][3][0] = EXPORT_WIDTH
-    path.write_text(yaml.safe_dump(document))
-    return path
-
-
-def wide_native_encoder(architecture, path):
-    """Write a native classifier checkpoint large enough for native ONNX export."""
-    return _native_checkpoint(architecture, path, width=EXPORT_WIDTH).path
-
-
 @pytest.fixture
-def classifier_case(
-    training_api, classifier_configuration, classifier_assets, tmp_path
-):
+def classifier_case(classifier_configuration, classifier_assets, tmp_path):
     """Run the CE classifier trainer; its native export sits next to best.pt."""
     torch.set_num_threads(2)
     encoder = wide_native_encoder(
@@ -112,11 +92,9 @@ def classifier_case(
     return SimpleNamespace(
         base=base,
         image_size=base.transforms["image_size"],
-        run=lambda config: training_api.ClassifierExperiment(config).run_with_result(),
+        run=lambda config: ClassifierExperiment(config).run_with_result(),
         expected=lambda config: config.output_directory / "weights" / "best.onnx",
-        rebuild=lambda values: training_api.ClassifierConfiguration.from_mapping(
-            values
-        ),
+        rebuild=lambda values: ClassifierConfiguration.from_mapping(values),
     )
 
 
@@ -235,20 +213,11 @@ def test_both_exports_use_the_ultralytics_default_opset(export_case):
     assert versions.get("", versions.get("ai.onnx")) == best_onnx_opset(onnx)
 
 
+# Arbitrary unknown keys are covered by the property test below; here one native
+# exporter option that is deliberately not exposed, non-bool values for both
+# supported options, and a non-mapping value.
 @pytest.mark.parametrize(
-    "export",
-    [
-        {"format": "onnx"},
-        {"opset": 17},
-        {"imgsz": 64},
-        {"nms": True},
-        {"half": True},
-        {"dynamic": "yes"},
-        {"dynamic": 1},
-        {"simplify": 1},
-        "onnx",
-        True,
-    ],
+    "export", [{"opset": 17}, {"dynamic": "yes"}, {"simplify": 1}, "onnx"]
 )
 def test_invalid_export_settings_fail_at_configuration(export_case, export):
     """Unsupported options or values fail when the configuration is built, before training."""
@@ -349,6 +318,7 @@ def _run_as_recipient(model, images):
     """Run the exported file in a fresh process that cannot import any training library."""
     completed = subprocess.run(
         [sys.executable, "-I", "-c", RECIPIENT_SCRIPT, str(model), *map(str, images)],
+        check=False,
         capture_output=True,
         text=True,
         timeout=120,

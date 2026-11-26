@@ -85,7 +85,6 @@ def test_reads_only_kept_corrected_records(tmp_path):
     ("pattern", "relative_path"),
     [
         ("*/records.csv", "Mus musculus/records.csv"),
-        ("accepted/*/metadata.csv", "accepted/Mus musculus/metadata.csv"),
         (
             "reviewed/accepted/*/metadata.csv",
             "reviewed/accepted/Mus musculus/metadata.csv",

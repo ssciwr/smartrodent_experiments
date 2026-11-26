@@ -1,10 +1,12 @@
 """Report completed training runs and rank their configured tracking metrics."""
 
 from collections.abc import Sequence
+from pathlib import Path
+
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
+
 from smartrodent.training_validation import FiniteNumber, Mode, Nonblank, settings_dict
-from pathlib import Path
 
 
 @dataclass(frozen=True, config=ConfigDict(extra="forbid"))

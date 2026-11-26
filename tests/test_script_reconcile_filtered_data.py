@@ -1,13 +1,19 @@
 """Tests for reconciling human-sorted images with their source records."""
 
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pandas as pd
 import pytest
 import yaml
-from hypothesis import given, strategies as st
+from bundle_test_support import move_bundle, write_stage_config, write_stage_records
+from hypothesis import given
+from hypothesis import strategies as st
 
+from scripts import (
+    reconcile_filtered_data,
+)
 from scripts.reconcile_filtered_data import main
 
 
@@ -203,3 +209,53 @@ def test_reconciliation_preserves_original_associations(rows):
         (destination / unassociated_image.name).symlink_to(unassociated_image)
         with pytest.raises(ValueError, match="Association"):
             main(config)
+
+
+def test_reconciliation_preserves_shared_root_paths_after_bundle_move(bundle, tmp_path):
+    """Human decisions compare original identities but keep portable CSV strings."""
+    dataset_root, records_by_species = bundle
+    for partition, selection in (("kept", slice(0, 5)), ("rejected", slice(5, 6))):
+        selected = {
+            species: frame.iloc[selection].copy()
+            for species, frame in records_by_species.items()
+        }
+        write_stage_records(dataset_root / "stage4_materialized" / partition, selected)
+        for species, records in selected.items():
+            image_dir = dataset_root / "stage5_corrected" / partition / species / "imgs"
+            image_dir.mkdir(parents=True)
+            for path in records["image_path"]:
+                (image_dir / Path(path).name).symlink_to(
+                    os.path.relpath(dataset_root / path, image_dir)
+                )
+    moved_root = move_bundle(dataset_root)
+    config = write_stage_config(
+        tmp_path / "reconcile.yaml",
+        {
+            "input_directory": str(moved_root / "stage4_materialized"),
+            "output_directory": str(moved_root / "stage5_corrected"),
+            "relevant_subdirs": ["kept", "rejected"],
+            "output_columns": ["kept_human", "rejected_human"],
+            "allowed_suffixes": [".jpg"],
+        },
+    )
+
+    reconcile_filtered_data.main(config)
+
+    for partition, selection in (("kept", slice(0, 5)), ("rejected", slice(5, 6))):
+        for species, original in records_by_species.items():
+            corrected = pd.read_csv(
+                moved_root
+                / "stage5_corrected"
+                / partition
+                / species
+                / "records_corrected.csv"
+            )
+            association_columns = ["id", "photo.id", "image_path"]
+            pd.testing.assert_frame_equal(
+                corrected[association_columns],
+                original.iloc[selection][association_columns].reset_index(drop=True),
+            )
+            assert corrected[f"{partition}_human"].all()
+            assert all(
+                (moved_root / path).is_file() for path in corrected["image_path"]
+            )

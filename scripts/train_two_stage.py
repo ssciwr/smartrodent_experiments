@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+
 from smartrodent.two_stage_training import TwoStageConfiguration, TwoStageExperiment
 
 
@@ -10,10 +11,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("configuration", type=Path)
     args = parser.parse_args()
-    result = TwoStageExperiment(TwoStageConfiguration.from_yaml(args.configuration)).run()
+    result = TwoStageExperiment(
+        TwoStageConfiguration.from_yaml(args.configuration)
+    ).run()
     for classifier in result.classifier_results:
         print(f"Final classifier checkpoint: {classifier.last_checkpoint}")
-    print(f"Selected classifier checkpoint: {result.selected_classifier.best_checkpoint}")
+    print(
+        f"Selected classifier checkpoint: {result.selected_classifier.best_checkpoint}"
+    )
 
 
 if __name__ == "__main__":

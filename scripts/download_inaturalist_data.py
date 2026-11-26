@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+
 from smartrodent.inaturalist import InaturalistDataset
 
 if __name__ == "__main__":

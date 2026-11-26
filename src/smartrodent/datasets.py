@@ -41,8 +41,14 @@ class ImageDataset(torch.utils.data.Dataset):
         for label_name, label_id in self.label_names.items():
             directory = self.data_dir / label_name
             if not directory.exists():
-                raise FileExistsError(f"no directory named {label_name} in {self.data_dir}")
-            images = [image for image in directory.iterdir() if image.suffix in self.img_extensions]
+                raise FileExistsError(
+                    f"no directory named {label_name} in {self.data_dir}"
+                )
+            images = [
+                image
+                for image in directory.iterdir()
+                if image.suffix in self.img_extensions
+            ]
             self.images.extend(images)
             self.labels.extend([label_id] * len(images))
             self.class_counts[label_name] = len(images)

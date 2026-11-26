@@ -1,7 +1,7 @@
 """Compare registered classifier champions using explicit validation provenance."""
 
-from collections.abc import Mapping, Sequence
 import json
+from collections.abc import Mapping, Sequence
 
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
@@ -22,16 +22,25 @@ class ClassifierChampionRegistry:
     """
 
     def __init__(
-        self, configuration: MlflowConfiguration, metric_definition: Mapping,
-        class_names: Sequence[str], client: MlflowClient | None = None,
+        self,
+        configuration: MlflowConfiguration,
+        metric_definition: Mapping,
+        class_names: Sequence[str],
+        client: MlflowClient | None = None,
     ):
         """Keep comparison separate from model registration and artifact publication."""
         self.configuration = configuration
         # Stable JSON preserves function/options across processes and invocations;
         # a shared display name must not make different scoring functions comparable.
-        self.metric_definition = json.dumps(dict(metric_definition), sort_keys=True, separators=(",", ":"))
+        self.metric_definition = json.dumps(
+            dict(metric_definition), sort_keys=True, separators=(",", ":")
+        )
         self.class_names = json.dumps(sorted(class_names), separators=(",", ":"))
-        self.client = client if client is not None else MlflowClient(tracking_uri=configuration.tracking_uri)
+        self.client = (
+            client
+            if client is not None
+            else MlflowClient(tracking_uri=configuration.tracking_uri)
+        )
 
     def comparison_tags(self, result: ExperimentResult) -> dict:
         """Describe the original score and validation identity in portable registry tags.
@@ -73,28 +82,42 @@ class ClassifierChampionRegistry:
         if result.validation_dataset is None:
             return None
         config = self.configuration
-        if config.registered_model_name is None or result.registered_model_version is None:
-            raise ValueError("Champion promotion requires a registered classifier version")
+        if (
+            config.registered_model_name is None
+            or result.registered_model_version is None
+        ):
+            raise ValueError(
+                "Champion promotion requires a registered classifier version"
+            )
         try:
-            incumbent = self.client.get_model_version_by_alias(config.registered_model_name, config.champion_alias)
+            incumbent = self.client.get_model_version_by_alias(
+                config.registered_model_name, config.champion_alias
+            )
         except MlflowException as error:
             # MLflow's SQLite registry reports an absent alias as an invalid
             # parameter rather than RESOURCE_DOES_NOT_EXIST. Match that exact
             # response; other parameter/backend errors must still propagate.
             missing_alias = (
                 error.error_code == "INVALID_PARAMETER_VALUE"
-                and error.message == f"Registered model alias {config.champion_alias} not found."
+                and error.message
+                == f"Registered model alias {config.champion_alias} not found."
             )
             if error.error_code != "RESOURCE_DOES_NOT_EXIST" and not missing_alias:
                 raise
             incumbent = None
         if incumbent is not None:
             score = self._incumbent_score(incumbent.tags, result)
-            improved = result.best_value < score if result.tracked_mode == "min" else result.best_value > score
+            improved = (
+                result.best_value < score
+                if result.tracked_mode == "min"
+                else result.best_value > score
+            )
             if not improved:
                 return str(incumbent.version)
         self.client.set_registered_model_alias(
-            config.registered_model_name, config.champion_alias, result.registered_model_version,
+            config.registered_model_name,
+            config.champion_alias,
+            result.registered_model_version,
         )
         return result.registered_model_version
 
@@ -107,8 +130,12 @@ class ClassifierChampionRegistry:
         expected["validation_status"] = "passed"
         expected["dataset_revision"] = self.configuration.dataset_revision
         if any(tags.get(name) != value for name, value in expected.items()):
-            raise ValueError("Existing champion validation metadata is incompatible or missing; an explicit decision is required")
+            raise ValueError(
+                "Existing champion validation metadata is incompatible or missing; an explicit decision is required"
+            )
         try:
             return parse_settings(FiniteNumber, float(tags["best_value"]))
         except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("Existing champion needs finite score metadata; an explicit decision is required") from error
+            raise ValueError(
+                "Existing champion needs finite score metadata; an explicit decision is required"
+            ) from error

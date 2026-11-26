@@ -102,7 +102,6 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | --- | --- |
 | [`inaturalist.py`](src/smartrodent/inaturalist.py) | `InaturalistDataset`: observation selection, licensed image acquisition, metadata, caching, and retries. |
 | [`lila.py`](src/smartrodent/lila.py) | `LilaDataset`: license-aware camera-trap selection using LILA metadata and taxonomy. |
-| [`licenses.py`](src/smartrodent/licenses.py) | License managers, Creative Commons handling, and license-manager registration. |
 | [`filter.py`](src/smartrodent/filter.py) | `VLMFilter`, `FilterOllama`, `FilterVLLM`: label per-species image records without modifying originals. |
 | [`dataset_splitting.py`](src/smartrodent/dataset_splitting.py) | `DatasetSplitter` and `TrainingDatasetSampler`: split metadata and sample training rows. |
 | [`yolo_dataset_creation.py`](src/smartrodent/yolo_dataset_creation.py) | SpeciesNet-backed detector/classifier dataset creators. |
@@ -325,7 +324,9 @@ from smartrodent.classifier_sweeps import ClassifierSweepConfiguration
 from smartrodent.two_stage_training import TwoStageConfiguration
 
 supcon_runs = load_training_configurations(Path("configs/train_supcon_config.yaml"))
-classifier_sweep = ClassifierSweepConfiguration.from_yaml("configs/train_classifier_config.yaml")
+classifier_sweep = ClassifierSweepConfiguration.from_yaml(
+    "configs/train_classifier_config.yaml"
+)
 pipeline = TwoStageConfiguration.from_yaml("configs/train_two_stage_config.yaml")
 print(len(supcon_runs), len(classifier_sweep.configurations))
 ```
@@ -603,7 +604,9 @@ from smartrodent.supcon_model import YoloSupConModel
 supcon = YoloSupConModel.from_checkpoint(
     "runs/supcon_standalone_xl_srilanka_lr-00001/best.pt", device="cpu"
 )
-classifier = YOLO("runs/classifier_xl_srilanka/run_001/weights/best.pt", task="classify").to("cpu")
+classifier = YOLO(
+    "runs/classifier_xl_srilanka/run_001/weights/best.pt", task="classify"
+).to("cpu")
 print(classifier.names)  # Integer ID -> species name.
 # classifier(...) uses the native prediction API.
 # classifier.model in eval mode returns (probabilities, logits).
@@ -643,7 +646,9 @@ import numpy as np
 import onnxruntime
 from PIL import Image
 
-session = onnxruntime.InferenceSession("weights/best.onnx", providers=["CPUExecutionProvider"])
+session = onnxruntime.InferenceSession(
+    "weights/best.onnx", providers=["CPUExecutionProvider"]
+)
 metadata = session.get_modelmeta().custom_metadata_map
 height, width = ast.literal_eval(metadata["imgsz"])
 image = Image.open("mouse.jpg").convert("RGB").resize((width, height), Image.BILINEAR)

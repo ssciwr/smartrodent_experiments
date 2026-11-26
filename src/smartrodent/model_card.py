@@ -55,9 +55,13 @@ def render_model_card(document: dict, level: int = 1) -> str:
     for key, value in document.items():
         title = str(key).replace("_", " ").title()
         if isinstance(value, dict):
-            lines.extend([f"{'#' * level} {title}", "", render_model_card(value, level + 1)])
+            lines.extend(
+                [f"{'#' * level} {title}", "", render_model_card(value, level + 1)]
+            )
         elif isinstance(value, list):
-            lines.extend([f"{'#' * level} {title}", "", *(f"- {item}" for item in value), ""])
+            lines.extend(
+                [f"{'#' * level} {title}", "", *(f"- {item}" for item in value), ""]
+            )
         else:
             text = "Not available" if value is None else str(value)
             lines.extend([f"**{title}:** {text}", ""])
@@ -65,8 +69,13 @@ def render_model_card(document: dict, level: int = 1) -> str:
 
 
 def write_training_card(
-    template: dict, checkpoint: Path, snapshot: Mapping, *, model_details: Mapping,
-    validation_dataset: Path | None, provenance: Mapping,
+    template: dict,
+    checkpoint: Path,
+    snapshot: Mapping,
+    *,
+    model_details: Mapping,
+    validation_dataset: Path | None,
+    provenance: Mapping,
 ) -> tuple[Path, Path]:
     """Populate and write a verified template from a selected training snapshot.
 
@@ -84,16 +93,23 @@ def write_training_card(
     card = deepcopy(template)
     card["model"].update(model_details)
     # Preserve dataset IDs; sorting changes only their display order.
-    card["classes"] = dict(sorted((index, name) for name, index in snapshot["label_names"].items()))
+    card["classes"] = dict(
+        sorted((index, name) for name, index in snapshot["label_names"].items())
+    )
     metrics = snapshot["history"][-1].get("validation", {})
     card["validation"].update(
         status="evaluated" if metrics else "not_validated",
         dataset=str(validation_dataset) if validation_dataset is not None else None,
-        epoch=snapshot["epoch"], metrics=metrics,
+        epoch=snapshot["epoch"],
+        metrics=metrics,
     )
     card["provenance"].update(
-        checkpoint=checkpoint.name, epoch=snapshot["epoch"],
-        run_id=None, model_id=None, git_commit=None, dataset_revision=None,
+        checkpoint=checkpoint.name,
+        epoch=snapshot["epoch"],
+        run_id=None,
+        model_id=None,
+        git_commit=None,
+        dataset_revision=None,
     )
     card["provenance"].update(provenance)
     return write_model_card(card, checkpoint)
@@ -111,6 +127,8 @@ def write_model_card(document: dict, checkpoint: Path) -> tuple[Path, Path]:
     """
     yaml_path = checkpoint.with_suffix(".model_card.yaml")
     markdown_path = checkpoint.with_suffix(".model_card.md")
-    yaml_path.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    yaml_path.write_text(
+        yaml.safe_dump(document, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
     markdown_path.write_text(render_model_card(document), encoding="utf-8")
     return yaml_path, markdown_path

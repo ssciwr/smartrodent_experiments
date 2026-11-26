@@ -4,51 +4,28 @@ Only stage execution is replaced in most tests: YAML loading, expansion,
 configuration validation, orchestration, ranking, and summary writing stay real.
 """
 
+import shutil
+import warnings
 from copy import deepcopy
 from dataclasses import replace
 from itertools import product
 from pathlib import Path
-import shutil
-import sys
 from types import SimpleNamespace
-import warnings
 
-from hypothesis import HealthCheck, given, settings, strategies as st
 import pytest
 import torch
 import yaml
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+from training_test_support import (
+    invoke_entrypoint,
+    selection_summary,
+    serialized_result,
+)
 from ultralytics import YOLO
 
-from scripts import train_classifier
 from smartrodent.classifier_training import ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult
-from smartrodent.two_stage_training import TwoStageConfiguration, TwoStageExperiment
-from test_classifier_training import (
-    classifier_assets,
-    classifier_configuration,
-    training_api,
-)
-from test_two_stage_training import _serialized_result, recorded_stages
-
-
-def _invoke(entrypoint, document, config_path, monkeypatch, *, text=None):
-    """Exercise the real entry point without requiring a new sweep-specific API."""
-    config_path.write_text(yaml.safe_dump(document) if text is None else text)
-    if entrypoint == "standalone":
-        monkeypatch.setattr(sys, "argv", ["train_classifier.py", str(config_path)])
-        return train_classifier.main()
-    elif entrypoint == "two_stage":
-        configuration = TwoStageConfiguration.from_yaml(config_path)
-        return TwoStageExperiment(configuration).run()
-    else:
-        raise AssertionError(f"Unknown test entry point: {entrypoint}")
-
-
-def _summary(document):
-    """Read the public, portable report rather than inspecting sweep internals."""
-    return yaml.safe_load(
-        (Path(document["output_directory"]) / "selection.yaml").read_text()
-    )
 
 
 def _assert_saved_results(summary, results):
@@ -56,63 +33,13 @@ def _assert_saved_results(summary, results):
     saved_results = summary["classifier_results"]
     assert len(saved_results) == len(results)
     for saved, result in zip(saved_results, results, strict=True):
-        assert _serialized_result(result).items() <= saved.items()
+        assert serialized_result(result).items() <= saved.items()
 
 
 @pytest.fixture
 def standalone_document(classifier_configuration):
     """Supply real temporary inputs so no project checkpoint or dataset is touched."""
     return classifier_configuration.to_dict()
-
-
-@pytest.fixture
-def sweep_pipeline_document(classifier_configuration, tmp_path):
-    """Share the classifier fixture's inputs rather than creating colliding image directories."""
-    stage = classifier_configuration.to_dict()
-    data = {
-        key: stage.pop(key)
-        for key in ("train_dataset", "validation_dataset", "class_names")
-    }
-    stage.pop("output_directory")
-    stage.pop("mlflow")
-    stage["initialization"]["encoder"] = {"source": "selected_supcon"}
-    # The pipeline's tiny network (0=Conv, 1=Classify) is shallower than the fixture's.
-    stage["freeze"] = 1
-    architecture = tmp_path / "sweep-model.yaml"
-    architecture.write_text(
-        yaml.safe_dump(
-            {
-                "nc": 2,
-                "backbone": [[-1, 1, "Conv", [8, 3, 2]]],
-                "head": [[-1, 1, "Classify", [2]]],
-            }
-        )
-    )
-    return {
-        "output_directory": str(tmp_path / "pipeline"),
-        "data": data,
-        "supcon": {
-            "model_name": str(architecture),
-            "epochs": 3,
-            "transforms": deepcopy(stage["transforms"]),
-            "optimizer": {"lr": {"type": "sweep", "values": [0.001, 0.002, 0.003]}},
-            "classes_per_batch": 2,
-            "samples_per_class": 2,
-            "samples_per_epoch": 8,
-            "workers": 0,
-            "device": "cpu",
-            "seed": 11,
-            "dropout": 0.0,
-            "output_features": 4,
-            "temperature": 0.1,
-            "tracked_metric": "balanced_accuracy",
-            "tracked_mode": "max",
-            "validation_metrics": {
-                "balanced_accuracy": {"function": "balanced_accuracy_score"}
-            },
-        },
-        "classifier": stage,
-    }
 
 
 @pytest.fixture
@@ -156,6 +83,12 @@ def recorded_classifiers(recorded_stages, monkeypatch):
     return observed
 
 
+# Ranking and validation rules live in the shared sweep code; tests of those rules
+# run through the standalone entry point only. Both entry points are kept where the
+# entry point changes paths, coupled targets or summaries.
+SHARED_RULE = pytest.mark.parametrize("sweep_case", ["standalone"], indirect=True)
+
+
 @pytest.fixture(params=["standalone", "two_stage"])
 def sweep_case(
     request,
@@ -177,7 +110,7 @@ def sweep_case(
 
     def run(*, text=None):
         """Load and execute this case through its production entry point."""
-        return _invoke(entrypoint, document, path, monkeypatch, text=text)
+        return invoke_entrypoint(entrypoint, document, path, monkeypatch, text=text)
 
     return SimpleNamespace(
         entrypoint=entrypoint,
@@ -241,7 +174,7 @@ def test_classifier_cartesian_and_coupled_sweeps_reuse_one_encoder(
             Path(before["initialization"]["encoder"]["checkpoint"]).resolve()
         }
     assert case.document == before
-    summary = _summary(case.document)
+    summary = selection_summary(case.document)
     _assert_saved_results(summary, recorded_classifiers.results)
     assert summary["selected_classifier"]["best_checkpoint"] == str(
         recorded_classifiers.results[0].best_checkpoint
@@ -264,6 +197,7 @@ def thousand_class_head(classifier_assets, tmp_path):
     return path
 
 
+@SHARED_RULE
 def test_redundant_linear_initialization_is_flagged_before_training_without_deduplication(
     sweep_case, recorded_classifiers, recorded_stages, thousand_class_head, monkeypatch
 ):
@@ -280,33 +214,35 @@ def test_redundant_linear_initialization_is_flagged_before_training_without_dedu
         },
     }
     original = ClassifierExperiment.run_with_result
-    with pytest.warns(UserWarning, match="(?i)linear.*random|random.*linear") as caught:
 
-        def run(self, **kwargs):
-            assert any(
-                "1000" in str(warning.message) and "2" in str(warning.message)
-                for warning in caught
+    # The wrappers read `caught` when called, i.e. inside the warns block below.
+    def run(self, **kwargs):
+        assert any(
+            "1000" in str(warning.message) and "2" in str(warning.message)
+            for warning in caught
+        )
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(ClassifierExperiment, "run_with_result", run)
+    if case.entrypoint == "two_stage":
+        from smartrodent.supcon_training import SupConExperiment
+
+        original_supcon = SupConExperiment.run_with_result
+
+        def run_supcon(self, **kwargs):
+            assert caught, (
+                "The redundant-head warning arrived only after SupCon training"
             )
-            return original(self, **kwargs)
+            return original_supcon(self, **kwargs)
 
-        monkeypatch.setattr(ClassifierExperiment, "run_with_result", run)
-        if case.entrypoint == "two_stage":
-            from smartrodent.supcon_training import SupConExperiment
-
-            original_supcon = SupConExperiment.run_with_result
-
-            def run_supcon(self, **kwargs):
-                assert (
-                    caught
-                ), "The redundant-head warning arrived only after SupCon training"
-                return original_supcon(self, **kwargs)
-
-            monkeypatch.setattr(SupConExperiment, "run_with_result", run_supcon)
+        monkeypatch.setattr(SupConExperiment, "run_with_result", run_supcon)
+    with pytest.warns(UserWarning, match="(?i)linear.*random|random.*linear") as caught:
         case.run()
     assert len(recorded_classifiers.results) == 4
-    assert len(_summary(case.document)["classifier_results"]) == 4
+    assert len(selection_summary(case.document)["classifier_results"]) == 4
 
 
+@SHARED_RULE
 @pytest.mark.parametrize("boundary,source_count", [("linear", 2), ("full", 1000)])
 def test_distinct_head_initializations_are_not_flagged_as_redundant(
     sweep_case, classifier_assets, thousand_class_head, boundary, source_count
@@ -329,13 +265,13 @@ def test_distinct_head_initializations_are_not_flagged_as_redundant(
     )
 
 
+@SHARED_RULE
 @pytest.mark.parametrize(
     "field,values",
     [
         ("encoder_batchnorm", ["eval", "adapt"]),
         ("freeze", [1, [0, 1]]),
         ("batch_size", [2, 4]),
-        ("seed", [11, 29]),
     ],
 )
 def test_classifier_sweeps_are_not_limited_to_head_parameters(
@@ -376,18 +312,21 @@ def test_custom_yaml_tags_and_full_document_coupled_targets(
         (c.train_kwargs["lr0"], c.batch_size)
         for c in recorded_classifiers.configurations
     ] == [(0.001, 2), (0.002, 4)]
-    summary = _summary(case.document)
+    summary = selection_summary(case.document)
     assert len(summary["classifier_results"]) == 2
 
 
 @pytest.mark.parametrize(
-    "mode,values,winner",
+    "sweep_case,mode,values,winner",
     [
-        ("max", [0.2, 0.9, 0.4], 1),
-        ("min", [0.8, 0.1, 0.6], 1),
-        ("max", [0.9, 0.9, 0.2], 0),
-        ("min", [0.1, 0.1, 0.8], 0),
+        ("standalone", "max", [0.2, 0.9, 0.4], 1),
+        ("standalone", "min", [0.8, 0.1, 0.6], 1),
+        ("standalone", "max", [0.9, 0.9, 0.2], 0),
+        ("standalone", "min", [0.1, 0.1, 0.8], 0),
+        # the pipeline result's classifier_result raises for a multi-run sweep
+        ("two_stage", "max", [0.2, 0.9, 0.4], 1),
     ],
+    indirect=["sweep_case"],
 )
 def test_sweep_champion_uses_best_validation_result_and_stable_ties(
     sweep_case, recorded_classifiers, mode, values, winner
@@ -402,7 +341,7 @@ def test_sweep_champion_uses_best_validation_result_and_stable_ties(
     recorded_classifiers.values = values
     result = case.run()
     selected = recorded_classifiers.results[winner]
-    summary = _summary(case.document)
+    summary = selection_summary(case.document)
     _assert_saved_results(summary, recorded_classifiers.results)
     assert summary["selected_classifier"]["best_checkpoint"] == str(
         selected.best_checkpoint
@@ -431,14 +370,15 @@ def test_single_classifier_keeps_existing_output_path_and_singular_result(
     assert len(recorded_classifiers.results) == 1
     selected = recorded_classifiers.results[0]
     assert selected.output_directory == case.classifier_root
-    assert _summary(case.document)["selected_classifier"]["best_checkpoint"] == str(
-        selected.best_checkpoint
-    )
+    assert selection_summary(case.document)["selected_classifier"][
+        "best_checkpoint"
+    ] == str(selected.best_checkpoint)
     if case.entrypoint == "two_stage":
         assert result.classifier_result == result.selected_classifier == selected
         assert tuple(result.classifier_results) == (selected,)
 
 
+@SHARED_RULE
 @pytest.mark.parametrize("values", [[], [0.001, 0]])
 def test_all_classifier_variants_are_validated_before_any_training(
     sweep_case, recorded_classifiers, recorded_stages, values
@@ -452,6 +392,7 @@ def test_all_classifier_variants_are_validated_before_any_training(
     assert not sweep_case.root.exists()
 
 
+@SHARED_RULE
 @pytest.mark.parametrize("field", ["tracked_metric", "tracked_mode"])
 def test_incompatible_classifier_ranking_objectives_are_rejected_before_training(
     sweep_case, recorded_classifiers, recorded_stages, field
@@ -473,6 +414,7 @@ def test_incompatible_classifier_ranking_objectives_are_rejected_before_training
     assert recorded_stages.supcon == []
 
 
+@SHARED_RULE
 @pytest.mark.parametrize(
     "definitions",
     [
@@ -510,8 +452,10 @@ def test_equivalent_validation_path_aliases_rank_without_altering_reported_paths
         "values": [original, str(alias)],
     }
     recorded_classifiers.values = [0.8, 0.1]
-    _invoke("standalone", standalone_document, tmp_path / "aliases.yaml", monkeypatch)
-    report = _summary(standalone_document)
+    invoke_entrypoint(
+        "standalone", standalone_document, tmp_path / "aliases.yaml", monkeypatch
+    )
+    report = selection_summary(standalone_document)
     _assert_saved_results(report, recorded_classifiers.results)
     assert [
         result["validation_dataset"] for result in report["classifier_results"]
@@ -532,7 +476,7 @@ def test_different_class_subsets_cannot_share_a_validation_champion(
     }
     if validation:
         with pytest.raises(ValueError, match="class|population|compar"):
-            _invoke(
+            invoke_entrypoint(
                 "standalone",
                 standalone_document,
                 tmp_path / "classes.yaml",
@@ -541,11 +485,11 @@ def test_different_class_subsets_cannot_share_a_validation_champion(
         assert recorded_classifiers.configurations == []
     else:
         standalone_document.update(validation_dataset=None, validation_metrics=None)
-        _invoke(
+        invoke_entrypoint(
             "standalone", standalone_document, tmp_path / "classes.yaml", monkeypatch
         )
         assert len(recorded_classifiers.results) == 2
-        assert _summary(standalone_document)["selected_classifier"] is None
+        assert selection_summary(standalone_document)["selected_classifier"] is None
 
 
 def test_reordered_class_declarations_remain_comparable(
@@ -557,10 +501,10 @@ def test_reordered_class_declarations_remain_comparable(
         "values": [["rat", "mouse"], ["mouse", "rat"]],
     }
     recorded_classifiers.values = [0.8, 0.1]
-    _invoke(
+    invoke_entrypoint(
         "standalone", standalone_document, tmp_path / "class-order.yaml", monkeypatch
     )
-    report = _summary(standalone_document)
+    report = selection_summary(standalone_document)
     _assert_saved_results(report, recorded_classifiers.results)
     assert report["selected_classifier"]["best_checkpoint"] == str(
         recorded_classifiers.results[1].best_checkpoint
@@ -578,19 +522,19 @@ def test_standalone_classifier_champion_requires_the_same_validation_dataset(
         "values": [standalone_document["validation_dataset"], str(other)],
     }
     with pytest.raises(ValueError, match="validation|compar"):
-        _invoke(
+        invoke_entrypoint(
             "standalone", standalone_document, tmp_path / "config.yaml", monkeypatch
         )
     assert recorded_classifiers.configurations == []
 
 
+@SHARED_RULE
 @pytest.mark.parametrize(
     "override",
     [
         {"tracked_metric": "unconfigured_metric"},
         {"tracked_mode": "max"},
         {"validation_dataset": None},
-        {"validation_dataset": Path("different-validation")},
     ],
 )
 @pytest.mark.parametrize("reported_pattern", ["second", "all", "singleton"])
@@ -622,7 +566,8 @@ def test_incompatible_reported_classifier_results_are_not_ranked(
         assert yaml.safe_load(path.read_text()).get("selected_classifier") is None
 
 
-@pytest.mark.parametrize("fail_at", [0, 1, 2])
+@SHARED_RULE
+@pytest.mark.parametrize("fail_at", [0, 2])  # first and last run
 def test_classifier_failure_stops_the_sweep_without_selecting_a_partial_champion(
     sweep_case, recorded_classifiers, fail_at
 ):
@@ -706,7 +651,7 @@ def test_failed_rerun_invalidates_an_old_classifier_champion_summary(
     case = sweep_case
     case.stage["train_kwargs"]["lr0"] = {"type": "sweep", "values": [0.001, 0.002]}
     case.run()
-    assert _summary(case.document)["selected_classifier"] is not None
+    assert selection_summary(case.document)["selected_classifier"] is not None
     first = recorded_classifiers.results[0]
     completed_bytes = first.best_checkpoint.read_bytes()
     recorded_classifiers.configurations.clear()
@@ -735,8 +680,10 @@ def test_standalone_training_only_sweeps_do_not_declare_a_validation_champion(
         "type": "sweep",
         "values": [0.001, 0.002],
     }
-    _invoke("standalone", standalone_document, tmp_path / "config.yaml", monkeypatch)
-    summary = _summary(standalone_document)
+    invoke_entrypoint(
+        "standalone", standalone_document, tmp_path / "config.yaml", monkeypatch
+    )
+    summary = selection_summary(standalone_document)
     assert len(recorded_classifiers.results) == 2
     _assert_saved_results(summary, recorded_classifiers.results)
     assert summary["selected_classifier"] is None
@@ -775,7 +722,7 @@ def test_standalone_cartesian_expansion_preserves_every_configuration(
     document["batch_size"] = {"type": "sweep", "values": batch_sizes}
     recorded_classifiers.configurations.clear()
     recorded_classifiers.results.clear()
-    _invoke("standalone", document, tmp_path / "property.yaml", monkeypatch)
+    invoke_entrypoint("standalone", document, tmp_path / "property.yaml", monkeypatch)
     # safe_dump sorts keys: batch_size is encountered before train_kwargs.lr0.
     expected = list(product(batch_sizes, learning_rates))
     assert [

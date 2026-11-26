@@ -9,18 +9,19 @@ from copy import deepcopy
 import numpy as np
 import pytest
 import torch
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 from PIL import Image
 
+from smartrodent.experiment_support import (
+    CheckpointStore,
+    EarlyStopping,
+    ImageTransforms,
+    MlflowConfiguration,
+    SchedulerConfiguration,
+    resolve_validation_metrics,
+)
 from smartrodent.training_validation import ValidationMetrics, parse_settings
-
-
-@pytest.fixture
-def support():
-    """Load shared experiment components for their behavioral tests."""
-    from smartrodent import experiment_support
-
-    return experiment_support
 
 
 @pytest.fixture
@@ -37,10 +38,10 @@ def transform_settings():
     }
 
 
-def test_checkpoint_store_preserves_best_while_replacing_last(support, tmp_path):
+def test_checkpoint_store_preserves_best_while_replacing_last(tmp_path):
     """The best snapshot survives later epochs, including optimizer and history state."""
     output = tmp_path / "checkpoints"
-    store = support.CheckpointStore(output)
+    store = CheckpointStore(output)
     first = {
         "epoch": 1,
         "model_state_dict": {"weight": torch.tensor([1.0])},
@@ -69,11 +70,11 @@ def test_checkpoint_store_preserves_best_while_replacing_last(support, tmp_path)
     assert {path.name for path in output.iterdir()} == {"last.pt", "best.pt"}
 
 
-def test_checkpoint_store_updates_best_without_pruning_unrelated_files(support, tmp_path):
+def test_checkpoint_store_updates_best_without_pruning_unrelated_files(tmp_path):
     """A new best replaces the old best, without touching existing user artifacts."""
     sentinel = tmp_path / "notes.txt"
     sentinel.write_text("keep me")
-    store = support.CheckpointStore(tmp_path)
+    store = CheckpointStore(tmp_path)
     for epoch in range(1, 5):
         store.save({"epoch": epoch}, is_best=epoch in (1, 3))
 
@@ -81,16 +82,18 @@ def test_checkpoint_store_updates_best_without_pruning_unrelated_files(support, 
     assert torch.load(tmp_path / "last.pt", weights_only=True) == {"epoch": 4}
     assert sentinel.read_text() == "keep me"
     assert {path.name for path in tmp_path.iterdir()} == {
-        "best.pt", "last.pt", "notes.txt"
+        "best.pt",
+        "last.pt",
+        "notes.txt",
     }
 
 
 @pytest.mark.parametrize("has_previous_checkpoint", [False, True])
 def test_checkpoint_write_failure_leaves_no_partial_checkpoint(
-    support, tmp_path, monkeypatch, has_previous_checkpoint
+    tmp_path, monkeypatch, has_previous_checkpoint
 ):
     """Failed serialization cannot truncate a previously completed snapshot."""
-    store = support.CheckpointStore(tmp_path)
+    store = CheckpointStore(tmp_path)
     if has_previous_checkpoint:
         store.save({"epoch": 1}, is_best=True)
     completed_files = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
@@ -108,16 +111,18 @@ def test_checkpoint_write_failure_leaves_no_partial_checkpoint(
     monkeypatch.setattr(torch, "save", fail_save)
     with pytest.raises(OSError, match="quota exceeded"):
         store.save({"epoch": 2}, is_best=True)
-    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == completed_files
+    assert {
+        path.name: path.read_bytes() for path in tmp_path.iterdir()
+    } == completed_files
 
 
 def test_checkpoint_publication_failure_preserves_completed_snapshot(
-    support, tmp_path, monkeypatch
+    tmp_path, monkeypatch
 ):
     """A failed atomic publication also removes temporary files and preserves the target."""
     from pathlib import Path
 
-    store = support.CheckpointStore(tmp_path)
+    store = CheckpointStore(tmp_path)
     store.save({"epoch": 1}, is_best=True)
     completed_files = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
     original_replace = Path.replace
@@ -131,16 +136,16 @@ def test_checkpoint_publication_failure_preserves_completed_snapshot(
     monkeypatch.setattr(Path, "replace", fail_last_publication)
     with pytest.raises(OSError, match="publication failure"):
         store.save({"epoch": 2}, is_best=False)
-    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == completed_files
+    assert {
+        path.name: path.read_bytes() for path in tmp_path.iterdir()
+    } == completed_files
 
 
-def test_best_publication_failure_preserves_previous_best(
-    support, tmp_path, monkeypatch
-):
+def test_best_publication_failure_preserves_previous_best(tmp_path, monkeypatch):
     """Best publication is atomic independently of publication of the latest epoch."""
     from pathlib import Path
 
-    store = support.CheckpointStore(tmp_path)
+    store = CheckpointStore(tmp_path)
     store.save({"epoch": 1}, is_best=True)
     previous_best = (tmp_path / "best.pt").read_bytes()
     original_replace = Path.replace
@@ -164,10 +169,10 @@ def test_best_publication_failure_preserves_previous_best(
 @pytest.mark.parametrize("phase", ["training", "validation"])
 @pytest.mark.parametrize("size", [(8, 8), (13, 5)])
 def test_image_transforms_preserve_rgb_scale_and_output_shape(
-    support, transform_settings, phase, size
+    transform_settings, phase, size
 ):
     """Both pipelines produce CHW float tensors with the existing zero-to-one scaling."""
-    transforms = support.ImageTransforms(transform_settings)
+    transforms = ImageTransforms(transform_settings)
     pipeline = getattr(transforms, phase)()
     result = pipeline(Image.new("RGB", size, (255, 128, 0)))
     assert result.shape == (3, 8, 8)
@@ -176,7 +181,7 @@ def test_image_transforms_preserve_rgb_scale_and_output_shape(
     torch.testing.assert_close(result, expected)
 
 
-def test_validation_transforms_ignore_training_augmentations(support, transform_settings):
+def test_validation_transforms_ignore_training_augmentations(transform_settings):
     """Guaranteed training grayscale and flips must not leak into evaluation."""
     transform_settings["random_grayscale"]["p"] = 1.0
     transform_settings["random_horizontal_flip"]["p"] = 1.0
@@ -184,7 +189,7 @@ def test_validation_transforms_ignore_training_augmentations(support, transform_
     pixels[:, :4] = [255, 0, 0]
     pixels[:, 4:] = [0, 0, 255]
     image = Image.fromarray(pixels)
-    transforms = support.ImageTransforms(transform_settings)
+    transforms = ImageTransforms(transform_settings)
     expected = torch.from_numpy(pixels.copy()).permute(2, 0, 1).float() / 255
     first = transforms.validation()(image)
     torch.testing.assert_close(first, expected)
@@ -195,15 +200,13 @@ def test_validation_transforms_ignore_training_augmentations(support, transform_
     assert not torch.equal(augmented, first)
 
 
-def test_training_transform_samples_each_view_and_replays_with_seed(
-    support, transform_settings
-):
+def test_training_transform_samples_each_view_and_replays_with_seed(transform_settings):
     """Repeated calls draw independent augmentations, reproducible with the same seed."""
     transform_settings["random_horizontal_flip"]["p"] = 0.5
     pixels = np.zeros((8, 8, 3), dtype=np.uint8)
     pixels[:, :4, 0] = 255
     image = Image.fromarray(pixels)
-    transform = support.ImageTransforms(transform_settings).training()
+    transform = ImageTransforms(transform_settings).training()
     # Isolate this test's RNG consumption from other experiment tests.
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(42)
@@ -217,7 +220,7 @@ def test_training_transform_samples_each_view_and_replays_with_seed(
 
 @pytest.mark.parametrize("seed", [11, 42, 91])
 def test_training_transform_preserves_legacy_augmentation_pipeline(
-    support, transform_settings, seed
+    transform_settings, seed
 ):
     """Extracting augmentation construction must preserve the existing pixel outputs."""
     from torchvision.transforms.v2 import (
@@ -256,7 +259,7 @@ def test_training_transform_preserves_legacy_augmentation_pipeline(
             RandomResizedCrop((size, size), **settings["random_resized_crop"]),
         ]
     )
-    extracted = support.ImageTransforms(settings).training()
+    extracted = ImageTransforms(settings).training()
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         expected = legacy(image)
@@ -265,14 +268,14 @@ def test_training_transform_preserves_legacy_augmentation_pipeline(
     torch.testing.assert_close(actual, expected)
 
 
-def test_metric_resolution_honors_function_options_without_mutation(support):
+def test_metric_resolution_honors_function_options_without_mutation():
     """Named scorers accept label arrays and preserve caller-owned configuration."""
     settings = {
         "accuracy": {"function": "accuracy_score"},
         "macro_f1": {"function": "f1_score", "average": "macro", "zero_division": 0},
     }
     original = deepcopy(settings)
-    scorers = support.resolve_validation_metrics(settings)
+    scorers = resolve_validation_metrics(settings)
     targets = np.array([0, 0, 1, 1])
     predictions = np.array([0, 0, 0, 1])
     assert set(scorers) == {"accuracy", "macro_f1"}
@@ -282,9 +285,9 @@ def test_metric_resolution_honors_function_options_without_mutation(support):
 
 
 @pytest.mark.parametrize("settings", [None, {}])
-def test_metric_resolution_allows_no_optional_metrics(support, settings):
+def test_metric_resolution_allows_no_optional_metrics(settings):
     """Loss-only experiments need no classification scorers."""
-    assert support.resolve_validation_metrics(settings) == {}
+    assert resolve_validation_metrics(settings) == {}
 
 
 @pytest.mark.parametrize(
@@ -298,18 +301,21 @@ def test_metric_resolution_allows_no_optional_metrics(support, settings):
         ({"f1": {"function": "f1_score", "average": None}}, "f1"),
     ],
 )
-def test_invalid_metric_specs_fail_before_training(support, settings, message):
+def test_invalid_metric_specs_fail_before_training(settings, message):
     """Unknown functions, bad options, and nonscalar metrics have explicit failures."""
     with pytest.raises(ValueError, match=message):
         specs = parse_settings(ValidationMetrics, settings)
-        support.resolve_validation_metrics(specs)
+        resolve_validation_metrics(specs)
 
 
-def test_shared_scheduler_builds_independent_native_state(support):
+def test_shared_scheduler_builds_independent_native_state():
     """Runs sharing a configuration must not share optimizer or scheduler state."""
-    settings = {"name": "ReduceLROnPlateau", "parameters": {"factor": 0.5, "patience": 0}}
+    settings = {
+        "name": "ReduceLROnPlateau",
+        "parameters": {"factor": 0.5, "patience": 0},
+    }
     original = deepcopy(settings)
-    config = support.SchedulerConfiguration.from_mapping(settings)
+    config = SchedulerConfiguration.from_mapping(settings)
     first_optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=0.001)
     second_optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=0.001)
     first = config.build(first_optimizer)
@@ -320,22 +326,22 @@ def test_shared_scheduler_builds_independent_native_state(support):
     assert first_optimizer.param_groups[0]["lr"] == 0.0005
     assert second_optimizer.param_groups[0]["lr"] == 0.001
     assert settings == original
-    assert support.SchedulerConfiguration.from_mapping(None) is None
+    assert SchedulerConfiguration.from_mapping(None) is None
 
 
 @given(
-    values=st.lists(st.integers(-20, 20), min_size=1, max_size=30),
+    values=st.lists(
+        st.floats(min_value=-10, max_value=10, allow_nan=False), min_size=1, max_size=40
+    ),
     patience=st.integers(1, 5),
-    tolerance=st.integers(0, 3),
+    tolerance=st.floats(min_value=0, max_value=1, allow_nan=False),
     comparison=st.sampled_from(["less", "greater"]),
 )
 def test_shared_early_stopping_compares_against_best_not_previous(
     values, patience, tolerance, comparison
 ):
     """The extracted stopper retains tolerance and consecutive-miss behavior."""
-    from smartrodent import experiment_support
-
-    stopper = experiment_support.EarlyStopping.from_mapping(
+    stopper = EarlyStopping.from_mapping(
         {"patience": patience, "tolerance": tolerance, "comparison": comparison}
     )
     best = values[0]
@@ -356,7 +362,7 @@ def test_shared_early_stopping_compares_against_best_not_previous(
             break
 
 
-def test_shared_mlflow_configuration_retains_optional_fields_and_tags(support):
+def test_shared_mlflow_configuration_retains_optional_fields_and_tags():
     """Shared tracking configuration preserves current names, defaults, and provenance."""
     settings = {
         "tracking_uri": "sqlite:///unused-test.db",
@@ -366,15 +372,31 @@ def test_shared_mlflow_configuration_retains_optional_fields_and_tags(support):
         "champion_alias": "candidate",
         "dataset_revision": "data-revision-123",
     }
-    config = support.MlflowConfiguration.from_mapping(settings)
+    config = MlflowConfiguration.from_mapping(settings)
     for name, value in settings.items():
         assert getattr(config, name) == value
     tags = config.run_tags()
     assert tags["dataset_revision"] == "data-revision-123"
     assert tags["git_commit"]
-    assert support.MlflowConfiguration.from_mapping(None) is None
-    default = support.MlflowConfiguration.from_mapping(
+    assert MlflowConfiguration.from_mapping(None) is None
+    default = MlflowConfiguration.from_mapping(
         {"tracking_uri": "sqlite:///unused-test.db", "experiment_name": "two-stage"}
     )
     assert default.registered_model_name is None
     assert default.champion_alias == "champion"
+
+
+def test_early_stopping_ignores_dips_that_never_beat_the_best():
+    """Noisy values that only beat the previous value do not reset patience."""
+    stopper = EarlyStopping(patience=3, tolerance=0.0, comparison="less")
+    decisions = [stopper(value) for value in (1.0, 1.2, 1.1, 1.05)]
+    assert decisions == [False, False, False, True]
+
+
+def test_early_stopping_greater_requires_beating_best_by_tolerance():
+    """In greater mode, values within the tolerance above the best do not improve."""
+    stopper = EarlyStopping(patience=2, tolerance=0.1, comparison="greater")
+    assert not stopper(0.5)
+    assert not stopper(0.65)  # improves: 0.65 > 0.5 + 0.1
+    assert not stopper(0.7)  # within tolerance of the best
+    assert stopper(0.6)

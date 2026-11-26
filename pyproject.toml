@@ -75,3 +75,8 @@ fail_under = 80
 
 [tool.coverage.html]
 directory = "coverage_html_report"
+
+[tool.ruff.lint]
+# TRY004 asks for TypeError after isinstance checks; this project deliberately
+# raises ValueError for invalid configuration values, and callers rely on it.
+ignore = ["TRY004"]
