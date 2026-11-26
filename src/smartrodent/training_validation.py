@@ -1,4 +1,4 @@
-"""Declarative settings and shared filesystem safety for the new training system."""
+"""Declarative settings types for all configurable components, and filesystem safety."""
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -26,7 +26,8 @@ type NonnegativeNumber = Annotated[FiniteNumber, Field(ge=0)]
 type Probability = Annotated[FiniteNumber, Field(ge=0, le=1)]
 type Name = Annotated[str, StringConstraints(strict=True, min_length=1)]
 type Nonblank = Annotated[Name, StringConstraints(pattern=r"\S")]
-type CheckpointPath = Nonblank | InstanceOf[Path]
+# A path setting: a Path, or a nonblank string (a blank string would mean the cwd).
+type PathSetting = Nonblank | InstanceOf[Path]
 type Mode = Literal["min", "max"]
 type EncoderSource = Literal["supcon", "ultralytics"]
 type HeadReplacement = Literal["linear", "full"]
@@ -41,29 +42,37 @@ def _mapping_input(value):
 type MappingInput[T] = Annotated[T, BeforeValidator(_mapping_input)]
 
 
-def _unique_names(names):
-    """Reject duplicate species without normalizing their identities or declaration order."""
-    if len(set(names)) != len(names):
-        raise ValueError("class_names must be unique")
-    return tuple(names)
+def unique(values):
+    """Reject repeated entries instead of silently deduplicating them.
+
+    Args:
+        values: Validated sequence.
+
+    Returns:
+        ``values`` unchanged.
+
+    Raises:
+        ValueError: If an entry occurs more than once.
+    """
+    if len(set(values)) != len(values):
+        raise ValueError("entries must be unique")
+    return values
 
 
-type ClassNames = Annotated[
-    Sequence[Name], Field(min_length=1), AfterValidator(_unique_names)
+# Sequence, not tuple/list: pydantic's lax tuples and lists also accept sets, which
+# would make the order (class indices, column order) differ between runs.
+type ColumnNames = Annotated[
+    Sequence[Name], AfterValidator(unique), AfterValidator(tuple)
 ]
-
-
-def _unique_layers(indices):
-    """Reject repeated layer indices instead of silently deduplicating them."""
-    if len(set(indices)) != len(indices):
-        raise ValueError("freeze layer indices must be unique")
-    return indices
+type ClassNames = Annotated[
+    Sequence[Name], Field(min_length=1), AfterValidator(unique), AfterValidator(tuple)
+]
 
 
 # Ultralytics' convention: a count N freezes layers 0..N-1, a list names layers.
 # The value is kept as given (not normalized) so saved configs match their source.
 type FreezeLayers = (
-    NonnegativeInt | Annotated[list[NonnegativeInt], AfterValidator(_unique_layers)]
+    NonnegativeInt | Annotated[list[NonnegativeInt], AfterValidator(unique)]
 )
 
 
@@ -132,7 +141,7 @@ class EncoderSettings(TypedDict):
     """Identify a local standalone encoder without loading the checkpoint."""
 
     source: EncoderSource
-    checkpoint: CheckpointPath
+    checkpoint: PathSetting
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -150,7 +159,7 @@ class CheckpointHead(TypedDict):
 
     replace: HeadReplacement
     source: Literal["yolo_checkpoint"]
-    checkpoint: CheckpointPath
+    checkpoint: PathSetting
 
 
 @with_config(ConfigDict(extra="forbid"))

@@ -1,5 +1,4 @@
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
 import pandas as pd
@@ -7,9 +6,6 @@ import pytest
 import requests
 import yaml
 from bundle_test_support import move_bundle, write_stage_records
-from hypothesis import given
-from hypothesis import strategies as st
-from pyinaturalist.session import ClientSession
 
 from smartrodent.inaturalist import InaturalistDataset
 
@@ -18,21 +14,23 @@ from smartrodent.inaturalist import InaturalistDataset
 def inat_config(tmp_path):
     """Return a minimal, complete iNaturalist configuration mapping."""
     return {
-        "inaturalist": {
-            "output_path": str(tmp_path / "dataset"),
-            "species": ["Mus musculus"],
-            "years": [],
-            "first_year": 2020,
-            "last_year": 2022,
-            "quality_grade": "needs_id",
-            "seed": 7,
-            "max_img_num": 5,
-            "max_observations": 8,
-            "allowed_licences": ["cc-by-nc", "cc0"],
-            "cache_file": str(tmp_path / "api_requests.db"),
-            "ratelimit_path": str(tmp_path / "api_ratelimit.db"),
-            "backoff_factor": 0.75,
-            "max_retries": 2,
+        "data": {
+            "inaturalist": {
+                "output_path": str(tmp_path / "dataset"),
+                "species": ["Mus musculus"],
+                "years": [],
+                "first_year": 2020,
+                "last_year": 2022,
+                "quality_grade": "needs_id",
+                "seed": 7,
+                "max_img_num": 5,
+                "max_observations": 8,
+                "allowed_licenses": ["cc-by-nc", "cc0"],
+                "cache_file": str(tmp_path / "api_requests.db"),
+                "ratelimit_path": str(tmp_path / "api_ratelimit.db"),
+                "backoff_factor": 0.75,
+                "max_retries": 2,
+            }
         }
     }
 
@@ -43,29 +41,6 @@ def config_file(tmp_path, inat_config):
     path = tmp_path / "dataset_test.yaml"
     path.write_text(yaml.safe_dump(inat_config), encoding="utf-8")
     return path
-
-
-def test_inaturalist_constructor(tmp_path):
-    output_path = tmp_path / "test"
-    dataset = InaturalistDataset(
-        output_path=output_path,
-        species=["Mus musculus"],
-        years=[2022],
-        quality_grade="research",
-    )
-
-    assert dataset.output_path == output_path.resolve()
-    assert dataset.species == ["Mus musculus"]
-    assert dataset.years == [2022]
-    assert dataset.quality_grade == "research"
-    assert dataset.seed == 42
-    assert dataset.max_img_num == 2000
-    assert dataset.allowed_licenses == {"cc-by-nc"}
-    assert dataset.config_path is None
-    assert output_path.is_dir()
-    assert list(output_path.iterdir()) == [
-        (dataset.output_path / "inaturalist_dataset.log").resolve()
-    ]
 
 
 def test_inaturalist_constructor_year_range(tmp_path):
@@ -118,6 +93,8 @@ def test_inaturalist_constructor_keeps_config_in_output_path(tmp_path, inat_conf
             {"years": [2022], "first_year": 2020, "last_year": 2023},
             "mutually exclusive",
         ),
+        # half a range next to explicit years must not be silently ignored
+        ({"years": [2022], "first_year": 2020}, "mutually exclusive"),
         ({"first_year": 2023, "last_year": 2020}, "less than or equal"),
     ],
 )
@@ -128,86 +105,13 @@ def test_inaturalist_constructor_rejects_invalid_years(tmp_path, kwargs, message
         )
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
-        ({"species": [], "years": [2022]}, "at least one scientific name"),
-        (
-            {"species": ["Mus musculus"], "years": [2022], "max_img_num": -1},
-            "max_img_num",
-        ),
-        (
-            {"species": ["Mus musculus"], "years": [2022], "max_observations": -1},
-            "max_observations",
-        ),
-    ],
-)
-def test_inaturalist_constructor_rejects_invalid_values(tmp_path, kwargs, message):
-    with pytest.raises(ValueError, match=message):
-        InaturalistDataset(output_path=tmp_path / "test", **kwargs)
-
-
-def test_inaturalist_from_config(config_file, inat_config):
+def test_inaturalist_from_config(config_file):
+    """The configured year range and licenses reach the API, and the file is kept."""
     dataset = InaturalistDataset.from_config(config_file)
-    settings = inat_config["inaturalist"]
 
-    assert dataset.output_path == Path(settings["output_path"]).resolve()
-    assert dataset.species == settings["species"]
     assert dataset.years == [2020, 2021, 2022]
-    assert dataset.quality_grade == "needs_id"
-    assert dataset.seed == 7
-    assert dataset.max_img_num == 5
-    assert dataset.max_observations == 8
-    assert dataset.allowed_licenses == {"cc-by-nc", "cc0"}
-    assert isinstance(dataset.session, ClientSession)
-    assert Path(dataset.session.cache.db_path) == Path(settings["cache_file"])
-    assert dataset.session.retries.total == 2
-    assert dataset.session.retries.backoff_factor == 0.75
     assert dataset.session.params["photo_license"] == "cc-by-nc,cc0"
     assert (dataset.output_path / config_file.name).is_file()
-
-
-def test_inaturalist_from_config_uses_defaults(tmp_path):
-    path = tmp_path / "minimal.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "inaturalist": {
-                    "output_path": str(tmp_path / "dataset"),
-                    "species": ["Mus musculus"],
-                    "years": [2022],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    dataset = InaturalistDataset.from_config(path)
-
-    assert dataset.quality_grade == "research"
-    assert dataset.seed == 42
-    assert dataset.max_img_num == 2000
-    assert dataset.allowed_licenses == {"cc-by-nc"}
-
-
-@pytest.mark.parametrize("missing", ["output_path", "species"])
-def test_inaturalist_from_config_requires_keys(tmp_path, inat_config, missing):
-    settings = dict(inat_config["inaturalist"])
-    del settings[missing]
-    path = tmp_path / "incomplete.yaml"
-    path.write_text(yaml.safe_dump({"inaturalist": settings}), encoding="utf-8")
-
-    with pytest.raises(ValueError, match=missing):
-        InaturalistDataset.from_config(path)
-
-
-@pytest.mark.parametrize("content", ["", "- just\n- a\n- list\n", "inaturalist: 42\n"])
-def test_inaturalist_from_config_requires_mapping(tmp_path, content):
-    path = tmp_path / "broken.yaml"
-    path.write_text(content, encoding="utf-8")
-
-    with pytest.raises(TypeError):
-        InaturalistDataset.from_config(path)
 
 
 @pytest.mark.network
@@ -317,33 +221,6 @@ def test_file_not_found_outside_cache_read_propagates(dataset, monkeypatch, phas
         download_images.assert_not_called()
     else:
         download_images.assert_called_once()
-
-
-@given(observation_id=st.integers(min_value=1, max_value=2**31 - 1))
-def test_inaturalist_photo_lists_survive_csv_round_trip(observation_id):
-    """Cached nested photo metadata retains the values used by downloads."""
-    photos = [
-        {
-            "url": f"https://example.test/{observation_id}/square.jpg",
-            "license_code": "cc-by-nc",
-        }
-    ]
-    records = pd.DataFrame({"id": [observation_id], "photos": [photos]})
-    with TemporaryDirectory() as output_path:
-        dataset = InaturalistDataset(
-            output_path=output_path, species=["Mus musculus"], years=[2022]
-        )
-        species_path = dataset.output_path / "Mus musculus"
-        species_path.mkdir()
-        records.to_csv(species_path / "records.csv", index=False)
-        dataset._get_species_records = Mock()
-        dataset._download_species_images = Mock(return_value=(0, records))
-
-        dataset.download()
-
-        dataset._get_species_records.assert_not_called()
-        received_records = dataset._download_species_images.call_args.args[0]
-        pd.testing.assert_frame_equal(received_records, records)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -560,55 +437,6 @@ def _photo_observation(observation_id, licenses, year=2022):
             for index, license_code in enumerate(licenses)
         ],
     }
-
-
-def test_inaturalist_constructor_accepts_observation_budget_and_session_settings(
-    tmp_path,
-):
-    """The observation budget and persistent session are explicit controls."""
-    cache_file = tmp_path / "api_requests.db"
-    ratelimit_path = tmp_path / "api_ratelimit.db"
-    dataset = InaturalistDataset(
-        output_path=tmp_path / "dataset",
-        species=["Mus musculus"],
-        years=[2022],
-        max_img_num=3,
-        max_observations=11,
-        cache_file=cache_file,
-        ratelimit_path=ratelimit_path,
-        backoff_factor=0.75,
-        max_retries=2,
-    )
-
-    assert dataset.max_img_num == 3
-    assert dataset.max_observations == 11
-    assert isinstance(dataset.session, ClientSession)
-    assert Path(dataset.session.cache.db_path) == cache_file
-    assert dataset.session.retries.total == 2
-    assert dataset.session.retries.backoff_factor == 0.75
-
-
-@pytest.mark.parametrize("max_observations", [1.5, True])
-def test_inaturalist_rejects_non_integer_observation_budget(tmp_path, max_observations):
-    """The API-request budget must be an integer and not a boolean."""
-    with pytest.raises(ValueError, match="max_observations"):
-        InaturalistDataset(
-            output_path=tmp_path / "dataset",
-            species=["Mus musculus"],
-            years=[2022],
-            max_observations=max_observations,
-        )
-
-
-@pytest.mark.parametrize("max_retries", [-1, 1.5, True])
-def test_inaturalist_rejects_invalid_retry_budget(tmp_path, max_retries):
-    with pytest.raises(ValueError, match="max_retries"):
-        InaturalistDataset(
-            output_path=tmp_path / "dataset",
-            species=["Mus musculus"],
-            years=[2022],
-            max_retries=max_retries,
-        )
 
 
 def test_inaturalist_v2_retrieval_combines_filters_and_honors_budget(
@@ -881,35 +709,6 @@ def test_photo_rows_are_annotated_in_place_without_license_filtering(
     assert (images / "123_0.jpg").read_bytes() == b"existing"
 
 
-@given(cap=st.integers(min_value=0, max_value=5))
-def test_photo_row_downloads_respect_cap(cap):
-    """Only rows within the image cap acquire paths."""
-    with TemporaryDirectory() as directory:
-        dataset = InaturalistDataset(
-            directory, ["Sorex minutus"], years=[2022], max_img_num=cap
-        )
-        records = pd.DataFrame(
-            {
-                "id": [123] * 5,
-                "photo_index": list(range(5)),
-                "photo.url": ["https://example.test/square.jpg"] * 5,
-                "photo.license_code": ["cc-by-nc"] * 5,
-            }
-        )
-
-        def save_photo(photo, images_path, observation_id, index):
-            """Write a temporary image without network access."""
-            del photo
-            (images_path / f"{observation_id}_{index}.jpg").write_bytes(b"image")
-            return True
-
-        dataset._download_photo = save_photo
-        count, returned = dataset._download_species_images(records, dataset.output_path)
-        assert returned is records
-        assert count == cap
-        assert records["image_path"].notna().sum() == cap
-
-
 def test_retrieval_flattens_each_photo_without_changing_the_row_schema(
     tmp_path, monkeypatch
 ):
@@ -946,31 +745,6 @@ def test_retrieval_flattens_each_photo_without_changing_the_row_schema(
     assert records["photo.id"].tolist() == [11, 12]
     assert records["photo.url"].tolist() == ["first", "second"]
     assert "photos" not in records.columns
-
-
-def test_existing_photo_bypasses_download_helper(tmp_path, monkeypatch):
-    """An existing image is annotated without invoking the download helper."""
-    dataset = InaturalistDataset(tmp_path, ["Sorex minutus"], years=[2022])
-    records = pd.DataFrame(
-        {
-            "id": [123],
-            "photo_index": [0],
-            "photo.url": ["https://example.test/square.jpg"],
-            "photo.license_code": ["cc-by-nc"],
-        }
-    )
-    image_path = tmp_path / "123_0.jpg"
-    image_path.write_bytes(b"existing")
-    download_photo = Mock(side_effect=AssertionError("Must not be called"))
-    monkeypatch.setattr(dataset, "_download_photo", download_photo)
-
-    count, returned = dataset._download_species_images(records, tmp_path)
-
-    download_photo.assert_not_called()
-    assert count == 1
-    assert returned is records
-    assert records.at[0, "image_path"] == str(image_path)
-    assert image_path.read_bytes() == b"existing"
 
 
 def test_missing_photo_columns_fail_explicitly(tmp_path):

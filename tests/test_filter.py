@@ -108,34 +108,6 @@ def test_parse_response_marks_invalid_json_as_failure(raw, tmp_path):
     assert parsed["raw_response"] == raw
 
 
-@pytest.mark.parametrize(
-    "labels",
-    [
-        [],
-        "kept",
-        [" "],
-        [1, "kept"],
-        ["same", "same"],
-    ],
-)
-def test_vlm_filter_rejects_invalid_labels(tmp_path, labels):
-    with pytest.raises(ValueError, match="labels"):
-        make_ollama_filter(tmp_path, labels=labels)
-
-
-@pytest.mark.parametrize(
-    "configuration",
-    [
-        {"taskname": ""},
-        {"photo_id_column": ""},
-        {"image_path_column": ""},
-    ],
-)
-def test_vlm_filter_rejects_invalid_column_and_task_names(tmp_path, configuration):
-    with pytest.raises(ValueError):
-        make_ollama_filter(tmp_path, **configuration)
-
-
 def test_filter_data_preserves_frames_and_adds_configured_label_columns(
     monkeypatch, tmp_path
 ):
@@ -461,19 +433,6 @@ def test_ollama_classify_uses_configured_generation_options(tmp_path):
     assert vlm_filter.client.generate_calls[0]["options"] == configured_options
 
 
-@pytest.mark.parametrize(
-    "options",
-    [
-        [],
-        {"": 1},
-        {1: 1},
-    ],
-)
-def test_ollama_rejects_invalid_generation_options(tmp_path, options):
-    with pytest.raises(ValueError, match="Ollama options"):
-        make_ollama_filter(tmp_path, options=options)
-
-
 def test_ollama_closes_after_filtering(monkeypatch, tmp_path):
     records = make_records(tmp_path, [(55, None, "image.jpg")])
     vlm_filter = make_ollama_filter(tmp_path)
@@ -660,8 +619,6 @@ def test_vllm_context_manager_shuts_down_engine(tmp_path):
         pass
 
     assert seen["shutdowns"] == 1
-    assert vlm_filter._llm is None
-    assert vlm_filter._sampling_params is None
 
 
 def test_from_config_passes_filter_settings(tmp_path):

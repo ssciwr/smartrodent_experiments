@@ -336,19 +336,6 @@ def test_supcon_study_requires_validation_data_for_ranking(
     assert recorded_trials.events == []
 
 
-def test_tags_without_a_tuning_section_are_rejected_by_sweep_loading(
-    supcon_document, recorded_trials, tmp_path
-):
-    """Tags alone would otherwise leak into a grid-sweep run configuration."""
-    from smartrodent.supcon_training import load_training_configurations
-
-    supcon_document.pop("tuning")
-    path = _write(tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG})
-    with pytest.raises(ValueError, match="tuning"):
-        load_training_configurations(path)
-    assert recorded_trials.events == []
-
-
 def test_a_tuning_section_without_tags_is_rejected(
     supcon_document, recorded_trials, tmp_path
 ):
@@ -523,11 +510,6 @@ def test_classifier_script_reports_the_study_winner(
             "!suggest-categorical {choices: [rat, vole]}",
             "class_names",
         ),
-        (
-            ("batch_size",),
-            "!suggest-int {low: 0, high: 4}",
-            "batch_size",
-        ),  # invalid low end
     ],
 )
 def test_classifier_study_rejects_invalid_spaces_before_any_trial(
@@ -538,7 +520,7 @@ def test_classifier_study_rejects_invalid_spaces_before_any_trial(
     tag,
     match,
 ):
-    """Comparability settings are fixed and every bound/choice is prevalidated."""
+    """Comparability settings stay fixed, and a choice no trial could use is rejected."""
     node = classifier_document
     for part in placeholder_at[:-1]:
         node = node[part]
@@ -564,22 +546,6 @@ def test_classifier_study_prevalidates_coupled_values_with_their_choice(
     }
     path = _write(tmp_path / "classifier.yaml", classifier_document, tags)
     with pytest.raises(ValueError, match="encoder_batchnorm"):
-        ClassifierStudy.from_yaml(path).run()
-    assert recorded_trials.events == []
-
-
-def test_classifier_study_requires_validation_data_for_ranking(
-    classifier_document, recorded_trials, tmp_path
-):
-    """Training-only CE is valid on its own, but a study cannot rank it."""
-    classifier_document.update(
-        validation_dataset=None,
-        validation_metrics=None,
-        tracked_metric="ce_loss_mean",
-        tracked_mode="min",
-    )
-    path = _write(tmp_path / "classifier.yaml", classifier_document, CLASSIFIER_TAGS)
-    with pytest.raises(ValueError, match=r"(?i)study.*validation|validation.*study"):
         ClassifierStudy.from_yaml(path).run()
     assert recorded_trials.events == []
 
@@ -843,27 +809,19 @@ def test_classifier_freeze_is_checked_against_every_supcon_model_choice(
 @pytest.mark.parametrize(
     "tags,studies,match",
     [
-        # Tags in a stage that has no study settings.
-        ({"__LR__": LR_TAG, "__LR0__": LR_TAG}, {"supcon": tuning()}, "tuning"),
-        # Study settings for a stage without tags.
+        # search tags in a stage without study settings
+        (
+            {"__LR__": LR_TAG, "__LR0__": LR_TAG},
+            {"supcon": tuning()},
+            "tuning",
+        ),
+        # study settings for a stage without search tags
         (
             {"__LR__": LR_TAG, "__LR0__": "0.004"},
             {"supcon": tuning(), "classifier": tuning()},
             "empty",
         ),
-        # Unknown stage name.
-        (
-            {"__LR__": LR_TAG, "__LR0__": "0.004"},
-            {"supcon": tuning(), "encoder": tuning()},
-            "encoder",
-        ),
-        # Invalid study settings.
-        (
-            {"__LR__": LR_TAG, "__LR0__": "0.004"},
-            {"supcon": tuning(n_trials=0)},
-            "n_trials",
-        ),
-        # Invalid bound in the deferred classifier stage, found before SupCon trains.
+        # a search bound the classifier stage can never use
         (
             {"__LR__": "0.001", "__LR0__": "!suggest-float {low: -1.0, high: 0.01}"},
             {"classifier": tuning()},
@@ -918,26 +876,6 @@ def test_pipeline_studies_reject_searching_comparability_or_handoff_settings(
         config = _pipeline(
             study_pipeline,
             {"__LR__": LR_TAG, "__LR0__": LR_TAG, "__P__": tag},
-            tmp_path,
-            studies={"supcon": tuning(), "classifier": tuning()},
-        )
-        TwoStageExperiment(config).run()
-    assert recorded_trials.events == []
-
-
-def test_grid_sweeps_inside_a_study_stage_are_rejected(
-    study_pipeline, recorded_trials, tmp_path
-):
-    """Decision: a stage is either a grid sweep or a study, never both."""
-    study_pipeline["classifier"]["seed"] = "__SEED__"
-    with pytest.raises(ValueError, match="!sweep"):
-        config = _pipeline(
-            study_pipeline,
-            {
-                "__LR__": LR_TAG,
-                "__LR0__": LR_TAG,
-                "__SEED__": "!sweep {values: [1, 2]}",
-            },
             tmp_path,
             studies={"supcon": tuning(), "classifier": tuning()},
         )

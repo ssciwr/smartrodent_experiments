@@ -2,17 +2,22 @@ import base64
 import gc
 import json
 import logging
-from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import ollama
 import pandas as pd
-import yaml
+from pydantic import AfterValidator, Field, validate_call
 from tqdm.auto import tqdm
 
 from .base import Filterable
+from .config_utils import load_section
+from .training_validation import Count, Flag, Name, Nonblank, Probability, unique
+
+type Labels = Annotated[
+    tuple[Nonblank, ...], Field(min_length=1), AfterValidator(unique)
+]
 
 
 class VLMFilter(Filterable):
@@ -22,15 +27,16 @@ class VLMFilter(Filterable):
     to task-specific nullable boolean columns.
     """
 
+    @validate_call
     def __init__(
         self,
         *,
         prompt: str,
         system_prompt: str,
-        labels: Sequence[str],
-        taskname: str,
-        photo_id_column: str = "photo.id",
-        image_path_column: str = "image_path",
+        labels: Labels,
+        taskname: Nonblank,
+        photo_id_column: Name = "photo.id",
+        image_path_column: Name = "image_path",
         log_level: int = logging.INFO,
     ):
         """Initialize a dataframe filter.
@@ -47,21 +53,6 @@ class VLMFilter(Filterable):
         Raises:
             ValueError: If labels, task name, or column names are invalid.
         """
-        if (
-            not isinstance(labels, Sequence)
-            or isinstance(labels, str)
-            or not labels
-            or any(not isinstance(label, str) or not label.strip() for label in labels)
-            or len(set(labels)) != len(labels)
-        ):
-            raise ValueError("labels must be a nonempty sequence of unique strings")
-        if not isinstance(taskname, str) or not taskname.strip():
-            raise ValueError("taskname must be a nonempty string")
-        if not isinstance(photo_id_column, str) or not photo_id_column:
-            raise ValueError("photo_id_column must be a nonempty string")
-        if not isinstance(image_path_column, str) or not image_path_column:
-            raise ValueError("image_path_column must be a nonempty string")
-
         self.prompt = prompt
         self.system_prompt = system_prompt
         self.labels = list(labels)
@@ -98,8 +89,7 @@ class VLMFilter(Filterable):
         Raises:
             ValueError: If the configured backend is unsupported.
         """
-        with Path(config_path).open(encoding="utf-8") as config_file:
-            config = yaml.safe_load(config_file)
+        config = load_section(config_path)
         columns = config.get("columns", {})
         common = {
             "prompt": config["prompt"],
@@ -285,13 +275,14 @@ class VLMFilter(Filterable):
 class FilterOllama(VLMFilter):
     """Classify dataframe image records using a persistent Ollama connection."""
 
+    @validate_call
     def __init__(
         self,
         *,
-        model: str,
-        pull_model: bool = True,
-        num_workers: int = 4,
-        options: Mapping[str, Any] | None = None,
+        model: Nonblank,
+        pull_model: Flag = True,
+        num_workers: Count = 4,
+        options: dict[Name, Any] | None = None,
         **kwargs,
     ):
         """Initialize the Ollama-backed filter.
@@ -305,17 +296,9 @@ class FilterOllama(VLMFilter):
             **kwargs: Arguments forwarded to :class:`VLMFilter`.
 
         Raises:
-            ValueError: If generation options are not a mapping with string keys.
+            ValueError: If a setting, e.g. a generation option name, is invalid.
         """
         super().__init__(**kwargs)
-        if options is not None and (
-            not isinstance(options, Mapping)
-            or any(not isinstance(key, str) or not key for key in options)
-        ):
-            raise ValueError(
-                "Ollama options must be a mapping with nonempty string keys"
-            )
-
         self.client = ollama.Client()
         self.model = model
         self.num_workers = num_workers
@@ -390,14 +373,15 @@ class FilterOllama(VLMFilter):
 class FilterVLLM(VLMFilter):
     """Classify dataframe image records in batches using vLLM."""
 
+    @validate_call
     def __init__(
         self,
         *,
-        model_name: str,
-        gpu_memory_utilization: float = 0.7,
-        max_model_len: int = 8192,
-        max_new_tokens: int = 300,
-        batch_size: int = 64,
+        model_name: Nonblank,
+        gpu_memory_utilization: Annotated[Probability, Field(gt=0)] = 0.7,
+        max_model_len: Count = 8192,
+        max_new_tokens: Count = 300,
+        batch_size: Count = 64,
         **kwargs,
     ):
         """Initialize the vLLM-backed filter.
@@ -409,10 +393,11 @@ class FilterVLLM(VLMFilter):
             max_new_tokens: Maximum generated tokens per response.
             batch_size: Number of unique photos to classify in each batch.
             **kwargs: Arguments forwarded to :class:`VLMFilter`.
+
+        Raises:
+            ValueError: If a setting is invalid.
         """
         super().__init__(**kwargs)
-        if batch_size < 1:
-            raise ValueError("batch_size must be positive")
         self.model_name = model_name
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len

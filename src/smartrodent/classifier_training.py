@@ -36,7 +36,6 @@ from smartrodent.experiment_support import (
 from smartrodent.model_card import load_training_template, write_training_card
 from smartrodent.onnx_export import OnnxExporter
 from smartrodent.training_validation import (
-    CheckpointPath,
     ClassifierTrainingSettings,
     ClassNames,
     Count,
@@ -48,6 +47,7 @@ from smartrodent.training_validation import (
     Name,
     NonnegativeInt,
     OnnxExportSettings,
+    PathSetting,
     Seed,
     TransformSettings,
     ValidationMetrics,
@@ -113,7 +113,7 @@ class ClassifierConfiguration:
     tracked_mode: Mode | None = None
     validation_metrics: ValidationMetrics | None = None
     mlflow: MappingInput[MlflowConfiguration] | None = None
-    model_card_template: CheckpointPath = "configs/model_card_template.yaml"
+    model_card_template: PathSetting = "configs/model_card_template.yaml"
     onnx_export: MappingInput[OnnxExportSettings] | None = None
 
     def __post_init__(self):

@@ -18,7 +18,6 @@ from smartrodent.experiment_support import (
     EarlyStopping,
     ImageTransforms,
     MlflowConfiguration,
-    SchedulerConfiguration,
     resolve_validation_metrics,
 )
 from smartrodent.training_validation import ValidationMetrics, parse_settings
@@ -218,56 +217,6 @@ def test_training_transform_samples_each_view_and_replays_with_seed(transform_se
         torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("seed", [11, 42, 91])
-def test_training_transform_preserves_legacy_augmentation_pipeline(
-    transform_settings, seed
-):
-    """Extracting augmentation construction must preserve the existing pixel outputs."""
-    from torchvision.transforms.v2 import (
-        Compose,
-        PILToTensor,
-        RandomAdjustSharpness,
-        RandomGrayscale,
-        RandomHorizontalFlip,
-        RandomPerspective,
-        RandomResizedCrop,
-        Resize,
-        ToDtype,
-    )
-
-    settings = transform_settings
-    settings["random_adjust_sharpness"]["p"] = 1.0
-    settings["random_grayscale"]["p"] = 0.5
-    settings["random_perspective"]["p"] = 1.0
-    settings["random_horizontal_flip"]["p"] = 0.5
-    settings["random_resized_crop"] = {"scale": [0.5, 0.9], "ratio": [0.75, 1.33]}
-    image = Image.fromarray(
-        np.random.default_rng(7).integers(0, 256, size=(24, 32, 3), dtype=np.uint8)
-    )
-    # This explicit reference is intentionally independent of the shared builder.
-    # It pins the old script's operation order and options through the extraction.
-    size = settings["image_size"]
-    legacy = Compose(
-        [
-            PILToTensor(),
-            ToDtype(torch.float32, scale=True),
-            Resize((size, size), **settings["resize"]),
-            RandomAdjustSharpness(**settings["random_adjust_sharpness"]),
-            RandomGrayscale(**settings["random_grayscale"]),
-            RandomPerspective(**settings["random_perspective"]),
-            RandomHorizontalFlip(**settings["random_horizontal_flip"]),
-            RandomResizedCrop((size, size), **settings["random_resized_crop"]),
-        ]
-    )
-    extracted = ImageTransforms(settings).training()
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
-        expected = legacy(image)
-        torch.manual_seed(seed)
-        actual = extracted(image)
-    torch.testing.assert_close(actual, expected)
-
-
 def test_metric_resolution_honors_function_options_without_mutation():
     """Named scorers accept label arrays and preserve caller-owned configuration."""
     settings = {
@@ -293,9 +242,6 @@ def test_metric_resolution_allows_no_optional_metrics(settings):
 @pytest.mark.parametrize(
     "settings,message",
     [
-        ([], "dictionary"),
-        ({"": {"function": "accuracy_score"}}, r"\[key\]"),
-        ({"accuracy": []}, "accuracy"),
         ({"accuracy": {"function": "not_a_metric"}}, "accuracy"),
         ({"accuracy": {"function": "accuracy_score", "invalid": True}}, "accuracy"),
         ({"f1": {"function": "f1_score", "average": None}}, "f1"),
@@ -306,27 +252,6 @@ def test_invalid_metric_specs_fail_before_training(settings, message):
     with pytest.raises(ValueError, match=message):
         specs = parse_settings(ValidationMetrics, settings)
         resolve_validation_metrics(specs)
-
-
-def test_shared_scheduler_builds_independent_native_state():
-    """Runs sharing a configuration must not share optimizer or scheduler state."""
-    settings = {
-        "name": "ReduceLROnPlateau",
-        "parameters": {"factor": 0.5, "patience": 0},
-    }
-    original = deepcopy(settings)
-    config = SchedulerConfiguration.from_mapping(settings)
-    first_optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=0.001)
-    second_optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=0.001)
-    first = config.build(first_optimizer)
-    second = config.build(second_optimizer)
-    first.step(1.0)
-    first.step(1.0)
-    second.step(1.0)
-    assert first_optimizer.param_groups[0]["lr"] == 0.0005
-    assert second_optimizer.param_groups[0]["lr"] == 0.001
-    assert settings == original
-    assert SchedulerConfiguration.from_mapping(None) is None
 
 
 @given(

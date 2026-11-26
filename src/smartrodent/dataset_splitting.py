@@ -1,40 +1,51 @@
 """Split and oversample downloader metadata without accessing images."""
 
-import importlib
 from collections.abc import Callable, Mapping
 from math import ceil
-from numbers import Real
 from pathlib import Path
+from typing import Annotated
 
 import numpy as np
 import pandas as pd
-import yaml
+from pydantic import AfterValidator, Field, ImportString, ValidationError, validate_call
 
 from .base import Configurable
+from .config_utils import load_section
+from .training_validation import (
+    ColumnNames,
+    FiniteNumber,
+    NonnegativeNumber,
+    Seed,
+    parse_settings,
+)
 
 
-def _load_configuration_section(config_path: str | Path, section: str) -> dict:
-    """Load one required mapping below the project's ``data`` YAML section."""
-    path = Path(config_path).expanduser().resolve()
-    with path.open(encoding="utf-8") as config_file:
-        configuration = yaml.safe_load(config_file)
-    if not isinstance(configuration, dict):
-        raise TypeError(f"Expected a mapping in configuration file {path}")
-    data = configuration.get("data")
-    if not isinstance(data, dict):
-        raise TypeError("The 'data' configuration must be a mapping")
-    section_configuration = data.get(section)
-    if not isinstance(section_configuration, dict):
-        raise TypeError(f"The 'data.{section}' configuration must be a mapping")
-    return section_configuration
+def _sums_to_one(fractions):
+    """Require split fractions that describe the whole dataset."""
+    if not np.isclose(sum(fractions), 1.0):
+        raise ValueError("split fractions must sum to 1")
+    return fractions
 
 
-def _required_setting(configuration: dict, section: str, setting: str) -> object:
-    """Read a required setting with an actionable configuration error."""
-    try:
-        return configuration[setting]
-    except KeyError as exc:
-        raise ValueError(f"Missing required {section} setting: {setting}") from exc
+type GroupColumns = Annotated[ColumnNames, Field(min_length=1)]
+type SplitFractions = Annotated[
+    tuple[NonnegativeNumber, NonnegativeNumber, NonnegativeNumber],
+    AfterValidator(_sums_to_one),
+]
+type Multiplier = Annotated[FiniteNumber, Field(ge=1)]
+# A callable from Python, or a "module:function" reference from YAML.
+type OversamplingRule = ImportString[
+    Callable[[str, pd.DataFrame, Mapping[str, pd.DataFrame]], float]
+]
+
+
+def _require_columns(species: str, frame: pd.DataFrame, columns) -> None:
+    """Reject frames whose required metadata columns are ambiguous or absent."""
+    if not frame.columns.is_unique:
+        raise ValueError(f"{species}: dataframe column names must be unique")
+    missing = [name for name in dict.fromkeys(columns) if name not in frame.columns]
+    if missing:
+        raise ValueError(f"{species}: missing columns {missing}")
 
 
 class DatasetSplitter(Configurable):
@@ -45,12 +56,13 @@ class DatasetSplitter(Configurable):
     species splits take precedence over exact proportions. No images are read.
     """
 
+    @validate_call
     def __init__(
         self,
-        group_columns: tuple[str, ...],
-        stratify_columns: tuple[str, ...] = (),
-        train_val_test_split: tuple[float, float, float] = (0.7, 0.2, 0.1),
-        rng_seed: int = 42,
+        group_columns: GroupColumns,
+        stratify_columns: ColumnNames = (),
+        train_val_test_split: SplitFractions = (0.7, 0.2, 0.1),
+        rng_seed: Seed = 42,
     ):
         """Configure group-aware partitioning.
 
@@ -66,21 +78,9 @@ class DatasetSplitter(Configurable):
         Raises:
             ValueError: If column names, fractions, or the seed are invalid.
         """
-        self.group_columns = self._validate_columns(group_columns, required=True)
-        self.stratify_columns = self._validate_columns(stratify_columns, required=False)
-        fractions = np.asarray(train_val_test_split, dtype=float)
-        if (
-            fractions.shape != (3,)
-            or not np.isfinite(fractions).all()
-            or (fractions < 0).any()
-            or not np.isclose(fractions.sum(), 1.0)
-        ):
-            raise ValueError(
-                "Split fractions must be three finite nonnegative values summing to 1"
-            )
-        if not isinstance(rng_seed, int) or isinstance(rng_seed, bool) or rng_seed < 0:
-            raise ValueError("rng_seed must be a nonnegative integer")
-        self.fractions = fractions
+        self.group_columns = group_columns
+        self.stratify_columns = stratify_columns
+        self.fractions = np.asarray(train_val_test_split, dtype=float)
         self.rng_seed = rng_seed
 
     @classmethod
@@ -95,28 +95,9 @@ class DatasetSplitter(Configurable):
 
         Raises:
             FileNotFoundError: If ``config_path`` does not exist.
-            TypeError: If required configuration sections are not mappings.
-            ValueError: If ``group_columns`` is missing or settings are invalid.
+            ValueError: If the section is missing or its settings are invalid.
         """
-        configuration = _load_configuration_section(config_path, "dataset_splitter")
-        _required_setting(configuration, "dataset_splitter", "group_columns")
-        return cls(**configuration)
-
-    @staticmethod
-    def _validate_columns(
-        columns: tuple[str, ...], *, required: bool
-    ) -> tuple[str, ...]:
-        """Reject ambiguous column configuration rather than guessing semantics."""
-        if isinstance(columns, str):
-            raise TypeError("Columns must be a sequence of names, not a string")
-        names = tuple(columns)
-        if (
-            (required and not names)
-            or any(not isinstance(name, str) or not name for name in names)
-            or len(set(names)) != len(names)
-        ):
-            raise ValueError("Column names must be unique nonempty strings")
-        return names
+        return cls(**load_section(config_path, "data", "dataset_splitter"))
 
     def split(
         self, records_by_species: dict[str, pd.DataFrame]
@@ -155,14 +136,10 @@ class DatasetSplitter(Configurable):
 
     def _validate_frame(self, species: str, frame: pd.DataFrame) -> None:
         """Reject ambiguous metadata before allocating observation groups."""
-        if not frame.columns.is_unique:
-            raise ValueError(f"{species}: dataframe column names must be unique")
         if "dataset_split" in frame.columns:
             raise ValueError(f"{species}: dataset_split already exists")
         columns = list(dict.fromkeys((*self.group_columns, *self.stratify_columns)))
-        missing = [name for name in columns if name not in frame.columns]
-        if missing:
-            raise ValueError(f"{species}: missing columns {missing}")
+        _require_columns(species, frame, columns)
         if frame[columns].isna().any().any():
             raise ValueError(
                 f"{species}: grouping and stratification values must not be null"
@@ -289,14 +266,13 @@ class TrainingDatasetSampler(Configurable):
     allocation guarantee.
     """
 
+    @validate_call
     def __init__(
         self,
-        group_columns: tuple[str, ...],
-        stratify_columns: tuple[str, ...],
-        oversampling_rule: Callable[
-            [str, pd.DataFrame, Mapping[str, pd.DataFrame]], float
-        ],
-        rng_seed: int = 42,
+        group_columns: GroupColumns,
+        stratify_columns: ColumnNames,
+        oversampling_rule: OversamplingRule,
+        rng_seed: Seed = 42,
     ):
         """Configure reproducible, stratified train-only oversampling.
 
@@ -306,21 +282,17 @@ class TrainingDatasetSampler(Configurable):
             stratify_columns: Columns defining strata. The sampler applies the
                 multiplier separately to each training stratum, retaining their
                 proportions apart from integer rounding.
-            oversampling_rule: Callable receiving a species name, that species'
-                full split dataframe, and all species frames. It returns a finite
-                multiplier of at least ``1.0`` for that species' training rows.
+            oversampling_rule: Callable, or ``module:function`` reference to one,
+                receiving a species name, that species' full split dataframe, and
+                all species frames. It returns a finite multiplier of at least
+                ``1.0`` for that species' training rows.
             rng_seed: Nonnegative integer seed for reproducible sampling.
 
         Raises:
-            ValueError: If the configured columns or seed are invalid.
-            TypeError: If ``oversampling_rule`` is not callable.
+            ValueError: If the columns, rule or seed are invalid.
         """
-        self.group_columns = self._validate_columns(group_columns, required=True)
-        self.stratify_columns = self._validate_columns(stratify_columns, required=False)
-        if not callable(oversampling_rule):
-            raise TypeError("oversampling_rule must be callable")
-        if not isinstance(rng_seed, int) or isinstance(rng_seed, bool) or rng_seed < 0:
-            raise ValueError("rng_seed must be a nonnegative integer")
+        self.group_columns = group_columns
+        self.stratify_columns = stratify_columns
         self.oversampling_rule = oversampling_rule
         self.rng_seed = rng_seed
 
@@ -340,61 +312,10 @@ class TrainingDatasetSampler(Configurable):
 
         Raises:
             FileNotFoundError: If ``config_path`` does not exist.
-            TypeError: If configuration sections are not mappings or the resolved
-                rule is not callable.
-            ValueError: If required settings are missing, the rule reference cannot
-                be resolved, or static sampler settings are invalid.
+            ValueError: If the section is missing, the rule reference cannot be
+                resolved, or the settings are invalid.
         """
-        configuration = _load_configuration_section(
-            config_path, "training_dataset_sampler"
-        )
-        for setting in ("group_columns", "stratify_columns", "oversampling_rule"):
-            _required_setting(configuration, "training_dataset_sampler", setting)
-        rule_reference = configuration.pop("oversampling_rule")
-        return cls(
-            **configuration,
-            oversampling_rule=cls._resolve_rule_reference(rule_reference),
-        )
-
-    @staticmethod
-    def _resolve_rule_reference(rule_reference: object) -> Callable:
-        """Resolve a trusted local ``module:function`` oversampling rule."""
-        if not isinstance(rule_reference, str):
-            raise ValueError("oversampling_rule must use module:function syntax")
-        module_name, separator, function_name = rule_reference.partition(":")
-        if not separator or not module_name or not function_name:
-            raise ValueError("oversampling_rule must use module:function syntax")
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError as exc:
-            raise ValueError(
-                f"Could not import oversampling rule module: {module_name}"
-            ) from exc
-        try:
-            rule = getattr(module, function_name)
-        except AttributeError as exc:
-            raise ValueError(
-                f"Could not find oversampling rule: {rule_reference}"
-            ) from exc
-        if not callable(rule):
-            raise TypeError(f"Oversampling rule is not callable: {rule_reference}")
-        return rule
-
-    @staticmethod
-    def _validate_columns(
-        columns: tuple[str, ...], *, required: bool
-    ) -> tuple[str, ...]:
-        """Reject ambiguous column configuration rather than guessing semantics."""
-        if isinstance(columns, str):
-            raise TypeError("Columns must be a sequence of names, not a string")
-        names = tuple(columns)
-        if (
-            (required and not names)
-            or any(not isinstance(name, str) or not name for name in names)
-            or len(set(names)) != len(names)
-        ):
-            raise ValueError("Column names must be unique nonempty strings")
-        return names
+        return cls(**load_section(config_path, "data", "training_dataset_sampler"))
 
     def sample(
         self, records_by_species: Mapping[str, pd.DataFrame]
@@ -462,12 +383,11 @@ class TrainingDatasetSampler(Configurable):
         """Validate fields needed to select coherent training observations."""
         if not isinstance(frame, pd.DataFrame):
             raise ValueError(f"{species}: records must be a pandas DataFrame")
-        if not frame.columns.is_unique:
-            raise ValueError(f"{species}: dataframe column names must be unique")
-        columns = ["dataset_split", *self.group_columns, *self.stratify_columns]
-        missing = [name for name in dict.fromkeys(columns) if name not in frame.columns]
-        if missing:
-            raise ValueError(f"{species}: missing columns {missing}")
+        _require_columns(
+            species,
+            frame,
+            ["dataset_split", *self.group_columns, *self.stratify_columns],
+        )
         valid_splits = {"train", "validation", "test"}
         if not frame["dataset_split"].isin(valid_splits).all():
             raise ValueError(f"{species}: dataset_split contains an invalid value")
@@ -495,16 +415,13 @@ class TrainingDatasetSampler(Configurable):
     @staticmethod
     def _validate_multiplier(species: str, multiplier: object) -> float:
         """Return a finite multiplier that cannot remove training rows."""
-        if (
-            not isinstance(multiplier, Real)
-            or isinstance(multiplier, bool)
-            or not np.isfinite(multiplier)
-            or multiplier < 1.0
-        ):
+        try:
+            return parse_settings(Multiplier, multiplier)
+        except ValidationError as error:
+            # Name the species: the rule's result, not a setting, is at fault.
             raise ValueError(
                 f"{species}: oversampling rule must return a finite multiplier >= 1.0"
-            )
-        return float(multiplier)
+            ) from error
 
     def _sample_species(
         self, frame: pd.DataFrame, multiplier: float, rng: np.random.Generator

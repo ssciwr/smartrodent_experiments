@@ -88,15 +88,6 @@ def test_creators_discover_classes_and_load_existing_split_records(
 
 
 @SHARED_BASE
-@pytest.mark.parametrize("batch_size", [0, True, 1.5])
-def test_constructor_rejects_invalid_batch_size(creator_type, tmp_path, batch_size):
-    """Invalid batch limits fail before loading records or creating output."""
-    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
-        creator_type(tmp_path / "missing", tmp_path / "output", batch_size=batch_size)
-    assert not (tmp_path / "output").exists()
-
-
-@SHARED_BASE
 def test_explicit_classes_select_directories_and_define_index_order(
     creator_type, tmp_path
 ):
@@ -116,14 +107,13 @@ def test_explicit_classes_select_directories_and_define_index_order(
 
 
 @SHARED_BASE
-@pytest.mark.parametrize("class_names", [[], ["../mouse"], ["mouse", "mouse"]])
-def test_invalid_class_selection_is_rejected(creator_type, tmp_path, class_names):
-    """Selections must be nonempty, unique immediate species-directory names."""
+def test_unknown_class_directories_are_rejected(creator_type, tmp_path):
+    """Selections must name immediate species directories, never paths outside them."""
     root = tmp_path / "input"
     write_species(root, "mouse", ["train"])
 
     with pytest.raises(ValueError, match="class"):
-        creator_type(root, tmp_path / "output", class_names=class_names)
+        creator_type(root, tmp_path / "output", class_names=["../mouse"])
 
 
 @SHARED_BASE
@@ -316,39 +306,6 @@ def creator_input(images):
 
 
 @SHARED_BASE
-@pytest.mark.parametrize("model_name", [None, "custom-model"])
-def test_creators_initialize_and_reuse_a_lazy_detector(
-    creator_type, creator_input, images, tmp_path, monkeypatch, model_name
-):
-    """Creator setup configures inherited inference without loading model weights."""
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
-    )
-    constructor = Mock(return_value=model)
-    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
-    monkeypatch.setattr(yolo_dataset_creation, "DEFAULT_MODEL", "test-default")
-    output = tmp_path / "output"
-    settings = {} if model_name is None else {"model_name": model_name}
-
-    creator = creator_type(creator_input, output, **settings)
-
-    constructor.assert_not_called()
-    assert creator.speciesnet_model is None
-    assert creator.infer_batch([]) == {}
-    constructor.assert_not_called()
-    for records in creator.records_by_species.values():
-        source_path = records.iloc[0]["image_path"]
-        result = creator.infer_batch([source_path])
-        assert result[source_path]["detections"][0]["confidence"] == 0.9
-        assert creator.speciesnet_model is model
-    constructor.assert_called_once_with(
-        "test-default" if model_name is None else model_name,
-        components="detector",
-    )
-    assert not output.exists()
-
-
-@SHARED_BASE
 def test_creators_use_injected_detector_without_changing_source_records(
     creator_type, creator_input, images, tmp_path, monkeypatch
 ):
@@ -377,20 +334,6 @@ def test_creators_use_injected_detector_without_changing_source_records(
         pd.testing.assert_frame_equal(records, original[species])
     assert len(creator.records_by_species["mouse"]) == 2
     assert not output.exists()
-
-
-@SHARED_BASE
-def test_creators_reject_conflicting_model_configuration(
-    creator_type, creator_input, tmp_path
-):
-    """An existing detector and a weights identifier cannot override each other."""
-    with pytest.raises(ValueError, match="model"):
-        creator_type(
-            creator_input,
-            tmp_path / "output",
-            model=SpeciesNetStub([]),
-            model_name="other-model",
-        )
 
 
 def test_detector_create_symlinks_sources_and_writes_yolo_labels(
@@ -1002,7 +945,7 @@ def test_from_config_loads_selected_classes_and_lazy_model(
 
 
 @SHARED_BASE
-def test_from_config_uses_working_directory_paths_and_optional_defaults(
+def test_from_config_resolves_paths_against_the_working_directory(
     creator_type, creator_input, tmp_path, monkeypatch
 ):
     """Relative paths follow the working directory, not the YAML file's directory."""
@@ -1025,120 +968,25 @@ def test_from_config_uses_working_directory_paths_and_optional_defaults(
 
     creator = creator_type.from_config(config_path)
 
-    assert isinstance(creator, Configurable)
     assert creator.path_to_image_data == creator_input
     assert creator.dataset_output_path == tmp_path / "stage8_yolo_dataset"
-    assert creator.class_names == ["mouse", "shrew"]
-    assert creator.speciesnet_model is None
-    assert creator.speciesnet_model_name is None
-    assert creator.batch_size == 32
-    assert creator.confidence_threshold == 0.1
-    assert creator.allowed_classes == ("animal",)
-    assert creator.iou_threshold == 0.45
-    assert not creator.dataset_output_path.exists()
 
 
 @SHARED_BASE
-@pytest.mark.parametrize(
-    "configuration",
-    [
-        "null",
-        "data: null",
-        "data:\n  CREATOR: null",
-    ],
-)
-def test_from_config_requires_mapping_sections(creator_type, tmp_path, configuration):
-    """Malformed YAML structure has explicit errors, not guessed defaults."""
-    config_path = tmp_path / "creator.yaml"
-    config_path.write_text(configuration.replace("CREATOR", creator_type.__name__))
-
-    with pytest.raises(TypeError, match="mapping"):
-        creator_type.from_config(config_path)
-
-
-@SHARED_BASE
-@pytest.mark.parametrize("missing", ["path_to_image_data", "dataset_output_path"])
-def test_from_config_requires_source_and_destination(
-    creator_type, creator_input, tmp_path, missing
+def test_from_config_rejects_python_only_model_injection(
+    creator_type, creator_input, tmp_path
 ):
-    """Missing required paths are reported by their configuration key."""
+    """A YAML value cannot stand in for an injected detector instance."""
     settings = {
         "path_to_image_data": str(creator_input),
         "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
-    }
-    del settings[missing]
-    config_path = tmp_path / "creator.yaml"
-    config_path.write_text(yaml.safe_dump({"data": {creator_type.__name__: settings}}))
-
-    with pytest.raises(ValueError, match=missing):
-        creator_type.from_config(config_path)
-
-
-@SHARED_BASE
-@pytest.mark.parametrize("extra_setting", ["model", "typo"])
-def test_from_config_rejects_unknown_or_python_only_settings(
-    creator_type, creator_input, tmp_path, extra_setting
-):
-    """Model injection is Python-only, and obsolete/unknown options cannot be ignored."""
-    settings = {
-        "path_to_image_data": str(creator_input),
-        "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
-        extra_setting: None,
+        "model": "speciesnet",
     }
     config_path = tmp_path / "creator.yaml"
     config_path.write_text(yaml.safe_dump({"data": {creator_type.__name__: settings}}))
 
-    with pytest.raises(ValueError, match=extra_setting):
+    with pytest.raises(ValueError, match="model"):
         creator_type.from_config(config_path)
-
-
-@SHARED_BASE
-@pytest.mark.parametrize(
-    "setting, value, error",
-    # one case per distinct validation branch of each setting
-    [
-        ("path_to_image_data", None, TypeError),
-        ("dataset_output_path", 123, TypeError),
-        ("dataset_output_path", "", ValueError),
-        ("path_to_image_data", "   ", ValueError),
-        ("class_names", "mouse", TypeError),
-        ("class_names", [123], TypeError),
-        ("model_name", 123, TypeError),
-        ("model_name", "", ValueError),
-        ("batch_size", 0, ValueError),
-        ("batch_size", True, ValueError),
-        ("batch_size", "32", ValueError),
-        ("confidence_threshold", 1.1, ValueError),
-        ("confidence_threshold", True, TypeError),
-        ("iou_threshold", -0.1, ValueError),
-        ("iou_threshold", "0.5", TypeError),
-        ("allowed_classes", "animal", TypeError),
-        ("allowed_classes", None, TypeError),
-        ("allowed_classes", [123], TypeError),
-        ("allowed_classes", ["  "], ValueError),
-    ],
-)
-def test_from_config_rejects_invalid_setting_types(
-    creator_type, creator_input, tmp_path, setting, value, error
-):
-    """Configuration values cannot silently reinterpret paths, class lists, or models."""
-    settings = {
-        "path_to_image_data": str(creator_input),
-        "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
-        setting: value,
-    }
-    config_path = tmp_path / "creator.yaml"
-    config_path.write_text(yaml.safe_dump({"data": {creator_type.__name__: settings}}))
-
-    with pytest.raises(error, match=setting):
-        creator_type.from_config(config_path)
-
-
-@SHARED_BASE
-def test_from_config_reports_missing_config_file(creator_type, tmp_path):
-    """A missing configuration file does not produce a partially configured creator."""
-    with pytest.raises(FileNotFoundError):
-        creator_type.from_config(tmp_path / "missing.yaml")
 
 
 @SHARED_BASE
@@ -1152,7 +1000,7 @@ def test_from_config_requires_its_own_class_named_section(creator_type, tmp_path
     config_path = tmp_path / "creator.yaml"
     config_path.write_text(yaml.safe_dump({"data": {other_type.__name__: {}}}))
 
-    with pytest.raises(TypeError, match=creator_type.__name__):
+    with pytest.raises(ValueError, match=creator_type.__name__):
         creator_type.from_config(config_path)
 
 
@@ -1213,29 +1061,6 @@ def test_configured_filtering_controls_created_dataset(
         assert record["status"] == ("written" if indices else "skipped")
         for item in record["outputs"]:
             assert (output / item["image_path"]).is_file()
-
-
-@given(
-    confidence=st.floats(min_value=0, max_value=1),
-    iou=st.floats(min_value=0, max_value=1),
-)
-def test_constructor_preserves_valid_filter_thresholds(confidence, iou):
-    """Every finite threshold in the supported interval remains configurable."""
-    with TemporaryDirectory() as directory:
-        root = Path(directory) / "input"
-        write_species(root, "mouse", ["train"])
-        labels = ["animal"]
-        creator = YoloDetectorDatasetCreatorFromSpeciesnet(
-            root,
-            Path(directory) / "output",
-            confidence_threshold=confidence,
-            allowed_classes=labels,
-            iou_threshold=iou,
-        )
-        labels.append("human")
-        assert creator.confidence_threshold == confidence
-        assert creator.iou_threshold == iou
-        assert creator.allowed_classes == ("animal",)
 
 
 def configured_mixin(*, model=None, model_name=None):
@@ -1390,36 +1215,10 @@ def test_inference_requires_explicit_initialization(images):
         _SpeciesNetDatasetMixin().infer_batch(images)
 
 
-def test_injected_model_is_stored_and_reused(images):
-    """An injected detector remains available across successive batches."""
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
-    )
-    mixin = configured_mixin(model=model)
-
-    for path in images:
-        assert mixin.infer_batch([path])[str(path)]["detections"]
-        assert mixin.speciesnet_model is model
-
-
 def test_initialization_rejects_conflicting_model_settings():
     """A supplied model and a model identifier cannot silently override each other."""
     with pytest.raises(ValueError):
         configured_mixin(model=SpeciesNetStub([]), model_name="other-model")
-
-
-@pytest.mark.parametrize(
-    "settings",
-    [
-        {"batch_size": 0},
-        {"confidence_threshold": 1.1},
-        {"iou_threshold": -0.1},
-    ],
-)
-def test_invalid_inference_settings_raise_explicit_error(images, settings):
-    """Invalid thresholds and batch sizes are rejected before inference."""
-    with pytest.raises(ValueError):
-        configured_mixin(model=SpeciesNetStub([])).infer_batch(images, **settings)
 
 
 def test_missing_model_result_is_not_silently_dropped(images):

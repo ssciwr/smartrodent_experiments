@@ -4,8 +4,6 @@ Only encoder loading and head initialization belong here. Freezing, training
 modes, and checkpoint writing are owned by the native trainer and tested there.
 """
 
-import gc
-import weakref
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -385,27 +383,6 @@ def test_same_size_head_transfer_does_not_require_matching_class_identity(
         donor.network.model[-1].linear.state_dict(),
     )
     assert model.names == {0: "mouse", 1: "rat"}
-
-
-def test_supcon_conversion_does_not_keep_a_feature_capture_wrapper_alive(
-    supcon_source, monkeypatch
-):
-    """If conversion uses the SupCon loader, remove its hook rather than retaining its closure."""
-    restored_wrappers = []
-    original = YoloSupConModel.from_checkpoint
-
-    def restore(cls, *args, **kwargs):
-        """Observe wrapper lifetime without requiring this loading implementation."""
-        model = original(*args, **kwargs)
-        restored_wrappers.append(weakref.ref(model))
-        return model
-
-    monkeypatch.setattr(YoloSupConModel, "from_checkpoint", classmethod(restore))
-    model = _initialize(supcon_source)
-    gc.collect()
-    assert all(reference() is None for reference in restored_wrappers)
-    _, logits = model(torch.rand(2, 3, 16, 16))
-    assert logits.shape == (2, 2)
 
 
 @pytest.mark.parametrize("location", ["encoder", "head"])

@@ -13,12 +13,17 @@ import pandas as pd
 import torch
 import yaml
 from PIL import Image
+from pydantic import validate_call
 from speciesnet import DEFAULT_MODEL, SpeciesNet
 from tqdm import tqdm
 from ultralytics.utils.metrics import box_iou
 
 from .base import YoloDatasetCreatorBase
+from .config_utils import load_section
+from .training_validation import ClassNames, Count, Nonblank, PathSetting, Probability
 from .utils import path_component
+
+type DetectorLabels = tuple[Nonblank, ...]
 
 
 class _SpeciesNetDatasetMixin:
@@ -62,14 +67,15 @@ class _SpeciesNetDatasetMixin:
             )
         return self.speciesnet_model
 
+    @validate_call
     def infer_batch(
         self,
         image_paths: Sequence[str | Path],
         *,
-        batch_size: int = 32,
-        confidence_threshold: float = 0.1,
-        allowed_classes: Sequence[str] = ("animal",),
-        iou_threshold: float = 0.45,
+        batch_size: Count = 32,
+        confidence_threshold: Probability = 0.1,
+        allowed_classes: DetectorLabels = ("animal",),
+        iou_threshold: Probability = 0.45,
     ) -> dict[str, dict]:
         """Run SpeciesNet detection and extract accepted crops without disk writes.
 
@@ -93,15 +99,6 @@ class _SpeciesNetDatasetMixin:
         """
         if not hasattr(self, "speciesnet_model"):
             raise RuntimeError("Call initialize_speciesnet before infer_batch")
-        if (
-            not isinstance(batch_size, int)
-            or isinstance(batch_size, bool)
-            or batch_size < 1
-        ):
-            raise ValueError("batch_size must be a positive integer")
-        self._validate_detection_settings(
-            confidence_threshold, allowed_classes, iou_threshold
-        )
 
         filepaths = [str(Path(path).resolve()) for path in image_paths]
         if not filepaths:
@@ -121,31 +118,6 @@ class _SpeciesNetDatasetMixin:
                 "detections": self._extract_crop_records(source_path, accepted)
             }
         return results
-
-    @staticmethod
-    def _validate_detection_settings(
-        confidence_threshold: float,
-        allowed_classes: Sequence[str],
-        iou_threshold: float,
-    ) -> None:
-        """Reject ambiguous labels and nonnumeric or out-of-range thresholds."""
-        for name, value in (
-            ("confidence_threshold", confidence_threshold),
-            ("iou_threshold", iou_threshold),
-        ):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"{name} must be a number")
-            if not 0.0 <= value <= 1.0:
-                raise ValueError(f"{name} must be between 0 and 1")
-        if isinstance(allowed_classes, (str, bytes)) or not isinstance(
-            allowed_classes, Sequence
-        ):
-            raise TypeError("allowed_classes must be a sequence of strings")
-        for label in allowed_classes:
-            if not isinstance(label, str):
-                raise TypeError("allowed_classes must contain strings")
-            if not label.strip():
-                raise ValueError("allowed_classes must contain nonempty labels")
 
     def _run_speciesnet_batches(
         self, filepaths: list[str], batch_size: int
@@ -272,18 +244,19 @@ class _SpeciesNetDatasetMixin:
 class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorBase):
     """Combine record loading with explicit, lazy SpeciesNet configuration."""
 
+    @validate_call
     def __init__(
         self,
-        path_to_image_data: str | Path,
-        dataset_output_path: str | Path,
-        class_names: list[str] | None = None,
+        path_to_image_data: PathSetting,
+        dataset_output_path: PathSetting,
+        class_names: ClassNames | None = None,
         *,
-        batch_size: int = 32,
-        confidence_threshold: float = 0.1,
-        allowed_classes: Sequence[str] = ("animal",),
-        iou_threshold: float = 0.45,
+        batch_size: Count = 32,
+        confidence_threshold: Probability = 0.1,
+        allowed_classes: DetectorLabels = ("animal",),
+        iou_threshold: Probability = 0.45,
         model: Any | None = None,
-        model_name: str | None = None,
+        model_name: Nonblank | None = None,
     ):
         """Load source records and configure the reusable baseline detector.
 
@@ -306,19 +279,9 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
                 is invalid.
             FileNotFoundError: Required records or source files are missing.
         """
-        if (
-            not isinstance(batch_size, int)
-            or isinstance(batch_size, bool)
-            or batch_size < 1
-        ):
-            raise ValueError("batch_size must be a positive integer")
-        self._validate_detection_settings(
-            confidence_threshold, allowed_classes, iou_threshold
-        )
         self.batch_size = batch_size
         self.confidence_threshold = confidence_threshold
-        # Snapshot caller-owned sequences so later mutations cannot change filtering.
-        self.allowed_classes = tuple(allowed_classes)
+        self.allowed_classes = allowed_classes
         self.iou_threshold = iou_threshold
         # Validate model configuration before reading records. Weight loading stays
         # in the mixin and occurs only on the first nonempty inference request.
@@ -346,72 +309,13 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
 
         Raises:
             FileNotFoundError: The configuration or required source files are missing.
-            TypeError: YAML sections or setting values have incorrect types.
-            ValueError: Required paths are missing, unsupported settings are supplied,
+            ValueError: The section is missing, settings are invalid or unsupported,
                 or class selection, metadata, or model configuration is invalid.
         """
-        settings = cls._load_creator_settings(config_path)
-        cls._validate_creator_settings(settings)
+        settings = load_section(config_path, "data", cls.__name__)
+        if "model" in settings:
+            raise ValueError("model is a Python-only setting; configure model_name")
         return cls(**settings)
-
-    @classmethod
-    def _load_creator_settings(cls, config_path: str | Path) -> dict:
-        """Read the required creator mapping without borrowing unrelated pipeline code."""
-        path = Path(config_path).expanduser()
-        configuration = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(configuration, dict):
-            raise TypeError("The configuration must be a mapping")
-        data = configuration.get("data")
-        if not isinstance(data, dict):
-            raise TypeError("The 'data' configuration must be a mapping")
-        settings = data.get(cls.__name__)
-        if not isinstance(settings, dict):
-            raise TypeError(
-                f"The 'data.{cls.__name__}' configuration must be a mapping"
-            )
-        return settings
-
-    @staticmethod
-    def _validate_creator_settings(settings: dict) -> None:
-        """Reject ambiguous YAML values and Python-only model injection before setup."""
-        required = {"path_to_image_data", "dataset_output_path"}
-        allowed = required | {
-            "class_names",
-            "model_name",
-            "batch_size",
-            "confidence_threshold",
-            "allowed_classes",
-            "iou_threshold",
-        }
-        unknown = set(settings) - allowed
-        if unknown:
-            raise ValueError(
-                f"Unsupported dataset creator settings: {sorted(map(str, unknown))}"
-            )
-        missing = required - set(settings)
-        if missing:
-            raise ValueError(
-                f"Missing required dataset creator settings: {sorted(missing)}"
-            )
-        for name in sorted(required):
-            value = settings[name]
-            if not isinstance(value, str):
-                raise TypeError(f"{name} must be a path string")
-            if not value.strip():
-                raise ValueError(f"{name} must be a nonempty path string")
-
-        class_names = settings.get("class_names")
-        if class_names is not None and (
-            not isinstance(class_names, list)
-            or any(not isinstance(name, str) for name in class_names)
-        ):
-            raise TypeError("class_names must be a list of strings or null")
-        model_name = settings.get("model_name")
-        if model_name is not None:
-            if not isinstance(model_name, str):
-                raise TypeError("model_name must be a string or null")
-            if not model_name.strip():
-                raise ValueError("model_name must be a nonempty string or null")
 
     def create(self) -> Path:
         """Infer source records and write the configured YOLO dataset.

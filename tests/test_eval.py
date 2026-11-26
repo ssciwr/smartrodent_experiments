@@ -102,8 +102,6 @@ def test_evaluation_preprocessing_is_deterministic_rgb(evaluation_images):
 @pytest.mark.parametrize(
     "paths,names,kwargs,message",
     [
-        ([], {"mouse": 0}, {"samples_per_class": 0}, "positive"),
-        ([], {"mouse": 0}, {"image_size": 0}, "positive"),
         ([], {}, {}, "distinct class IDs"),
         ([], {"mouse": 0, "rat": 0}, {}, "distinct class IDs"),
         ([Path("/unused/unknown/0.png")], {"mouse": 0}, {}, "Unknown species"),
@@ -168,14 +166,6 @@ def test_extractor_rejects_unrelated_pool():
         FeatureExtractor(SmallNetwork(), nn.AdaptiveAvgPool2d(1))
 
 
-@pytest.mark.parametrize("kwargs", [{"batch_size": 0}, {"num_workers": -1}])
-def test_extractor_rejects_invalid_loader_settings(evaluation_images, kwargs):
-    """Loader configuration errors are reported before mode changes."""
-    network = SmallNetwork()
-    with pytest.raises(ValueError, match="nonempty dataset"):
-        FeatureExtractor(network, network.pool).extract(evaluation_images, **kwargs)
-
-
 def test_extractor_rejects_parameterless_network(evaluation_images):
     """Device and dtype inference requires a parameterized model."""
     network = nn.Sequential(nn.AdaptiveAvgPool2d(1))
@@ -219,20 +209,6 @@ def test_tsne_rejects_invalid_features(features, message):
     """Invalid and collapsed representations produce actionable errors."""
     with pytest.raises(ValueError, match=message):
         TsneComparison().project(features)
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"perplexity": 0},
-        {"pca_components": 1},
-        {"max_iter": 100},
-    ],
-)
-def test_tsne_rejects_invalid_configuration(kwargs):
-    """Invalid projection settings fail at configuration time."""
-    with pytest.raises(ValueError):
-        TsneComparison(**kwargs)
 
 
 @pytest.fixture

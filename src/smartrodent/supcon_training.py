@@ -48,7 +48,6 @@ from smartrodent.model_card import (
 from smartrodent.onnx_export import OnnxExporter
 from smartrodent.supcon_model import YoloSupConModel
 from smartrodent.training_validation import (
-    CheckpointPath,
     ClassNames,
     Count,
     MappingInput,
@@ -57,6 +56,7 @@ from smartrodent.training_validation import (
     NonnegativeInt,
     OnnxExportSettings,
     OptimizerSettings,
+    PathSetting,
     PositiveNumber,
     Probability,
     Seed,
@@ -117,7 +117,7 @@ class TrainingConfiguration:
     class_names: ClassNames
     transforms: TransformSettings
     optimizer: OptimizerSettings
-    model_name: CheckpointPath = "yolo26x-cls.pt"
+    model_name: PathSetting = "yolo26x-cls.pt"
     epochs: Count = 5
     classes_per_batch: Annotated[Count, Field(ge=2)] = 4
     samples_per_class: Count = 6
@@ -137,7 +137,7 @@ class TrainingConfiguration:
     tracked_metric: Name | None = None
     early_stopping: StoppingSettings | None = None
     scheduler: MappingInput[SchedulerConfiguration] | None = None
-    model_card_template: CheckpointPath = "configs/model_card_template.yaml"
+    model_card_template: PathSetting = "configs/model_card_template.yaml"
     tracked_mode: Mode | None = None
     onnx_export: MappingInput[OnnxExportSettings] | None = None
 

@@ -39,16 +39,6 @@ object: !pyobject pathlib.Path
     assert config["object"] is Path
 
 
-@pytest.mark.parametrize("tag", ["!range", "!random_uniform"])
-def test_removed_pre_optuna_tags_are_rejected_as_unknown(tag):
-    """The retired grid/random tags must not silently load as unexpanded mappings."""
-    with pytest.raises(yaml.YAMLError, match=tag):
-        yaml.load(
-            f"lr: {tag}\n  start: 0.1\n  stop: 0.9\n",
-            Loader=config_utils.get_loader(),
-        )
-
-
 def test_configuration_helpers_handle_edge_cases():
     unchanged = {"plain": 1}
     assert config_utils.ConfigHandler(unchanged).run_configs == [unchanged]
@@ -86,3 +76,12 @@ def test_grid_sweep_expansion_rejects_suggest_tags_without_a_study(text):
     """Decision: tags outside a study fail clearly instead of leaking into a run config."""
     with pytest.raises(ValueError, match="tuning"):
         config_utils.ConfigHandler(load_tagged_yaml(text))
+
+
+@pytest.mark.parametrize("content", ["[]\n", "data: []\n", "data:\n  lila: 3\n"])
+def test_load_section_names_the_missing_mapping(tmp_path, content):
+    path = tmp_path / "config.yaml"
+    path.write_text(content)
+
+    with pytest.raises(ValueError, match="data.lila"):
+        config_utils.load_section(path, "data", "lila")

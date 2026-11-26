@@ -126,23 +126,16 @@ head: !suggest-categorical {choices: [linear, full]}
         space.resolve(params)
 
 
-# One case per validation path; range/step/log consistency is checked by Optuna's
-# distributions themselves, so one representative of each is enough.
+# One schema case per tag type, plus our own rules: unique choices, and Optuna's
+# step and structured-choice warnings escalated to errors. Range, step and log
+# consistency is Optuna's to check.
 @pytest.mark.parametrize(
     "text",
     [
-        "lr: !suggest-float {low: 0.1}\n",  # missing high
         "lr: !suggest-float {low: 0.0, high: 1.0, step: 0.3}\n",  # range not a step multiple
         "lr: !suggest-float {low: .nan, high: 1.0}\n",  # nonfinite bound
-        "lr: !suggest-float {low: 0.0, high: .inf}\n",  # nonfinite bound
-        "lr: !suggest-float {low: a, high: 1.0}\n",  # non-numeric bound
-        "lr: !suggest-float {low: 0.0, high: 1.0, log: maybe}\n",  # non-boolean flag
         "lr: !suggest-float 0.1\n",  # scalar instead of mapping
         "n: !suggest-int {low: 0.5, high: 3}\n",  # float bound for an integer
-        "n: !suggest-int {low: true, high: 3}\n",  # boolean is not an integer
-        "n: !suggest-int {low: 5, high: 1}\n",  # empty range
-        "n: !suggest-int {low: 0, high: 10, step: 3}\n",  # range not a step multiple
-        "c: !suggest-categorical {choices: []}\n",  # no choices
         "c: !suggest-categorical {choices: [a, a]}\n",  # ambiguous duplicate choice
         "c: !suggest-categorical {choices: [[1, 2], [3]]}\n",  # non-primitive choices
         "c: !suggest-categorical {values: [a, b]}\n",  # wrong key

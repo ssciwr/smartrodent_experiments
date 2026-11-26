@@ -50,24 +50,11 @@ def test_study_settings_round_trip_with_explicit_optional_defaults():
 @pytest.mark.parametrize(
     "values",
     [
-        {
-            k: v for k, v in tuning().items() if k != "storage"
-        },  # in-memory must be explicit
-        {
-            k: v for k, v in tuning().items() if k != "pruner"
-        },  # no pruning must be explicit
-        tuning(study_name=""),
-        tuning(n_trials="3"),
-        tuning(timeout=0),
         tuning(sampler={"name": "FancySampler"}),
         tuning(sampler={"name": "BaseSampler"}),
         tuning(sampler={"name": "RandomSampler", "parameters": {"bogus": 1}}),
         tuning(pruner={"name": "FancyPruner"}),
         tuning(pruner={"name": "MedianPruner", "parameters": {"bogus": 1}}),
-        tuning(
-            direction="maximize"
-        ),  # derived from tracked_mode, never configured twice
-        tuning(unknown=True),
     ],
 )
 def test_invalid_study_settings_fail_before_any_trial(values):

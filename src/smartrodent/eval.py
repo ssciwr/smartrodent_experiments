@@ -3,18 +3,22 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.colors import ListedColormap
 from PIL import Image
+from pydantic import Field, validate_call
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import normalize
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms.v2 import Compose, PILToTensor, Resize, ToDtype
+
+from .training_validation import Count, NonnegativeInt, PositiveNumber, Seed
 
 
 class EvaluationImages(Dataset):
@@ -31,16 +35,15 @@ class EvaluationImages(Dataset):
         ValueError: Selection sizes, labels, or available class counts are invalid.
     """
 
+    @validate_call
     def __init__(
         self,
         images: Sequence[Path],
         label_names: Mapping[str, int],
-        samples_per_class: int = 100,
-        image_size: int = 448,
-        seed: int = 42,
+        samples_per_class: Count = 100,
+        image_size: Count = 448,
+        seed: Seed = 42,
     ):
-        if samples_per_class < 1 or image_size < 1:
-            raise ValueError("samples_per_class and image_size must be positive")
         if not label_names or len(set(label_names.values())) != len(label_names):
             raise ValueError("label_names must contain distinct class IDs")
 
@@ -129,8 +132,12 @@ class FeatureExtractor:
         self.projector = projector
 
     @torch.inference_mode()
+    @validate_call(config={"arbitrary_types_allowed": True})
     def extract(
-        self, dataset: EvaluationImages, batch_size: int = 8, num_workers: int = 0
+        self,
+        dataset: EvaluationImages,
+        batch_size: Count = 8,
+        num_workers: NonnegativeInt = 0,
     ) -> EvaluationFeatures:
         """Extract CPU arrays in subset order and restore module training flags.
 
@@ -147,13 +154,9 @@ class FeatureExtractor:
             Pooled and optional projected features, with labels and source paths.
 
         Raises:
-            ValueError: Loader settings, dataset length, or devices are incompatible.
+            ValueError: Loader settings or devices are incompatible.
             RuntimeError: Pooling does not run exactly once in a forward pass.
         """
-        if batch_size < 1 or num_workers < 0 or len(dataset) == 0:
-            raise ValueError(
-                "Use a nonempty dataset, positive batch_size, and num_workers >= 0"
-            )
         parameter = next(self.network.parameters(), None)
         if parameter is None:
             raise ValueError(
@@ -238,17 +241,14 @@ class TsneComparison:
         max_iter: Number of t-SNE optimization iterations, at least 250.
     """
 
+    @validate_call
     def __init__(
         self,
-        perplexity: float = 30,
-        pca_components: int | None = 50,
-        seed: int = 42,
-        max_iter: int = 1000,
+        perplexity: PositiveNumber = 30,
+        pca_components: Annotated[int, Field(strict=True, ge=2)] | None = 50,
+        seed: Seed = 42,
+        max_iter: Annotated[int, Field(strict=True, ge=250)] = 1000,
     ):
-        if perplexity <= 0 or (pca_components and pca_components < 2) or max_iter < 250:
-            raise ValueError(
-                "Use perplexity > 0, pca_components >= 2, and max_iter >= 250"
-            )
         self.perplexity = perplexity
         self.pca_components = pca_components
         self.seed = seed

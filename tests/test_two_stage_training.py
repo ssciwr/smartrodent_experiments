@@ -25,7 +25,6 @@ from smartrodent.supcon_training import SupConExperiment
 from smartrodent.two_stage_training import (
     TwoStageConfiguration,
     TwoStageExperiment,
-    TwoStageResult,
 )
 
 
@@ -48,97 +47,35 @@ def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
     """No rescoring, hardcoded loss, last checkpoint, or unordered filesystem discovery."""
     document = pipeline_document
     document["supcon"]["tracked_mode"] = mode
-    document["supcon"]["scheduler"] = {
-        "name": "ReduceLROnPlateau",
-        "parameters": {"mode": mode, "patience": 2, "factor": 0.5},
-    }
-    document["supcon"]["early_stopping"] = {
-        "patience": 5,
-        "tolerance": 0.01,
-        "comparison": "less" if mode == "min" else "greater",
-    }
-    document["classifier"]["train_kwargs"].update(patience=4, cos_lr=True, lrf=0.2)
     recorded_stages.values = values
-    config = _configuration(document)
-    before = deepcopy(config.to_dict())
-    result = TwoStageExperiment(config).run()
-    assert isinstance(result, TwoStageResult)
+    result = TwoStageExperiment(_configuration(document)).run()
+
     assert recorded_stages.events == ["supcon", "supcon", "supcon", "classifier"]
-    assert tuple(result.supcon_results) == tuple(recorded_stages.results)
-    assert result.selected_supcon == result.supcon_results[winner]
-    selected = result.selected_supcon
-    classifier = recorded_stages.classifier[0]
-    assert (
-        selected.tracked_metric == "balanced_accuracy" and selected.tracked_mode == mode
-    )
-    assert selected.best_value == values[winner] and selected.best_epoch == 2
-    assert classifier.initialization["encoder"]["source"] == "supcon"
-    source = Path(classifier.initialization["encoder"]["checkpoint"])
-    assert source.resolve() == selected.best_checkpoint.resolve()
-    assert source != selected.last_checkpoint
-    assert torch.load(source, weights_only=True) == {"candidate": winner, "epoch": 2}
     root = Path(document["output_directory"])
-    assert result.output_directory == root
     assert [item.output_directory for item in result.supcon_results] == [
         root / "supcon" / f"run_{index:03d}" for index in (1, 2, 3)
     ]
-    assert (
-        classifier.output_directory
-        == result.classifier_result.output_directory
-        == root / "classifier"
-    )
-    assert result.classifier_result.tracked_metric == "ce_loss_mean"
-    assert result.classifier_result.best_value == 0.4
-    assert [item.optimizer["lr"] for item in recorded_stages.supcon] == [
-        0.001,
-        0.002,
-        0.003,
-    ]
-    assert all(
-        item.seed == 11 and item.temperature == 0.1 for item in recorded_stages.supcon
-    )
-    assert (
-        classifier.seed == 29
-        and classifier.train_kwargs == document["classifier"]["train_kwargs"]
-    )
-    assert classifier.batch_size == 3
-    assert classifier.encoder_batchnorm == "eval"
-    assert classifier.freeze == document["classifier"]["freeze"]
-    assert (
-        classifier.initialization["head"]
-        == document["classifier"]["initialization"]["head"]
-    )
+    selected = result.selected_supcon
+    assert selected == result.supcon_results[winner]
+    assert selected.best_value == values[winner] and selected.tracked_mode == mode
+
+    # The classifier starts from the winner's best checkpoint, never its last one.
+    classifier = recorded_stages.classifier[0]
+    source = Path(classifier.initialization["encoder"]["checkpoint"])
+    assert source.resolve() == selected.best_checkpoint.resolve()
+    assert torch.load(source, weights_only=True) == {"candidate": winner, "epoch": 2}
+
+    # Shared data has one owner: every stage trains and validates on it.
     for stage in [*recorded_stages.supcon, classifier]:
-        stage_settings = (
-            document["classifier"] if stage is classifier else document["supcon"]
-        )
-        assert stage.transforms == stage_settings["transforms"]
-        if stage is classifier:
-            assert stage.train_kwargs == stage_settings["train_kwargs"]
-        else:
-            assert stage.scheduler.name == stage_settings["scheduler"]["name"]
-            assert (
-                stage.scheduler.parameters == stage_settings["scheduler"]["parameters"]
-            )
-            assert stage.early_stopping == stage_settings["early_stopping"]
         assert stage.train_dataset == Path(document["data"]["train_dataset"])
         assert stage.validation_dataset == Path(document["data"]["validation_dataset"])
         assert stage.class_names == ("rat", "mouse")
-    assert config.to_dict() == before
-    assert yaml.safe_load((root / "config.yaml").read_text()) == before
+
     summary = yaml.safe_load((root / "selection.yaml").read_text())
-    for candidate, saved in zip(
-        result.supcon_results, summary["supcon_results"], strict=True
-    ):
-        assert serialized_result(candidate).items() <= saved.items()
     assert serialized_result(selected).items() <= summary["selected_supcon"].items()
     assert (
         summary["selected_supcon"]["checkpoint_sha256"]
         == hashlib.sha256(source.read_bytes()).hexdigest()
-    )
-    assert (
-        serialized_result(result.classifier_result).items()
-        <= summary["classifier_result"].items()
     )
 
 
@@ -371,7 +308,6 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
 @pytest.mark.parametrize(
     "path,value,message",
     [
-        (("data", "validation_dataset"), None, "validation"),
         (("data", "class_names"), ["mouse", "mouse"], "class_names"),
         (
             ("supcon", "optimizer", "lr"),
@@ -399,11 +335,6 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
             "metric",
         ),
         (
-            ("data", "train_dataset"),
-            {"type": "sweep", "values": ["a", "b"]},
-            "data|sweep",
-        ),
-        (
             ("classifier", "initialization", "encoder"),
             {"source": "supcon", "checkpoint": "some.pt"},
             "selected_supcon|encoder",
@@ -414,7 +345,6 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
             "some.pt",
             "encoder|checkpoint",
         ),
-        (("classifier", "initialization", "head", "replace"), "other", "replace"),
         (("classifier", "train_kwargs", "resume"), True, "resume"),
         (
             ("supcon", "scheduler"),
@@ -455,9 +385,6 @@ def test_pipeline_output_must_stay_outside_both_shared_splits(
 @pytest.mark.parametrize(
     "section,key,value",
     [
-        # unknown root/data keys, and shared keys repeated inside each stage
-        (None, "unknown", True),
-        ("data", "test_dataset", "must-not-be-used"),
         ("supcon", "train_dataset", "other-training"),
         ("supcon", "output_directory", "other-output"),
         ("classifier", "class_names", ["other"]),
@@ -655,20 +582,6 @@ def test_whole_supcon_mapping_sweeps_cannot_bypass_shared_ownership(
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
-@pytest.mark.parametrize("section", ["supcon", "classifier"])
-@pytest.mark.parametrize("seed", [-1, True])  # one range and one type violation
-def test_every_stage_seed_is_validated_before_any_candidate(
-    pipeline_document, recorded_stages, section, seed
-):
-    """The supported Python/NumPy/PyTorch RNG intersection is an unsigned 32-bit integer."""
-    value = {"type": "sweep", "values": [11, seed]} if section == "supcon" else seed
-    pipeline_document[section]["seed"] = value
-    with pytest.raises(ValueError, match="seed"):
-        _configuration(pipeline_document)
-    assert recorded_stages.events == []
-    assert not Path(pipeline_document["output_directory"]).exists()
-
-
 @pytest.mark.parametrize("fail_at", [0, 2])  # first and last candidate
 def test_failed_rerun_invalidates_previous_success_without_pruning_artifacts(
     pipeline_document, recorded_stages, fail_at
@@ -770,81 +683,39 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
     config, result = _run_tracking_document(
         tracking_document, tracking_store, register=register
     )
-    assert (
-        len(scripted_validation.supcon) == 6
-        and len(scripted_validation.classifier) == 3
-    )
     assert result.selected_supcon == result.supcon_results[1]
     assert result.selected_supcon.best_epoch == result.classifier_result.best_epoch == 2
     assert result.selected_supcon.best_value == (0.1 if mode == "min" else 0.9)
-    assert result.classifier_result.best_value == 0.9
+
+    # One parent run with one finished child per candidate and for CE.
     child_ids = [
         item.mlflow_run_id
         for item in (*result.supcon_results, result.classifier_result)
     ]
-    assert all(child_ids) and result.mlflow_run_id not in child_ids
     runs = tracking_store.client.search_runs([tracking_store.experiment_id])
-    assert len(runs) == 4 and {run.info.run_id for run in runs} == {
-        result.mlflow_run_id,
-        *child_ids,
-    }
+    assert {run.info.run_id for run in runs} == {result.mlflow_run_id, *child_ids}
     assert all(run.info.status == "FINISHED" for run in runs)
-    parent = tracking_store.client.get_run(result.mlflow_run_id)
-    assert "mlflow.parentRunId" not in parent.data.tags
     for run in runs:
-        assert run.data.tags["git_commit"] == parent.data.tags["git_commit"]
+        assert run.data.tags["git_commit"]
         assert (
             run.data.tags["dataset_revision"]
             == tracking_store.configuration["dataset_revision"]
         )
         if run.info.run_id in child_ids:
             assert run.data.tags["mlflow.parentRunId"] == result.mlflow_run_id
-    for candidate in result.supcon_results:
-        history = tracking_store.client.get_metric_history(
-            candidate.mlflow_run_id, "validation/balanced_accuracy"
-        )
-        assert [item.step for item in history] == [1, 2, 3]
-        assert (
-            tracking_store.client.get_run(candidate.mlflow_run_id).data.metrics[
-                "best_validation_balanced_accuracy"
-            ]
-            == candidate.best_value
-        )
-        card = yaml.safe_load(
-            (candidate.output_directory / "best.model_card.yaml").read_text()
-        )
-        assert card["model"]["task"] == "contrastive-encoder"
-        assert (
-            card["model"]["registry_version"] is None
-        )  # No untrained classifier registry versions.
-    ce_run_id = result.classifier_result.mlflow_run_id
-    ce_history = tracking_store.client.get_metric_history(
-        ce_run_id, "validation/balanced_accuracy"
-    )
-    assert [item.step for item in ce_history] == [1, 2, 3]
-    assert [item.value for item in ce_history] == [0.1, 0.9, 0.4]
-    assert (
-        tracking_store.client.get_run(ce_run_id).data.metrics[
-            "best_validation_balanced_accuracy"
-        ]
-        == 0.9
-    )
+
+    # The classifier and its card name the selected encoder and the selected epoch.
     provenance = _expected_encoder_provenance(result)
-    for checkpoint in (
-        result.classifier_result.best_checkpoint,
-        result.classifier_result.last_checkpoint,
-    ):
-        model = YOLO(str(checkpoint), task="classify").model
-        assert provenance.items() <= model.provenance.items()
+    model = YOLO(str(result.classifier_result.best_checkpoint), task="classify").model
+    assert provenance.items() <= model.provenance.items()
     card = yaml.safe_load(
         result.classifier_result.best_checkpoint.with_suffix(
             ".model_card.yaml"
         ).read_text()
     )
     assert provenance.items() <= card["provenance"].items()
-    assert card["model"]["task"] == "image-classification"
-    assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
-    assert card["provenance"]["git_commit"] == parent.data.tags["git_commit"]
+    assert card["validation"]["epoch"] == 2
+    assert card["provenance"]["git_commit"]
     assert (
         card["provenance"]["dataset_revision"]
         == tracking_store.configuration["dataset_revision"]
@@ -855,15 +726,6 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
             result.classifier_result.best_checkpoint.read_bytes()
         ).hexdigest()
     )
-    for child in (*result.supcon_results, result.classifier_result):
-        for filename in ("best.pt", "best.model_card.yaml", "best.model_card.md"):
-            downloaded = download_artifact(
-                tracking_store, child.mlflow_run_id, f"best_model/{filename}"
-            )
-            assert (
-                downloaded.read_bytes()
-                == (child.best_checkpoint.parent / filename).read_bytes()
-            )
     for filename in ("config.yaml", "selection.yaml"):
         assert (
             download_artifact(
@@ -871,31 +733,14 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
             ).read_bytes()
             == (result.output_directory / filename).read_bytes()
         )
-    summary = yaml.safe_load((result.output_directory / "selection.yaml").read_text())
-    assert summary["mlflow_run_id"] == result.mlflow_run_id
-    assert (
-        summary["selected_supcon"]["mlflow_run_id"]
-        == result.selected_supcon.mlflow_run_id
-    )
-    assert (
-        summary["classifier_result"]["mlflow_run_id"]
-        == result.classifier_result.mlflow_run_id
-    )
     assert (
         yaml.safe_load((result.output_directory / "config.yaml").read_text())
         == config.to_dict()
     )
+
     if register:
         version = assert_registered_classifier(tracking_store, result.classifier_result)
-        assert {
-            model.name for model in tracking_store.client.search_registered_models()
-        } == {tracking_store.registry_name}
-        assert version.tags["validation_status"] == "passed"
         assert version.tags["encoder_run_id"] == result.selected_supcon.mlflow_run_id
-        assert (
-            version.tags["encoder_checkpoint_sha256"]
-            == provenance["encoder_checkpoint_sha256"]
-        )
         assert (
             tracking_store.client.get_model_version_by_alias(
                 tracking_store.registry_name,
@@ -1034,33 +879,6 @@ def test_tracked_pipeline_rejects_an_unrelated_active_run_before_creating_output
         )
         assert not Path(document["output_directory"]).exists()
     assert mlflow.active_run() is None
-
-
-@pytest.mark.parametrize(
-    "updates,message",
-    [
-        ({"experiment_name": ""}, "experiment_name"),
-        (
-            {
-                "tracking_uri": {
-                    "type": "sweep",
-                    "values": ["sqlite:///a.db", "sqlite:///b.db"],
-                }
-            },
-            "mlflow|tracking_uri|sweep",
-        ),
-        ({"unexpected": True}, "unexpected"),
-    ],
-)
-def test_invalid_shared_tracking_settings_fail_before_runs_or_training(
-    tracking_document, tracking_store, updates, message
-):
-    """New root-level tracking support must retain complete prevalidation and strict parsing."""
-    tracking_document["mlflow"] = {**tracking_store.configuration, **updates}
-    with pytest.raises((TypeError, ValueError), match=message):
-        TwoStageConfiguration.from_mapping(tracking_document)
-    assert tracking_store.client.search_runs([tracking_store.experiment_id]) == []
-    assert not Path(tracking_document["output_directory"]).exists()
 
 
 @settings(

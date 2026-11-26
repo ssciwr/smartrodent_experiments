@@ -34,9 +34,6 @@ from smartrodent.experiment_support import ImageTransforms
 from smartrodent.supcon_model import YoloSupConModel
 from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 
-SUPPORTED_EXPORT_KEYS = {"dynamic", "simplify"}
-
-
 # A recipient's script: only the ONNX file, its metadata, and the documented input
 # contract (RGB, float32 in [0, 1], N x 3 x S x S). Training libraries are blocked,
 # so the file must be self-contained.
@@ -213,21 +210,6 @@ def test_both_exports_use_the_ultralytics_default_opset(export_case):
     assert versions.get("", versions.get("ai.onnx")) == best_onnx_opset(onnx)
 
 
-# Arbitrary unknown keys are covered by the property test below; here one native
-# exporter option that is deliberately not exposed, non-bool values for both
-# supported options, and a non-mapping value.
-@pytest.mark.parametrize(
-    "export", [{"opset": 17}, {"dynamic": "yes"}, {"simplify": 1}, "onnx"]
-)
-def test_invalid_export_settings_fail_at_configuration(export_case, export):
-    """Unsupported options or values fail when the configuration is built, before training."""
-    replace(
-        export_case.base, onnx_export={}
-    )  # The field exists and accepts valid settings.
-    with pytest.raises(ValueError, match="onnx_export"):
-        replace(export_case.base, onnx_export=export)
-
-
 def test_export_failure_propagates_instead_of_reporting_a_complete_run(
     export_case, monkeypatch
 ):
@@ -279,25 +261,6 @@ def test_valid_export_settings_survive_serialization(export_case, dynamic, simpl
     config = replace(export_case.base, onnx_export=export)
     assert export_case.rebuild(config.to_dict()).onnx_export == export
     assert export_case.rebuild(export_case.base.to_dict()).onnx_export is None
-
-
-@settings(
-    max_examples=15,
-    deadline=None,
-    suppress_health_check=[HealthCheck.function_scoped_fixture],
-)
-@given(
-    key=st.text(min_size=1, max_size=12).filter(
-        lambda key: key not in SUPPORTED_EXPORT_KEYS
-    )
-)
-def test_unknown_export_options_are_rejected(export_case, key):
-    """Only the documented options are accepted; misspellings never pass silently."""
-    replace(
-        export_case.base, onnx_export={}
-    )  # The field exists and accepts valid settings.
-    with pytest.raises(ValueError, match="onnx_export"):
-        replace(export_case.base, onnx_export={key: True})
 
 
 def _recipient_images(directory, size, count=3):

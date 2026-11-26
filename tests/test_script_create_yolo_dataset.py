@@ -98,10 +98,7 @@ def test_cli_runs_creation_from_positional_config(script_config, monkeypatch):
 @pytest.mark.parametrize(
     "configuration, error",
     [
-        (None, TypeError),
-        ([], TypeError),
-        ({"data": None}, TypeError),
-        ({"data": []}, TypeError),
+        # exactly one supported creator must be configured
         ({"data": {}}, ValueError),
         ({"data": {"UnknownCreator": {}}}, ValueError),
         (
@@ -113,7 +110,6 @@ def test_cli_runs_creation_from_positional_config(script_config, monkeypatch):
             },
             ValueError,
         ),
-        ({"data": {"YoloDetectorDatasetCreatorFromSpeciesnet": None}}, TypeError),
     ],
 )
 def test_main_rejects_invalid_or_ambiguous_creator_configs(

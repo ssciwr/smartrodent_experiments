@@ -9,16 +9,18 @@ import random
 import shutil
 import urllib.parse
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pandas as pd
 import requests
-import yaml
+from pydantic import Field, validate_call
 from tqdm import tqdm
 
 from smartrodent.base import DatasetLoader
+from smartrodent.config_utils import load_section
+from smartrodent.training_validation import Nonblank, NonnegativeInt, PathSetting, Seed
 
 
 class LilaDataset(DatasetLoader):
@@ -54,16 +56,17 @@ class LilaDataset(DatasetLoader):
         "class",
     )
 
+    @validate_call
     def __init__(
         self,
-        output_path: str | Path,
-        datasets: Mapping[str, str],
-        classes: Sequence[str],
-        allowed_licenses: Sequence[str],
-        index_url: str,
-        taxonomy_url: str,
-        max_img_num: int = 2500,
-        seed: int = 42,
+        output_path: PathSetting,
+        datasets: Annotated[dict[Nonblank, Nonblank], Field(min_length=1)],
+        classes: Annotated[list[Nonblank], Field(min_length=1)],
+        allowed_licenses: list[Nonblank],
+        index_url: Nonblank,
+        taxonomy_url: Nonblank,
+        max_img_num: NonnegativeInt = 2500,
+        seed: Seed = 42,
     ) -> None:
         """Store the download settings and create the metadata cache directory.
 
@@ -79,6 +82,9 @@ class LilaDataset(DatasetLoader):
             taxonomy_url: URL of the LILA taxonomy-mapping CSV.
             max_img_num: Maximum images per class and dataset.
             seed: Seed for sampling sequences when capping.
+
+        Raises:
+            ValueError: If a setting is invalid.
         """
         self.output_path = Path(output_path).resolve()
         self.cache = self.output_path / "metadata"
@@ -104,12 +110,9 @@ class LilaDataset(DatasetLoader):
             A configured LILA downloader.
 
         Raises:
-            KeyError: If the config has no ``data.lila`` section.
-            TypeError: If ``data.lila`` lacks a required argument or has an
-                unknown one.
+            ValueError: If the ``data.lila`` section is missing or invalid.
         """
-        config = yaml.safe_load(Path(config_path).read_text())["data"]["lila"]
-        dataset = cls(**config)
+        dataset = cls(**load_section(config_path, "data", "lila"))
         shutil.copy2(config_path, dataset.output_path / Path(config_path).name)
         return dataset
 

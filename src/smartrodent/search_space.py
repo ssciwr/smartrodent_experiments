@@ -5,12 +5,11 @@ dotted path (``a.b[0]``). ``!coupled-sweep`` values follow a categorical's choic
 """
 
 import json
-import math
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar, NotRequired, TypedDict
 
 import optuna
 from optuna.distributions import (
@@ -20,8 +19,44 @@ from optuna.distributions import (
     IntDistribution,
     distribution_to_json,
 )
+from pydantic import AfterValidator, ConfigDict, Field, with_config
 
 from smartrodent import config_utils, utils
+from smartrodent.training_validation import FiniteNumber, Flag, parse_settings
+
+
+def _distinct_choices(choices):
+    """Reject duplicates by Python equality, as Optuna storage does (1 == 1.0 == True)."""
+    if any(choices.count(choice) > 1 for choice in choices):
+        raise ValueError("choices must be unique (1, 1.0 and True count as equal)")
+    return choices
+
+
+type _Integer = Annotated[int, Field(strict=True)]
+
+
+# Strict schemas reject what Optuna would silently coerce (0.5 -> 0, booleans, NaN
+# or infinite bounds); Optuna itself still validates ranges, steps and log scales.
+@with_config(ConfigDict(extra="forbid"))
+class _FloatTag(TypedDict):
+    low: FiniteNumber
+    high: FiniteNumber
+    step: NotRequired[FiniteNumber | None]
+    log: NotRequired[Flag]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class _IntTag(TypedDict):
+    low: _Integer
+    high: _Integer
+    step: NotRequired[_Integer]
+    log: NotRequired[Flag]
+
+
+@with_config(ConfigDict(extra="forbid"))
+class _CategoricalTag(TypedDict):
+    # strict: a tuple or YAML set would be converted, and a set's order varies by run
+    choices: Annotated[list[Any], Field(strict=True), AfterValidator(_distinct_choices)]
 
 
 @dataclass(frozen=True)
@@ -48,9 +83,9 @@ class SearchSpace:
     """
 
     _distribution_types: ClassVar[dict] = {
-        "suggest-float": FloatDistribution,
-        "suggest-int": IntDistribution,
-        "suggest-categorical": CategoricalDistribution,
+        "suggest-float": (_FloatTag, FloatDistribution),
+        "suggest-int": (_IntTag, IntDistribution),
+        "suggest-categorical": (_CategoricalTag, CategoricalDistribution),
     }
     # A tuple, not a set: a user mapping may hold an unhashable "type" value.
     _tag_types: ClassVar[tuple] = ("sweep", "coupled-sweep", *config_utils.STUDY_TAGS)
@@ -266,51 +301,15 @@ class SearchSpace:
         checks are only warnings (a range that is no multiple of step is shortened;
         structured choices break storage later), so warnings are raised as errors.
         """
+        schema, distribution_type = cls._distribution_types[node["type"]]
         settings = {key: value for key, value in node.items() if key != "type"}
         try:
-            cls._reject_coerced_settings(node["type"], settings)
+            parsed = parse_settings(schema, settings)
             with warnings.catch_warnings():
                 warnings.simplefilter("error", UserWarning)
-                return cls._distribution_types[node["type"]](**settings)
+                return distribution_type(**parsed)
         except (TypeError, ValueError, UserWarning) as error:
             raise ValueError(f"Invalid !{node['type']} at '{name}': {error}") from error
-
-    @staticmethod
-    def _reject_coerced_settings(tag: str, settings: Mapping) -> None:
-        """Reject what Optuna silently accepts or coerces instead of failing.
-
-        It turns ``0.5`` into ``0`` for integers, accepts booleans, NaN and infinity
-        as bounds, and duplicate choices, which make coupled values ambiguous.
-        """
-        if tag == "suggest-categorical":
-            choices = settings.get("choices")
-            if not isinstance(choices, list):
-                raise ValueError("choices must be a list")
-            # Python equality is used, as by Optuna's storage: 1, 1.0 and True collide.
-            if any(choices.count(choice) > 1 for choice in choices):
-                raise ValueError(
-                    "choices must be unique (1, 1.0 and True count as equal)"
-                )
-        elif tag == "suggest-int":
-            SearchSpace._reject_bounds(settings, int, "integer")
-        elif tag == "suggest-float":
-            SearchSpace._reject_bounds(settings, (int, float), "number")
-        else:
-            raise TypeError(f"Unsupported search tag !{tag}")
-
-    @staticmethod
-    def _reject_bounds(settings: Mapping, number: type | tuple, label: str) -> None:
-        """Require finite, non-boolean numeric bounds/step and a boolean log flag."""
-        for key in ("low", "high", "step"):
-            value = settings.get(key)
-            if value is not None and (
-                isinstance(value, bool)
-                or not isinstance(value, number)
-                or not math.isfinite(value)
-            ):
-                raise ValueError(f"{key} must be a finite {label}")
-        if not isinstance(settings.get("log", False), bool):
-            raise ValueError("log must be true or false")
 
     @classmethod
     def _reject_protected(

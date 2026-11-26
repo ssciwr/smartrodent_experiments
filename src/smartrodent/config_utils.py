@@ -181,6 +181,32 @@ def load_yaml(path: str | Path) -> Any:
     return yaml.load(Path(path).read_text(encoding="utf-8"), Loader=get_loader())
 
 
+def load_section(config_path: str | Path, *keys: str) -> dict[str, Any]:
+    """Return the settings mapping found at ``keys`` in a plain YAML file.
+
+    Only locating the section happens here; each component validates its own
+    settings declaratively (pydantic) when it is constructed from them.
+
+    Args:
+        config_path: YAML configuration file.
+        *keys: Path to the section, e.g. ``("data", "lila")``; none for the root.
+
+    Returns:
+        A shallow copy of the section mapping.
+
+    Raises:
+        FileNotFoundError: If ``config_path`` does not exist.
+        ValueError: If there is no mapping at ``keys``.
+    """
+    section = yaml.safe_load(Path(config_path).expanduser().read_text(encoding="utf-8"))
+    for key in keys:
+        section = section.get(key) if isinstance(section, dict) else None
+    if not isinstance(section, dict):
+        location = ".".join(keys) or "the document root"
+        raise ValueError(f"{config_path}: expected a mapping at {location}")
+    return dict(section)
+
+
 def convert_to_pyobject_tags(config: dict[str, Any]) -> dict[str, Any]:
     """Convert specific values in the configuration dictionary to `pyobject` YAML tags.
     This is useful for saving the best configuration back to a YAML file,

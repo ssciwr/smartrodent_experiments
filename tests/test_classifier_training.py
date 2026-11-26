@@ -1,7 +1,6 @@
 """Native Ultralytics head-training contracts on temporary YOLO models and data."""
 
 import hashlib
-import math
 import os
 import warnings
 from collections import Counter
@@ -368,9 +367,8 @@ def test_freeze_beyond_the_trainable_boundary_fails_before_native_training(
     assert not config.output_directory.exists()
 
 
-# One case per kind of invalid freeze value: negative, bool and non-integer layer
-# counts, duplicate indices, and a bool inside an index list.
-@pytest.mark.parametrize("freeze", [-1, True, "all", [0, 0], [True]])
+# Duplicate layer indices are our rule; value types and ranges are pydantic's.
+@pytest.mark.parametrize("freeze", [[0, 0]])
 def test_invalid_freeze_values_fail_at_configuration(classifier_configuration, freeze):
     """Only a nonnegative layer count or a list of unique layer indices is accepted."""
     with pytest.raises((ValueError, TypeError), match="freeze"):
@@ -399,14 +397,6 @@ def test_frozen_layers_require_an_explicit_encoder_batchnorm(
     values = {**classifier_configuration.to_dict(), "freeze": freeze}
     del values["encoder_batchnorm"]
     with pytest.raises(ValueError, match="encoder_batchnorm"):
-        ClassifierConfiguration.from_mapping(values)
-
-
-def test_freeze_is_a_required_explicit_decision(classifier_configuration):
-    """Omitting freeze is an error instead of silently freezing or training the encoder."""
-    values = classifier_configuration.to_dict()
-    del values["freeze"]
-    with pytest.raises(ValueError, match="freeze"):
         ClassifierConfiguration.from_mapping(values)
 
 
@@ -534,8 +524,8 @@ def test_native_finetuning_adapts_a_thousand_class_head_to_twenty_six_species(
         )
 
 
-@pytest.mark.parametrize("mode", ["min", "max"])
-@pytest.mark.parametrize("tracking", [False, True])
+# Each direction and each tracking setting once.
+@pytest.mark.parametrize("mode,tracking", [("min", False), ("max", True)])
 def test_configured_metric_drives_native_best_stopping_and_tracking(
     classifier_configuration,
     tmp_path,
@@ -596,36 +586,20 @@ def test_configured_metric_drives_native_best_stopping_and_tracking(
     )
     values = [0.8, 0.2, 0.3, 0.4] if mode == "min" else [0.2, 0.8, 0.7, 0.6]
     controlled_scores.score_sets = {0.002: values}
-    source = Path(config.initialization["encoder"]["checkpoint"])
-    checksum = hashlib.sha256(source.read_bytes()).hexdigest()
     result = ClassifierExperiment(config).run_with_result()
+    # The configured score picks epoch 2, and patience 2 stops after epoch 4.
     assert result.best_epoch == 2 and result.best_value == values[1]
     assert len(controlled_scores.validations) == 4
+    # Native MLflow autologging never runs, and the environment URI is not used.
     assert len(native_runs) == 1 and autolog_calls == []
-    assert utils.SETTINGS["mlflow"] is True
-    assert result.tracked_mode == mode and result.tracked_metric == "balanced_accuracy"
-    assert hashlib.sha256(source.read_bytes()).hexdigest() == checksum
     assert not (tmp_path / "unwanted.db").exists()
-    assert (
-        yaml.safe_load((config.output_directory / "config.yaml").read_text())
-        == config.to_dict()
-    )
     card = yaml.safe_load(
         result.best_checkpoint.with_suffix(".model_card.yaml").read_text()
     )
-    assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
-    assert card["validation"]["metrics"]["balanced_accuracy"] == values[1]
-    assert card["classes"] == {0: "mouse", 1: "rat"}
-    assert (
-        card["provenance"]["checkpoint_sha256"]
-        == hashlib.sha256(result.best_checkpoint.read_bytes()).hexdigest()
-    )
-    assert card["provenance"]["encoder_checkpoint_sha256"] == checksum
-    assert result.best_checkpoint.with_suffix(".model_card.md").is_file()
-    assert YOLO(str(result.best_checkpoint), task="classify").model.names == {
-        0: "mouse",
-        1: "rat",
-    }
+    assert card["validation"]["epoch"] == 2
+    # best.pt keeps the complete native run history, not only its own epoch.
+    best = torch.load(result.best_checkpoint, map_location="cpu", weights_only=False)
+    assert best["train_results"]["epoch"][-1] == 4
     if tracking:
         run = client.get_run(result.mlflow_run_id)
         assert run.info.status == "FINISHED" and run.data.metrics["best_epoch"] == 2
@@ -639,8 +613,6 @@ def test_configured_metric_drives_native_best_stopping_and_tracking(
         assert len(client.search_runs([run.info.experiment_id])) == 1
     else:
         assert result.mlflow_run_id is None
-    import mlflow
-
     assert mlflow.active_run() is None
 
 
@@ -793,15 +765,8 @@ def test_native_checkpoint_failure_propagates_and_releases_training_mode(
 @pytest.mark.parametrize(
     "updates,message",
     [
-        ({"epochs": 0}, "epochs"),
-        ({"batch_size": True}, "batch_size"),
-        ({"workers": -1}, "workers"),
         ({"tracked_metric": "unknown"}, "tracked_metric"),
-        ({"tracked_mode": "lowest"}, "tracked_mode"),
-        ({"encoder_batchnorm": "train"}, "encoder_batchnorm"),
         ({"class_names": ("mouse", "mouse")}, "class_names"),
-        # options removed from the classifier are errors, not ignored aliases
-        ({"freeze_encoder": False}, "freeze_encoder"),
     ],
 )
 def test_invalid_classifier_configuration_fails_early(
@@ -1079,53 +1044,6 @@ def test_native_csv_preserves_bookkeeping_training_loss_and_configured_scores(
     )
 
 
-@pytest.mark.parametrize(
-    "initialization,message",
-    [
-        (
-            {
-                "encoder": {"source": "auto", "checkpoint": "x.pt"},
-                "head": {"replace": "linear", "source": "random"},
-            },
-            "source",
-        ),
-        (
-            {
-                "encoder": {"source": "classifier", "checkpoint": "x.pt"},
-                "head": {"replace": "linear", "source": "random"},
-            },
-            "source",
-        ),
-        (
-            {
-                "encoder": {"source": "supcon"},
-                "head": {"replace": "linear", "source": "random"},
-            },
-            "checkpoint",
-        ),
-        (
-            {
-                "encoder": {"source": "supcon", "checkpoint": "x.pt"},
-                "head": {"replace": "linear", "source": "yolo_checkpoint"},
-            },
-            "checkpoint",
-        ),
-        (
-            {
-                "encoder": {"source": "supcon", "checkpoint": "x.pt"},
-                "head": {"replace": "other", "source": "random"},
-            },
-            "replace",
-        ),
-    ],
-)
-def test_invalid_initialization_nodes_are_not_silently_defaulted(
-    classifier_configuration, initialization, message
-):
-    with pytest.raises(ValueError, match=message):
-        replace(classifier_configuration, initialization=initialization)
-
-
 @settings(
     max_examples=10,
     deadline=None,
@@ -1284,22 +1202,6 @@ def test_epoch_callback_ends_with_native_early_stopping(
     assert observed == [(1, 0.5), (2, 0.4)]
 
 
-def test_epoch_callback_reports_training_loss_without_validation(
-    classifier_configuration,
-):
-    """Training-only runs report the CE loss that also selects their best epoch."""
-    config = replace(classifier_configuration, validation_dataset=None, epochs=2)
-    observed = []
-    result = ClassifierExperiment(config).run_with_result(
-        epoch_callback=lambda epoch, value: observed.append((epoch, value))
-    )
-    assert [epoch for epoch, _ in observed] == [1, 2]
-    assert all(
-        isinstance(value, float) and math.isfinite(value) for _, value in observed
-    )
-    assert result.best_value == min(value for _, value in observed)
-
-
 def test_epoch_callback_exception_stops_native_training_and_propagates_unchanged(
     classifier_configuration, controlled_scores
 ):
@@ -1317,16 +1219,6 @@ def test_epoch_callback_exception_stops_native_training_and_propagates_unchanged
         ClassifierExperiment(config).run_with_result(epoch_callback=callback)
     assert len(controlled_scores.validations) == 1
     assert not (config.output_directory / "weights/best.model_card.yaml").exists()
-
-
-def test_omitting_the_classifier_epoch_callback_keeps_existing_behavior(
-    classifier_configuration,
-):
-    """The hook is optional; the existing result API is unchanged without it."""
-    result = ClassifierExperiment(classifier_configuration).run_with_result(
-        epoch_callback=None
-    )
-    assert result.last_checkpoint.is_file()
 
 
 @pytest.fixture

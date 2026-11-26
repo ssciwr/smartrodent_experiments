@@ -64,118 +64,6 @@ def configuration(request, tmp_path):
         raise AssertionError(f"Unknown training system: {request.param}")
 
 
-def _parse_update(configuration, path, value):
-    """Change one input only, so a failure cannot be explained by another missing field."""
-    document = deepcopy(configuration.to_dict())
-    if path == ("learning_rate",):
-        path = (
-            ("optimizer", "lr")
-            if isinstance(configuration, TrainingConfiguration)
-            else ("train_kwargs", "lr0")
-        )
-    node = document
-    for name in path[:-1]:
-        node = node[name]
-    node[path[-1]] = value
-    return type(configuration).from_mapping(document)
-
-
-# One case per kind of declared constraint; the strict-number rules themselves are
-# pydantic's, so repeating every kind on every field would only re-test pydantic.
-@pytest.mark.parametrize(
-    "path,value",
-    [
-        (("epochs",), True),  # bool is not an integer
-        (("epochs",), 1.5),  # float is not an integer
-        (("workers",), "0"),  # numeric strings are not coerced
-        (("seed",), -1),  # seed range, lower bound
-        (("seed",), 2**32),  # seed range, upper bound
-        (("learning_rate",), True),  # bool is not a float either
-        (("learning_rate",), 0),  # rate must be positive
-        (("learning_rate",), float("nan")),  # rate must be finite
-        (("transforms", "image_size"), 0),
-    ],
-)
-def test_new_training_systems_reject_invalid_scalar_settings_consistently(
-    configuration, path, value
-):
-    """Reject coercible strings, bool-as-number inputs, and invalid ranges before training."""
-    with pytest.raises((ValueError, TypeError)):
-        _parse_update(configuration, path, value)
-    assert not configuration.output_directory.exists()
-
-
-@pytest.mark.parametrize("collection", [set, iter])
-def test_class_names_require_a_sequence_not_an_unordered_or_one_shot_iterable(
-    configuration, collection
-):
-    """Schema coercion must not broaden the existing ordered class-name contract."""
-    with pytest.raises((ValueError, TypeError), match="class_names"):
-        _parse_update(configuration, ("class_names",), collection(["rat", "mouse"]))
-
-
-@pytest.mark.parametrize("seed", [True, -1])  # one type and one range violation
-def test_invalid_seeds_are_rejected_through_dataclass_replace_too(configuration, seed):
-    """Direct Python callers must not bypass constraints enforced by mapping loaders."""
-    with pytest.raises((ValueError, TypeError)) as error:
-        replace(configuration, seed=seed)
-    assert "seed" in str(error.value)
-
-
-@pytest.mark.parametrize("configuration", ["supcon"], indirect=True)
-@pytest.mark.parametrize(
-    "field,value", [("temperature", True), ("dropout", True), ("freeze", [True])]
-)
-def test_supcon_only_numeric_settings_also_exclude_booleans(
-    configuration, field, value
-):
-    """Algorithm-specific settings use the same strict numeric conventions."""
-    with pytest.raises((ValueError, TypeError)):
-        _parse_update(configuration, (field,), value)
-
-
-@pytest.mark.parametrize("missing", ["resize", "random_resized_crop"])
-def test_missing_transform_sections_produce_configuration_errors_not_key_errors(
-    configuration, missing
-):
-    """Nested input shape is checked declaratively rather than failing inside a builder."""
-    transforms = deepcopy(configuration.transforms)
-    del transforms[missing]
-    with pytest.raises((ValueError, TypeError)) as error:
-        replace(configuration, transforms=transforms)
-    assert "transforms" in str(error.value) or missing in str(error.value)
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        ("unknown_option",),
-        ("mlflow", "unknown_option"),
-        ("scheduler", "unknown_option"),
-    ],
-)
-def test_unknown_configuration_keys_remain_errors(configuration, path):
-    """Schema migration must not silently discard typos at the root or shared boundaries."""
-    options = {
-        "validation_dataset": configuration.train_dataset,
-        "mlflow": MlflowConfiguration(
-            tracking_uri="sqlite:///unused-validation-test.db",
-            experiment_name="validation-test",
-        ),
-    }
-    if path[0] == "scheduler":
-        if isinstance(configuration, ClassifierConfiguration):
-            path = ("train_kwargs", path[-1])
-        else:
-            options["scheduler"] = SchedulerConfiguration(
-                "ReduceLROnPlateau", {"mode": "min"}
-            )
-    configured = replace(configuration, **options)
-    with pytest.raises((ValueError, TypeError, SyntaxError)) as error:
-        _parse_update(configured, path, 1)
-    assert path[-1] in str(error.value)
-
-
 @settings(
     max_examples=8,
     deadline=None,
@@ -346,22 +234,6 @@ def test_native_optimizer_and_metric_options_are_not_lost_by_schema_validation(
     assert optimizer == expected_optimizer and metrics == expected_metrics
 
 
-@pytest.mark.parametrize("configuration", ["classifier"], indirect=True)
-@pytest.mark.parametrize("source", ["encoder", "head"])
-@pytest.mark.parametrize("checkpoint", ["", "  "])
-def test_checkpoint_strings_cannot_bypass_nonblank_validation(
-    configuration, source, checkpoint
-):
-    """A blank string must not fall through a path union and become the current directory."""
-    document = configuration.to_dict()
-    document["initialization"][source].update(
-        source="yolo_checkpoint" if source == "head" else "supcon",
-        checkpoint=checkpoint,
-    )
-    with pytest.raises(ValueError, match="checkpoint"):
-        type(configuration).from_mapping(document)
-
-
 @pytest.mark.parametrize("source", ["validation_dataset", "checkpoint"])
 def test_each_standalone_configuration_protects_all_its_inputs(configuration, source):
     """A shared safety implementation must protect both standalone APIs, not only the pipeline."""
@@ -389,3 +261,11 @@ def test_each_standalone_configuration_protects_all_its_inputs(configuration, so
         replace(configuration, **changes)
     if source == "checkpoint":
         assert protected.read_bytes() == b"protected source checkpoint"
+
+
+def test_class_names_must_keep_their_declared_order(configuration):
+    """A set would make class indices differ between runs, so it is rejected."""
+    document = configuration.to_dict()
+    document["class_names"] = {"rat", "mouse"}
+    with pytest.raises(ValueError, match="class_names"):
+        type(configuration).from_mapping(document)

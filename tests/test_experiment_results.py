@@ -68,27 +68,6 @@ def test_empty_sweep_cannot_produce_a_winner():
         select_best_experiment([])
 
 
-@pytest.mark.parametrize("value", [None, float("nan"), float("inf"), -float("inf")])
-def test_invalid_tracked_values_fail_instead_of_skipping_candidates(value):
-    """An invalid candidate cannot silently disappear from an otherwise valid sweep."""
-    with pytest.raises(ValueError, match="value|finite"):
-        select_best_experiment([_result(0, 0.25), _result(1, value)])
-
-
-@pytest.mark.parametrize("mode", [None, "", "lowest"])
-def test_result_requires_a_valid_tracking_direction(mode):
-    """No fallback direction can silently reverse the intended winner."""
-    with pytest.raises(ValueError, match="mode"):
-        select_best_experiment([_result(0, 0.25, tracked_mode=mode)])
-
-
-@pytest.mark.parametrize("metric", [None, ""])
-def test_result_requires_a_tracked_metric(metric):
-    """A scalar without a named tracking metric cannot rank experiments."""
-    with pytest.raises(ValueError, match="metric"):
-        select_best_experiment([_result(0, 0.25, tracked_metric=metric)])
-
-
 def test_training_only_result_is_not_eligible_for_automatic_ranking():
     """No-validation training is valid standalone but cannot win a pipeline sweep."""
     result = _result(0, 0.1, validation_dataset=None)

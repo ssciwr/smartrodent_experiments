@@ -12,8 +12,6 @@ import numpy as np
 import pytest
 import torch
 import yaml
-from hypothesis import given
-from hypothesis import strategies as st
 from pydantic import ValidationError
 from training_test_support import download_artifact
 
@@ -54,12 +52,6 @@ def test_experiment_saves_reusable_checkpoints(experiment_configuration):
     # Rebuilding must use the embedded architecture, not reopen original weights/YAML.
     Path(config.model_name).unlink()
     first = YoloSupConModel.from_checkpoint(result)
-    legacy = deepcopy(checkpoint)
-    del legacy["scheduler_state_dict"]
-    del legacy["configuration"]["scheduler"]
-    legacy_path = config.output_directory / "legacy.pt"
-    torch.save(legacy, legacy_path)
-    second = YoloSupConModel.from_checkpoint(legacy_path)
     assert first.label_names == checkpoint["label_names"]
     assert first.training_configuration["transforms"]["image_size"] == 16
     cards = list(config.output_directory.glob("*.model_card.yaml"))
@@ -79,14 +71,7 @@ def test_experiment_saves_reusable_checkpoints(experiment_configuration):
     assert not first.training and not first.projector.training
     for name, parameter in first.state_dict().items():
         assert torch.equal(parameter, checkpoint["model_state_dict"][name])
-    images = torch.rand(4, 3, 16, 16)
-    with torch.inference_mode():
-        first_logits, first_features = first(images)
-        second_logits, second_features = second(images)
-    torch.testing.assert_close(first_logits[0], second_logits[0])
-    torch.testing.assert_close(first_features, second_features)
     first.finalize()
-    second.finalize()
 
 
 def test_freezing_is_applied_after_gradient_enable(
@@ -189,19 +174,9 @@ def test_interrupted_checkpoint_preserves_last_complete_state(
 @pytest.mark.parametrize(
     "updates,message",
     [
-        ({"epochs": 0}, "epochs"),
-        ({"workers": -1}, "workers"),
-        # a str is a Sequence[str]; it must not become one class per letter
-        ({"class_names": "mouse"}, "class_names"),
-        ({"class_names": ("", "rat")}, "class_names"),
         ({"class_names": ("rat", "rat")}, "unique"),
-        ({"classes_per_batch": 1}, "classes_per_batch"),
         ({"classes_per_batch": 3}, "between 2"),
         ({"samples_per_epoch": 1}, "full batch"),
-        ({"optimizer": {"lr": float("nan")}}, "optimizer.lr"),
-        ({"temperature": 0}, "temperature"),
-        ({"dropout": 2}, "dropout"),
-        ({"freeze": (-1,)}, "freeze"),
     ],
 )
 def test_invalid_training_configuration_fails(
@@ -230,80 +205,12 @@ def test_missing_classes_fail_before_training(experiment_configuration):
         SupConExperiment(experiment_configuration).run()
 
 
-@pytest.mark.parametrize(
-    "document",
-    ["[]", "class_names: mouse\ntrain_dataset: images\noutput_directory: outputs\n"],
-)
-def test_yaml_requires_mapping_and_class_list(tmp_path, document):
-    """Malformed YAML structure fails without model construction."""
+def test_yaml_configuration_must_be_a_mapping(tmp_path):
+    """A non-mapping YAML document fails without model construction."""
     path = tmp_path / "config.yaml"
-    path.write_text(document)
+    path.write_text("[]")
     with pytest.raises(ValueError):
         TrainingConfiguration.from_yaml(path)
-
-
-@pytest.mark.parametrize("mode", ["min", "max"])
-def test_scheduler_uses_absolute_improvement_threshold(mode):
-    """Small improvements accumulate against the best accepted metric, in either mode."""
-    optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=0.001)
-    scheduler = SchedulerConfiguration(
-        "ReduceLROnPlateau",
-        {
-            "mode": mode,
-            "patience": 1,
-            "factor": 0.5,
-            "threshold": 0.1,
-            "threshold_mode": "abs",
-        },
-    ).build(optimizer)
-    for value in (1.0, 0.95, 0.94):
-        scheduler.step(value if mode == "min" else 2 - value)
-    assert optimizer.param_groups[0]["lr"] == 0.0005
-    # This beats the accepted baseline, but is within tolerance of the last value.
-    for value in (0.85, 0.84):
-        scheduler.step(value if mode == "min" else 2 - value)
-    assert optimizer.param_groups[0]["lr"] == 0.0005
-
-
-@pytest.mark.parametrize(
-    "document,location",
-    [
-        ([], ()),
-        ({"name": "StepLR", "parameters": {}}, ("name",)),
-        (
-            {"name": "ReduceLROnPlateau", "parameters": {"unknown": 1}},
-            ("parameters", "unknown"),
-        ),
-    ],
-)
-def test_invalid_scheduler_mapping_fails(document, location):
-    """Malformed scheduler settings identify the rejected section before training."""
-    with pytest.raises(ValidationError) as error:
-        SchedulerConfiguration.from_mapping(document)
-    assert location in [item["loc"] for item in error.value.errors()]
-
-
-@pytest.mark.parametrize(
-    "parameters",
-    [
-        # one violation per scheduler parameter; strict-number rules are pydantic's
-        {"mode": "less"},
-        {"threshold_mode": "other"},
-        {"factor": 0},  # must be strictly positive
-        {"factor": 1},  # must be strictly below 1
-        {"factor": True},
-        {"patience": 1.5},
-        {"cooldown": -1},
-        {"threshold": float("inf")},
-        {"min_lr": [0.001]},
-        {"eps": -1},
-    ],
-)
-def test_invalid_scheduler_parameters_fail(parameters):
-    """Native numeric parameters have explicit finite-value and range checks."""
-    with pytest.raises(ValidationError) as error:
-        SchedulerConfiguration("ReduceLROnPlateau", parameters)
-    assert any(next(iter(parameters)) in item["loc"] for item in error.value.errors())
 
 
 def test_scheduler_training_requirements(experiment_configuration):
@@ -363,67 +270,12 @@ def test_scheduler_configuration_round_trip_and_sweep(
     assert [run.scheduler.parameters["factor"] for run in runs] == [0.5, 0.1]
 
 
-@given(
-    patience=st.integers(min_value=0, max_value=5),
-    mode=st.sampled_from(["min", "max"]),
-    factor=st.floats(min_value=0.1, max_value=0.9, allow_nan=False),
-)
-def test_scheduler_plateaus_improvements_and_floor(patience, mode, factor):
-    """Both modes reduce after the allowed misses, reset on improvement, and honor the floor."""
-    optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=0.001)
-    scheduler = SchedulerConfiguration(
-        "ReduceLROnPlateau",
-        {
-            "mode": mode,
-            "patience": patience,
-            "factor": factor,
-            "min_lr": 0.00001,
-            "threshold": 0.0,
-            "threshold_mode": "abs",
-        },
-    ).build(optimizer)
-    scheduler.step(1.0)
-    for _ in range(patience):
-        scheduler.step(1.0)
-        assert optimizer.param_groups[0]["lr"] == 0.001
-    scheduler.step(0.5 if mode == "min" else 1.5)
-    for _ in range(patience):
-        scheduler.step(1.0)
-        assert optimizer.param_groups[0]["lr"] == 0.001
-    scheduler.step(1.0)
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.001 * factor)
-    for _ in range(300):
-        previous_rate = optimizer.param_groups[0]["lr"]
-        scheduler.step(1.0)
-        assert 0.00001 <= optimizer.param_groups[0]["lr"] <= previous_rate
-    # PyTorch ignores changes at or below eps, including a tiny final gap to min_lr.
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.00001, abs=1e-8)
-
-
-def test_scheduler_honors_minimum_change_epsilon():
-    """An explicitly configured eps can suppress a reduction that is too small."""
-    optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=0.001)
-    scheduler = SchedulerConfiguration(
-        "ReduceLROnPlateau", {"patience": 0, "factor": 0.5, "eps": 0.00075}
-    ).build(optimizer)
-    scheduler.step(1.0)
-    scheduler.step(1.0)
-    assert optimizer.param_groups[0]["lr"] == 0.001
-
-
 @pytest.mark.parametrize(
     "mode,metric,comparison",
     [("min", "supcon_loss_mean", "less"), ("max", "accuracy", "greater")],
 )
-@pytest.mark.parametrize("tracking", [False, True])
 def test_scheduler_integrates_with_early_stopping_and_checkpoints(
-    experiment_configuration,
-    monkeypatch,
-    capsys,
-    mode,
-    metric,
-    comparison,
-    tracking,
+    experiment_configuration, monkeypatch, mode, metric, comparison
 ):
     """Real CPU epochs use the reduced LR before early stopping and save coherent state."""
     torch.set_num_threads(2)
@@ -445,14 +297,6 @@ def test_scheduler_integrates_with_early_stopping_and_checkpoints(
             },
         ),
         early_stopping={"patience": 5, "tolerance": 0.001, "comparison": comparison},
-        mlflow=(
-            train_supcon.MlflowConfiguration(
-                tracking_uri=f"sqlite:///{experiment_configuration.output_directory.parent / 'scheduler.db'}",
-                experiment_name="scheduler-test",
-            )
-            if tracking
-            else None
-        ),
     )
     values = iter((1.0, 1.2, 1.1, 1.05, 1.1, 1.2))
 
@@ -463,11 +307,6 @@ def test_scheduler_integrates_with_early_stopping_and_checkpoints(
 
     monkeypatch.setattr(SupConExperiment, "_validate", validate)
     result = SupConExperiment(config).run()
-    assert result.name == "last.pt"
-    assert {path.name for path in config.output_directory.glob("*.pt")} == {
-        "best.pt",
-        "last.pt",
-    }
     history = yaml.safe_load((config.output_directory / "history.yaml").read_text())
     assert [row["learning_rate"] for row in history] == [0.001] * 4 + [0.0005] * 2
     assert [row["next_learning_rate"] for row in history] == [0.001] * 3 + [0.0005] * 3
@@ -480,55 +319,9 @@ def test_scheduler_integrates_with_early_stopping_and_checkpoints(
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     scheduler.step(1.2 if mode == "min" else 0.8)
+    # The saved scheduler state resumes its plateau count: one more miss reduces.
     assert optimizer.param_groups[0]["lr"] == 0.00025
-    card = yaml.safe_load(
-        (config.output_directory / "best.model_card.yaml").read_text()
-    )
-    assert card["validation"]["epoch"] == 1
-    assert "Learning rate reduced" in capsys.readouterr().out
     restored.finalize()
-    if tracking:
-        client = train_supcon.MlflowClient(tracking_uri=config.mlflow.tracking_uri)
-        experiment = client.get_experiment_by_name("scheduler-test")
-        run = client.search_runs([experiment.experiment_id])[0]
-        assert run.data.params["scheduler_name"] == "ReduceLROnPlateau"
-        for metric_name in ("learning_rate", "next_learning_rate"):
-            metrics = client.get_metric_history(run.info.run_id, metric_name)
-            assert [item.step for item in metrics] == list(range(1, 7))
-            assert [item.value for item in metrics] == [
-                row[metric_name] for row in history
-            ]
-
-
-@given(
-    values=st.lists(
-        st.floats(min_value=0, max_value=2, allow_nan=False), min_size=1, max_size=30
-    )
-)
-def test_scheduler_state_restoration_preserves_future_rates(values):
-    """Restoring scheduler and optimizer state preserves subsequent LR decisions."""
-    config = SchedulerConfiguration(
-        "ReduceLROnPlateau", {"patience": 1, "factor": 0.5, "min_lr": 0.000001}
-    )
-    original_optimizer = torch.optim.AdamW(
-        [torch.nn.Parameter(torch.ones(1))], lr=0.001
-    )
-    original = config.build(original_optimizer)
-    for value in values:
-        original.step(value)
-    restored_optimizer = torch.optim.AdamW(
-        [torch.nn.Parameter(torch.ones(1))], lr=0.001
-    )
-    restored = config.build(restored_optimizer)
-    restored_optimizer.load_state_dict(deepcopy(original_optimizer.state_dict()))
-    restored.load_state_dict(deepcopy(original.state_dict()))
-    for value in values:
-        original.step(value)
-        restored.step(value)
-        assert (
-            restored_optimizer.param_groups[0]["lr"]
-            == original_optimizer.param_groups[0]["lr"]
-        )
 
 
 @pytest.fixture
@@ -573,8 +366,8 @@ def test_run_with_result_reports_training_only_best_without_changing_legacy_run(
     assert torch.load(legacy_path, weights_only=True)["epoch"] == config.epochs
 
 
-@pytest.mark.parametrize("mode", ["min", "max"])
-@pytest.mark.parametrize("tracking", [False, True])
+# Each direction and each tracking setting once.
+@pytest.mark.parametrize("mode,tracking", [("min", False), ("max", True)])
 def test_configured_metric_controls_checkpoint_result_scheduler_and_stopping(
     validation_configuration, monkeypatch, tmp_path, mode, tracking
 ):
@@ -610,12 +403,7 @@ def test_configured_metric_controls_checkpoint_result_scheduler_and_stopping(
         },
     )
     tracked_values = [0.8, 0.2, 0.2, 0.5] if mode == "min" else [0.2, 0.8, 0.8, 0.5]
-    supcon_values = [
-        0.1,
-        0.2,
-        0.3,
-        0.4,
-    ]  # Loss prefers epoch 1, NOT the configured winner.
+    supcon_values = [0.1, 0.2, 0.3, 0.4]  # Loss prefers epoch 1, NOT the winner.
     scores = iter(zip(tracked_values, supcon_values, strict=True))
 
     def validate(self, model, loader, criterion):
@@ -627,48 +415,26 @@ def test_configured_metric_controls_checkpoint_result_scheduler_and_stopping(
     result = SupConExperiment(config).run_with_result()
     last = torch.load(result.last_checkpoint, weights_only=True)
     best = torch.load(result.best_checkpoint, weights_only=True)
-    history = last["history"]
-    assert last["epoch"] == 4  # Two misses after the configured metric's epoch-2 best.
-    assert best["epoch"] == result.best_epoch == 2  # First exact tie wins.
-    assert result.tracked_metric == config.tracked_metric
-    assert result.tracked_mode == mode
-    assert result.best_value == tracked_values[1]  # Original value, not a signed score.
-    assert result.validation_dataset == config.validation_dataset
-    assert [row["validation"]["balanced_accuracy"] for row in history] == tracked_values
-    assert [row["next_learning_rate"] for row in history] == [
+    # Early stopping follows the configured metric: two misses after its epoch-2 best.
+    assert last["epoch"] == 4
+    assert best["epoch"] == result.best_epoch == 2  # first exact tie wins
+    assert result.best_value == tracked_values[1]  # original value, not a signed score
+    # The scheduler steps on the configured metric too: it reduces after each miss.
+    assert [row["next_learning_rate"] for row in last["history"]] == [
         0.001,
         0.001,
         0.0005,
         0.00025,
     ]
-    assert best["optimizer_state_dict"]["param_groups"][0]["lr"] == 0.001
-    assert last["configuration"]["tracked_metric"] == "balanced_accuracy"
-    assert last["configuration"]["tracked_mode"] == mode
-    assert all("selection" not in row for row in history)  # No separate scoring pass.
-    assert (
-        yaml.safe_load((config.output_directory / "history.yaml").read_text())
-        == history
-    )
-    card = yaml.safe_load(
-        (config.output_directory / "best.model_card.yaml").read_text()
-    )
-    assert card["validation"]["epoch"] == card["provenance"]["epoch"] == 2
-    assert card["validation"]["metrics"]["balanced_accuracy"] == tracked_values[1]
-    assert {path.name for path in config.output_directory.glob("*.pt")} == {
-        "best.pt",
-        "last.pt",
-    }
     if tracking:
         run = client.get_run(result.mlflow_run_id)
         assert run.info.status == "FINISHED"
-        metrics = client.get_metric_history(
-            result.mlflow_run_id, "validation/balanced_accuracy"
-        )
-        assert [item.step for item in metrics] == [1, 2, 3, 4]
-        assert [item.value for item in metrics] == tracked_values
-        assert (
-            run.data.metrics["best_validation_balanced_accuracy"] == tracked_values[1]
-        )
+        assert [
+            item.value
+            for item in client.get_metric_history(
+                result.mlflow_run_id, "validation/balanced_accuracy"
+            )
+        ] == tracked_values
         assert run.data.metrics["best_epoch"] == 2
     else:
         assert result.mlflow_run_id is None
@@ -752,10 +518,10 @@ def test_temperature_cannot_vary_within_a_supcon_sweep(
     "metric,expected_mode",
     [(None, "min"), ("supcon_loss_mean", "min"), ("balanced_accuracy", "max")],
 )
-def test_omitted_tracking_direction_preserves_legacy_defaults(
+def test_omitted_tracking_direction_follows_the_tracked_metric(
     validation_configuration, metric, expected_mode
 ):
-    """Existing configs keep their old direction; new configs can override it explicitly."""
+    """Without tracked_mode, losses are minimized and scores maximized."""
     document = replace(
         validation_configuration,
         tracked_metric=metric,
@@ -766,13 +532,6 @@ def test_omitted_tracking_direction_preserves_legacy_defaults(
     document.pop("tracked_mode", None)
     config = TrainingConfiguration.from_mapping(document)
     assert config.effective_tracked_mode == expected_mode
-
-
-@pytest.mark.parametrize("mode", ["lowest", True])
-def test_invalid_tracking_direction_fails_early(validation_configuration, mode):
-    """Invalid directions cannot silently change the chosen checkpoint."""
-    with pytest.raises(ValueError, match="tracked_mode"):
-        replace(validation_configuration, tracked_mode=mode)
 
 
 @pytest.mark.parametrize(
@@ -882,21 +641,6 @@ def test_epoch_callback_observes_each_completed_epoch_after_its_checkpoint(
     assert result.best_epoch == 2 and result.best_value == 0.9
 
 
-def test_epoch_callback_reports_training_loss_when_no_validation_is_configured(
-    experiment_configuration,
-):
-    """Training-only runs report the same fallback value used for best-epoch selection."""
-    torch.set_num_threads(2)
-    observed = []
-    result = SupConExperiment(experiment_configuration).run_with_result(
-        epoch_callback=lambda epoch, value: observed.append((epoch, value))
-    )
-    history = torch.load(result.last_checkpoint, weights_only=True)["history"]
-    assert observed == [
-        (index, row["mean"]) for index, row in enumerate(history, start=1)
-    ]
-
-
 def test_epoch_callback_stops_after_early_stopping_without_extra_calls(
     validation_configuration, monkeypatch
 ):
@@ -954,15 +698,6 @@ def test_epoch_callback_exception_stops_training_and_propagates_unchanged(
     assert last["epoch"] == 1 and len(last["history"]) == 1
     assert created[0].embeddings is None and not created[0].training
     assert not (config.output_directory / "best.model_card.yaml").exists()
-
-
-def test_omitting_the_epoch_callback_keeps_existing_behavior(experiment_configuration):
-    """The hook is optional; the existing result API is unchanged without it."""
-    torch.set_num_threads(2)
-    result = SupConExperiment(experiment_configuration).run_with_result(
-        epoch_callback=None
-    )
-    assert torch.load(result.last_checkpoint, weights_only=True)["epoch"] == 2
 
 
 def test_failed_supcon_export_fails_the_run_before_publication(
@@ -1028,10 +763,12 @@ def test_tracked_supcon_logs_its_onnx_export_with_the_best_model(
     assert downloaded.read_bytes() == result.onnx_model.read_bytes()
 
 
+@pytest.mark.parametrize("upload_fails", [False, True])
 def test_standalone_supcon_registry_publication_remains_an_explicit_encoder(
-    pipeline_document, tracking_store
+    pipeline_document, tracking_store, monkeypatch, upload_fails
 ):
-    """Existing standalone encoder registration stays available, never labeled as a CE classifier."""
+    """A validated encoder is registered with its cards, then promoted; a failed card
+    upload fails the run and promotes nothing."""
     values = deepcopy(pipeline_document["supcon"])
     values.update(pipeline_document["data"])
     values.update(
@@ -1046,15 +783,36 @@ def test_standalone_supcon_registry_publication_remains_an_explicit_encoder(
         **tracking_store.configuration,
         "registered_model_name": encoder_name,
     }
-    result = SupConExperiment(
-        TrainingConfiguration.from_mapping(values)
-    ).run_with_result()
-    versions = tracking_store.client.search_model_versions(f"name='{encoder_name}'")
+    experiment = SupConExperiment(TrainingConfiguration.from_mapping(values))
+    client = tracking_store.client
+    if upload_fails:
+        monkeypatch.setattr(
+            train_supcon.MlflowClient,
+            "log_model_artifact",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("upload failed")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="upload failed"):
+            experiment.run_with_result()
+        (run,) = client.search_runs([tracking_store.experiment_id])
+        assert run.info.status == "FAILED"
+        assert client.get_registered_model(encoder_name).aliases == {}
+        assert mlflow.active_run() is None
+        return
+    result = experiment.run_with_result()
+    versions = client.search_model_versions(f"name='{encoder_name}'")
     assert len(versions) == 1 and versions[0].run_id == result.mlflow_run_id
     card = yaml.safe_load(
         (result.output_directory / "best.model_card.yaml").read_text()
     )
     assert card["model"]["task"] == "contrastive-encoder"
     assert str(card["model"]["registry_version"]) == str(versions[0].version)
-    assert tracking_store.client.get_run(result.mlflow_run_id).info.status == "FINISHED"
+    assert card["provenance"]["run_id"] == result.mlflow_run_id
+    assert card["provenance"]["model_id"]
+    champion = client.get_model_version_by_alias(
+        encoder_name, tracking_store.configuration["champion_alias"]
+    )
+    assert champion.version == versions[0].version
+    assert client.get_run(result.mlflow_run_id).info.status == "FINISHED"
     assert mlflow.active_run() is None

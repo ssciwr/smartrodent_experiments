@@ -106,9 +106,7 @@ class YoloDatasetCreatorBase(Configurable, ABC):
         }
         selected = sorted(available) if class_names is None else list(class_names)
         if not selected:
-            raise ValueError("At least one class directory must be selected")
-        if len(set(selected)) != len(selected):
-            raise ValueError("class_names must not contain duplicates")
+            raise ValueError("No class directories found")
         unknown = set(selected) - available
         if unknown:
             raise ValueError(f"Unknown class directories: {sorted(unknown)}")
