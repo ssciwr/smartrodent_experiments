@@ -2,7 +2,7 @@
 
 import hashlib
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from copy import deepcopy
 from numbers import Real
@@ -10,18 +10,25 @@ from operator import gt, lt
 from pathlib import Path
 from typing import Annotated, ClassVar
 
-from pydantic import ConfigDict, Field
-from pydantic.dataclasses import dataclass
-
 import mlflow
 import mlflow.pytorch
 import numpy as np
 import torch
 import yaml
 from mlflow import MlflowClient
+from pydantic import ConfigDict, Field
+from pydantic.dataclasses import dataclass
 from pytorch_metric_learning.losses import SupConLoss
 from pytorch_metric_learning.samplers import MPerClassSampler
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
 from smartrodent import config_utils
+from smartrodent.datasets import (
+    ImageDataset,
+    MultiViewImageDataset,
+    collate_views,
+)
 from smartrodent.experiment_results import ExperimentResult
 from smartrodent.experiment_support import (
     CheckpointStore,
@@ -34,6 +41,12 @@ from smartrodent.experiment_support import (
     resolve_validation_metrics,
     validate_stopping,
 )
+from smartrodent.model_card import (
+    load_training_template,
+    write_training_card,
+)
+from smartrodent.onnx_export import OnnxExporter
+from smartrodent.supcon_model import YoloSupConModel
 from smartrodent.training_validation import (
     CheckpointPath,
     ClassNames,
@@ -54,19 +67,6 @@ from smartrodent.training_validation import (
     settings_dict,
     validate_output_paths,
 )
-from smartrodent.model_card import (
-    load_training_template,
-    write_training_card,
-)
-from smartrodent.datasets import (
-    ImageDataset,
-    MultiViewImageDataset,
-    collate_views,
-)
-from smartrodent.onnx_export import OnnxExporter
-from smartrodent.supcon_model import YoloSupConModel
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 
 
 @dataclass(frozen=True, config=ConfigDict(extra="forbid"))
@@ -596,9 +596,13 @@ class SupConExperiment:
             mlflow.log_metrics(metrics, step=statistics["epoch"])
 
     def _run_training(
-        self,
+        self, epoch_callback: Callable[[int, float], None] | None = None
     ) -> tuple[Path, Path, float, int, YoloSupConModel]:
-        """Train and return checkpoints, tracked-metric results, and the live model."""
+        """Train and return checkpoints, tracked-metric results, and the live model.
+
+        The optional epoch callback observes each saved epoch's tracked value; any
+        exception it raises (e.g. a pruning request) stops training unchanged.
+        """
         config = self.configuration
         random.seed(config.seed)
         np.random.seed(config.seed)
@@ -692,6 +696,8 @@ class SupConExperiment:
                 if is_best:
                     best_metric_value = tracked_value
                     best_epoch = epoch
+                if epoch_callback is not None:
+                    epoch_callback(epoch, float(tracked_value))
                 if early_stopping is not None and early_stopping(tracked_value):
                     print(
                         f"Stopping early: {tracked_metric} did not improve for "
@@ -718,11 +724,19 @@ class SupConExperiment:
         """
         return self.run_with_result().last_checkpoint
 
-    def run_with_result(self, *, parent_run_id: str | None = None) -> ExperimentResult:
+    def run_with_result(
+        self,
+        *,
+        parent_run_id: str | None = None,
+        epoch_callback: Callable[[int, float], None] | None = None,
+    ) -> ExperimentResult:
         """Train once and report the best epoch selected by the configured metric.
 
         Args:
             parent_run_id: Explicit active pipeline parent for a tracked child run.
+            epoch_callback: Optional observer called as ``(epoch, tracked_value)``
+                after each epoch's checkpoint is saved. Exceptions it raises stop
+                training and propagate unchanged, before any publication.
 
         Returns:
             Completed run metadata, including best/last checkpoints and an optional
@@ -753,7 +767,7 @@ class SupConExperiment:
                     mlflow.set_tags(source_tags)
                     mlflow.log_params(config.mlflow_parameters())
                 final_checkpoint, best_checkpoint, best_value, best_epoch, model = (
-                    self._run_training()
+                    self._run_training(epoch_callback)
                 )
                 # Export before any publication: a failed export must leave nothing published.
                 if self.exporter is not None:

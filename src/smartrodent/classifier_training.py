@@ -2,7 +2,7 @@
 
 import hashlib
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from copy import copy, deepcopy
 from dataclasses import field, replace
@@ -55,6 +55,14 @@ from smartrodent.training_validation import (
     settings_dict,
     validate_output_paths,
 )
+
+
+class FreezeConfigurationError(ValueError):
+    """The freeze setting does not fit the network's depth and head replacement.
+
+    It depends on the encoder network, so it can only be detected when the network is
+    known; studies treat it as an invalid sampled combination.
+    """
 
 
 @dataclass(frozen=True, kw_only=True, config=ConfigDict(extra="forbid"))
@@ -231,7 +239,8 @@ class ClassifierConfiguration:
             Layer indices; a frozen linear-probe head becomes ``"<head>.conv"``.
 
         Raises:
-            ValueError: A layer is outside the network or inside the trained head.
+            FreezeConfigurationError: A layer is outside the network or inside the trained head.
+            ValueError: The head replacement is unsupported.
         """
         head = layer_count - 1
         if self.initialization["head"]["replace"] == "linear":
@@ -249,7 +258,7 @@ class ClassifierConfiguration:
         )
         out_of_range = [layer for layer in layers if layer > last_freezable]
         if out_of_range:
-            raise ValueError(
+            raise FreezeConfigurationError(
                 f"freeze={self.freeze} selects layer {out_of_range[0]}, but only layers 0..{last_freezable} "
                 f"can be frozen with replace={self.initialization['head']['replace']} and {layer_count} layers"
             )
@@ -396,10 +405,15 @@ class _ClassifierTrainer(ClassificationTrainer):
     """Supply prepared model/data and selection policy to the native training lifecycle."""
 
     def __init__(
-        self, experiment, network: ClassificationModel, freeze: list[int | str]
+        self,
+        experiment,
+        network: ClassificationModel,
+        freeze: list[int | str],
+        epoch_callback: Callable[[int, float], None] | None = None,
     ):
         """Configure native execution around the supplied network without reloading it."""
         self.experiment = experiment
+        self.epoch_callback = epoch_callback
         super().__init__(overrides=experiment.configuration.native_overrides(freeze))
         # Native setup_model recognizes an existing nn.Module: no second factory,
         # checkpoint load or head reset can replace the selected encoder.
@@ -422,6 +436,10 @@ class _ClassifierTrainer(ClassificationTrainer):
             ]
         self.best_epoch, self.best_metrics = 0, {}
         self.add_callback("on_fit_epoch_end", self._log_epoch)
+        if epoch_callback is not None:
+            # Native on_fit_epoch_end runs after validation and save_model, once per
+            # trained epoch; final_eval below does not re-trigger it.
+            self.add_callback("on_fit_epoch_end", self._report_epoch)
 
     def get_dataset(self):
         """Use shared, verified splits instead of native discovery/downloads."""
@@ -530,6 +548,11 @@ class _ClassifierTrainer(ClassificationTrainer):
                 )
             mlflow.log_metrics(metrics, step=self.epoch + 1)
 
+    def _report_epoch(self, trainer):
+        """Pass the configured tracked value of the completed epoch to the observer."""
+        tracked_metric = self.experiment.configuration.tracked_metric
+        self.epoch_callback(self.epoch + 1, float(self.metrics[tracked_metric]))
+
     def final_eval(self):
         """Finalize native files without rescoring or rediscovering shared dataset paths."""
         last = strip_optimizer(self.last)
@@ -627,13 +650,20 @@ class ClassifierExperiment:
         return self.run_with_result().last_checkpoint
 
     def run_with_result(
-        self, *, parent_run_id: str | None = None, defer_promotion: bool = False
+        self,
+        *,
+        parent_run_id: str | None = None,
+        defer_promotion: bool = False,
+        epoch_callback: Callable[[int, float], None] | None = None,
     ) -> ExperimentResult:
         """Train once, publish the selected native model, and optionally compare its champion.
 
         Args:
             parent_run_id: Explicit active pipeline parent for a child run.
             defer_promotion: Leave final alias comparison to the sweep owner.
+            epoch_callback: Optional observer called as ``(epoch, tracked_value)``
+                after each native epoch is validated and saved. Exceptions it raises
+                stop training and propagate unchanged, before any publication.
 
         Returns:
             Selected best/final checkpoint metadata.
@@ -664,7 +694,7 @@ class ClassifierExperiment:
                         "tracked_mode": config.effective_tracked_mode,
                     }
                 )
-            result, snapshot = self._train(network, freeze, run_id)
+            result, snapshot = self._train(network, freeze, run_id, epoch_callback)
             # Export before any publication: a failed export must leave nothing published.
             if self.exporter is not None:
                 result = replace(
@@ -718,12 +748,16 @@ class ClassifierExperiment:
         return network
 
     def _train(
-        self, network: ClassificationModel, freeze: list[int | str], run_id: str | None
+        self,
+        network: ClassificationModel,
+        freeze: list[int | str],
+        run_id: str | None,
+        epoch_callback: Callable[[int, float], None] | None = None,
     ):
         """Run native training; Ultralytics owns all optimization and checkpointing."""
         config = self.configuration
         try:
-            trainer = _ClassifierTrainer(self, network, freeze)
+            trainer = _ClassifierTrainer(self, network, freeze, epoch_callback)
             (config.output_directory / "config.yaml").write_text(
                 yaml.safe_dump(config.to_dict()), encoding="utf-8"
             )

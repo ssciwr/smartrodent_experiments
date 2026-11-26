@@ -3,9 +3,10 @@ import copy
 import importlib
 from typing import Any
 
-import numpy as np
-
 from . import utils
+
+# Tag names of Optuna search parameters; a grid sweep must never contain them.
+STUDY_TAGS = ("suggest-float", "suggest-int", "suggest-categorical")
 
 
 def sweep_constructor(
@@ -57,135 +58,32 @@ def coupled_sweep_constructor(
     return {"target": sweep_target, "values": values, "type": "coupled-sweep"}
 
 
-def range_inclusive(
-    start: int | float, stop: int | float, step: int | float
-) -> np.ndarray:
-    """Return a numpy array from start to stop (inclusive),
-    with the given step, working for both int and float.
-
-    Args:
-        start (int | float): Start value
-        stop (int | float): Stop value (inclusive)
-        step (int | float): Step size
-
-    Returns:
-        np.ndarray: Numpy array of values from start to stop (inclusive)
-            with the given step.
-    """
-    if step == 0:
-        raise ValueError("step must not be zero")
-
-    # Compute number of steps (round to avoid float precision errors)
-    # +1 to include stop
-    num = int(round((stop - start) / step)) + 1
-
-    # Generate linearly spaced values (always includes stop)
-    values = np.linspace(start, start + (num - 1) * step, num)
-
-    # Adjust last value to exactly match stop when it's very close
-    if abs(values[-1] - stop) < abs(step) * 1e-9:
-        values[-1] = stop
-
-    # If all inputs were ints, cast result back to int
-    if all(isinstance(x, int) for x in (start, stop, step)):
-        values = values.astype(int)
-
-    return values
-
-
-def range_constructor(
-    loader: yaml.SafeLoader, node: yaml.nodes.MappingNode
+def suggest_constructor(
+    loader: yaml.SafeLoader, node: yaml.nodes.Node
 ) -> dict[str, Any]:
-    """Constructor for the !range tag:
-    tagname: !range
-      start: 0
-      stop: 10
-      step: 2
-
-      or
-
-    tagname: !range
-      start: 0.2
-      stop: 0.8
-      step: 0.2
-
-    The end value is inclusive to make it consistent with Optuna sampling.
+    """Constructor for the Optuna search tags, which in a yaml file can look like this:
+    lr: !suggest-float {low: 1.0e-5, high: 1.0e-3, log: true}
+    batch: !suggest-int {low: 4, high: 12, step: 2}
+    head: !suggest-categorical {choices: [linear, full]}
+    The tag only records its settings; `hyperparameter_search.SearchSpace` validates
+    them and turns them into Optuna distributions.
 
     Args:
         loader (yaml.SafeLoader): loader that loads the yaml file
-        node (yaml.nodes.MappingNode): the current !range node to process
+        node (yaml.nodes.Node): the current tagged node to process
 
     Returns:
-        dict[str, Any]: dict of the form: {"type": "range",
-                                            "values": values as np.array,
-                                            "tune_values": tuple[start, end, step]}
+        dict[str, Any]: dictionary of the form {type: suggest-<kind>, <settings>...}
+
+    Raises:
+        ValueError: the tag is not applied to a mapping or uses the reserved key 'type'.
     """
-    # using PyYAML's mapping constructor to ensure value types are correct
+    if not isinstance(node, yaml.nodes.MappingNode):
+        raise ValueError(f"{node.tag} requires a mapping of settings")
     mapping = loader.construct_mapping(node, deep=True)
-    start = mapping.get(
-        node.value[0][0].value
-    )  # use indices to access keys in case key names change
-    end = mapping.get(node.value[1][0].value)
-    step = mapping.get(node.value[2][0].value) if len(node.value) > 2 else None
-
-    # prepare values
-    if isinstance(step, (int, float)):
-        values = range_inclusive(start, end, step)
-
-    else:  # no step or log specified
-        default_step = 1 if isinstance(start, int) and isinstance(end, int) else 0.1
-        values = range_inclusive(start, end, default_step)
-        step = default_step
-
-    return {"type": "range", "values": values, "tune_values": (start, end, step)}
-
-
-def random_uniform_constructor(
-    loader: yaml.SafeLoader, node: yaml.nodes.MappingNode
-) -> dict[str, Any]:
-    """Constructor for the !random_uniform tag:
-    tagname: !random_uniform
-      start: 1.0e-05
-      stop: 0.1
-      log: true
-      size: 5
-
-    Sample `size` values uniformly between `start` and `stop`.
-    If log is true, sample in the log domain.
-    Otherwise, sample in the linear domain.
-
-    Note: The `size` field is optional and defaults to 5 if omitted.
-        The number of generated values may differ from those sampled by Optuna
-        because Optuna's sampling count depends on the number of trials
-        and the pruning strategy,
-        both of which are unknown when the configuration is loaded.
-
-    Args:
-        loader (yaml.SafeLoader): loader that loads the yaml file
-        node (yaml.nodes.MappingNode): the current !random_uniform node to process
-
-    Returns:
-        dict[str, Any]: dict of the form: {"type": "random_uniform",
-                                            "values": values as np.array,
-                                            "tune_values": tuple[start, end, log]}
-    """
-    # using PyYAML's mapping constructor to ensure value types are correct
-    mapping = loader.construct_mapping(node, deep=True)
-    start = float(mapping.get(node.value[0][0].value))
-    end = float(mapping.get(node.value[1][0].value))
-    log = mapping.get(node.value[2][0].value)
-    size = mapping.get(node.value[3][0].value) if len(node.value) > 3 else 5
-
-    if log:  # log = true
-        values = np.exp(np.random.uniform(np.log(start), np.log(end), size=size))
-    else:  # log = false
-        values = np.random.uniform(start, end, size=size)
-
-    return {
-        "type": "random_uniform",
-        "values": values,
-        "tune_values": (start, end, log),
-    }
+    if "type" in mapping:
+        raise ValueError(f"{node.tag} does not accept the reserved key 'type'")
+    return {"type": node.tag.removeprefix("!"), **mapping}
 
 
 def reference_constructor(
@@ -272,8 +170,8 @@ def get_loader():
     loader = yaml.SafeLoader
     loader.add_constructor("!sweep", sweep_constructor)
     loader.add_constructor("!coupled-sweep", coupled_sweep_constructor)
-    loader.add_constructor("!range", range_constructor)
-    loader.add_constructor("!random_uniform", random_uniform_constructor)
+    for tag in STUDY_TAGS:
+        loader.add_constructor(f"!{tag}", suggest_constructor)
     loader.add_constructor("!pyobject", object_constructor)
     loader.add_constructor("!reference", reference_constructor)
     return loader
@@ -344,6 +242,7 @@ class ConfigHandler:
         """
         self.config = config
         self.run_configs = []
+        self._reject_study_tags([], config)
         sweep_targets = {}
         coupled_targets = {}
 
@@ -381,6 +280,34 @@ class ConfigHandler:
 
             # construct the configs
             self.run_configs = self._construct_run_configs(sweep_targets)
+
+    def _reject_study_tags(self, path: list[Any], node: Any) -> None:
+        """Fail on Optuna search tags anywhere, including list elements.
+
+        A grid sweep would otherwise pass them on as unexpanded mappings, which only
+        fail later with an unrelated validation error, or not at all.
+
+        Args:
+            path (list[Any]): path of `node` within the configuration
+            node (Any): current configuration node
+
+        Raises:
+            ValueError: a !suggest-* tag appears outside an Optuna study.
+        """
+        if isinstance(node, dict) and node.get("type") in STUDY_TAGS:
+            raise ValueError(
+                f"!{node['type']} at '{utils.format_path(path)}' defines an Optuna search "
+                "parameter; add a tuning section for this configuration (in a two-stage "
+                "pipeline: tuning.<stage>) to run an Optuna study"
+            )
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                self._reject_study_tags([*path, key], value)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                self._reject_study_tags([*path, index], value)
+        else:
+            pass  # scalar leaves cannot contain tags
 
     def _extract_sweep_dims(
         self,

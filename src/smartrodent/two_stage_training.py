@@ -1,4 +1,9 @@
-"""Compose a validated SupCon sweep, configured-metric selection, and CE training."""
+"""Compose a validated SupCon stage, configured-metric selection, and CE training.
+
+Each stage runs either as a grid sweep or, when the root ``tuning`` section names
+it, as an Optuna study. Stages run in order: the SupCon winner by its own metric
+becomes the encoder of every classifier run or trial.
+"""
 
 from collections.abc import Mapping
 from copy import deepcopy
@@ -22,10 +27,16 @@ from smartrodent.classifier_sweeps import (
 )
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
 from smartrodent.experiment_support import MlflowConfiguration, validate_stopping
+from smartrodent.hyperparameter_search import (
+    ClassifierStudy,
+    StudyConfiguration,
+    SupConStudy,
+)
 from smartrodent.training_validation import (
     MappingInput,
     SharedData,
     parse_settings,
+    settings_dict,
     validate_output_paths,
 )
 
@@ -43,6 +54,24 @@ def _plain_values(value):
 
 
 @dataclass(frozen=True, kw_only=True, config=ConfigDict(extra="forbid"))
+class StageStudies:
+    """Optuna study settings per pipeline stage; an omitted stage runs as a grid sweep.
+
+    Args:
+        supcon: Study settings for the SupCon stage, or None.
+        classifier: Study settings for the classifier stage, or None.
+    """
+
+    supcon: MappingInput[StudyConfiguration] | None = None
+    classifier: MappingInput[StudyConfiguration] | None = None
+
+    def __post_init__(self):
+        """An empty section is a mistake rather than a request for grid sweeps."""
+        if self.supcon is None and self.classifier is None:
+            raise ValueError("tuning must configure a study for at least one stage")
+
+
+@dataclass(frozen=True, kw_only=True, config=ConfigDict(extra="forbid"))
 class TwoStageConfiguration:
     """Validate the entire pipeline before running any candidate or writing outputs.
 
@@ -55,6 +84,7 @@ class TwoStageConfiguration:
         supcon: Standalone SupCon settings without data or output overrides.
         classifier: Standalone CE settings with encoder source selected_supcon.
         mlflow: Optional shared tracking; registry publication applies only to CE.
+        tuning: Optional per-stage Optuna study settings; tagged stages need one.
     """
 
     output_directory: Path
@@ -62,10 +92,18 @@ class TwoStageConfiguration:
     supcon: dict[str, object]
     classifier: dict[str, object]
     mlflow: MappingInput[MlflowConfiguration] | None = None
+    tuning: MappingInput[StageStudies] | None = None
+    # Sweep runs, or a study's prevalidated candidates (first = reference).
     supcon_configurations: tuple[TrainingConfiguration, ...] = field(
         init=False, repr=False
     )
-    _classifier_sweep: ClassifierSweepConfiguration = field(init=False, repr=False)
+    classifier_candidates: tuple[ClassifierConfiguration, ...] = field(
+        init=False, repr=False
+    )
+    supcon_study: SupConStudy | None = field(init=False, repr=False)
+    _classifier_sweep: ClassifierSweepConfiguration | None = field(
+        init=False, repr=False
+    )
 
     def __post_init__(self):
         """Own independent settings and prevalidate all expanded stage configurations."""
@@ -73,17 +111,9 @@ class TwoStageConfiguration:
             object.__setattr__(self, name, deepcopy(getattr(self, name)))
         for name in ("supcon", "classifier"):
             self._validate_stage_ownership(getattr(self, name), name)
-        # Expand one stage at a time: a classifier Cartesian product must never
-        # multiply SupCon candidates or change which encoder is selected.
-        runs = config_utils.ConfigHandler({"supcon": deepcopy(self.supcon)}).run_configs
-        if not runs:
-            raise ValueError(
-                "SupCon sweep must contain at least one candidate; empty sweep"
-            )
-        configurations = [
-            self._build_supcon_configuration(run["supcon"], index)
-            for index, run in enumerate(runs, start=1)
-        ]
+        supcon_study = self.tuning.supcon if self.tuning is not None else None
+        classifier_study = self.tuning.classifier if self.tuning is not None else None
+        configurations = self._prepare_supcon(supcon_study)
         reference = configurations[0]
         if any(
             config.temperature != reference.temperature for config in configurations
@@ -107,6 +137,62 @@ class TwoStageConfiguration:
                 "SupCon sweep must use the same tracked metric definition/function/options"
             )
         object.__setattr__(self, "supcon_configurations", tuple(configurations))
+        if classifier_study is not None:
+            self._validate_classifier_encoder(self.classifier)
+            sweep = None
+            candidates = self.classifier_study(self.encoder_placeholder).configurations
+        else:
+            sweep = self._prepare_classifier_sweep(self.encoder_placeholder)
+            candidates = sweep.configurations
+        object.__setattr__(self, "_classifier_sweep", sweep)
+        object.__setattr__(self, "classifier_candidates", tuple(candidates))
+        self._validate_output_paths()
+
+    @property
+    def encoder_placeholder(self) -> Path:
+        """Return a stand-in for the selected encoder before SupCon has run.
+
+        The winning file does not exist yet; it validates settings and source/output
+        relationships without loading any model weights.
+        """
+        return self.supcon_configurations[0].output_directory / "best.pt"
+
+    def _prepare_supcon(
+        self, study: StudyConfiguration | None
+    ) -> list[TrainingConfiguration]:
+        """Prepare the SupCon study, or expand its sweep, returning validated candidates."""
+        if study is not None:
+            supcon_study = SupConStudy(
+                self._stage_document(
+                    "supcon",
+                    study,
+                    self.output_directory / "supcon",
+                    self._supcon_tracking(),
+                ),
+                prefix="supcon",
+            )
+            object.__setattr__(self, "supcon_study", supcon_study)
+            return list(supcon_study.configurations)
+        else:
+            object.__setattr__(self, "supcon_study", None)
+            # Expand one stage at a time: a classifier Cartesian product must never
+            # multiply SupCon candidates or change which encoder is selected.
+            runs = config_utils.ConfigHandler(
+                {"supcon": deepcopy(self.supcon)}
+            ).run_configs
+            if not runs:
+                raise ValueError(
+                    "SupCon sweep must contain at least one candidate; empty sweep"
+                )
+            return [
+                self._build_supcon_configuration(run["supcon"], index)
+                for index, run in enumerate(runs, start=1)
+            ]
+
+    def _prepare_classifier_sweep(
+        self, placeholder: Path
+    ) -> ClassifierSweepConfiguration:
+        """Expand and prevalidate the classifier sweep against a placeholder encoder."""
         classifier_runs = config_utils.ConfigHandler(
             {"classifier": deepcopy(self.classifier)}
         ).run_configs
@@ -120,29 +206,47 @@ class TwoStageConfiguration:
         for run in classifier_runs:
             settings = run["classifier"]
             self._validate_stage_ownership(settings, "classifier")
-            initialization = settings.get("initialization")
-            if not isinstance(initialization, Mapping) or initialization.get(
-                "encoder"
-            ) != {"source": "selected_supcon"}:
-                raise ValueError(
-                    "classifier encoder must be exactly {source: selected_supcon}, without checkpoint"
-                )
+            self._validate_classifier_encoder(settings)
             candidate = {**deepcopy(settings), **shared_classifier_settings}
-            # The winning file does not exist yet; this validates settings and
-            # source/output relationships without loading any model weights.
             candidate["initialization"]["encoder"] = {
                 "source": "supcon",
-                "checkpoint": str(reference.output_directory / "best.pt"),
+                "checkpoint": str(placeholder),
             }
             values.append(candidate)
         document = _plain_values(
             {**deepcopy(self.classifier), **shared_classifier_settings}
         )
-        sweep = ClassifierSweepConfiguration.from_runs(
-            classifier_root, values, document
-        )
-        object.__setattr__(self, "_classifier_sweep", sweep)
-        self._validate_output_paths()
+        return ClassifierSweepConfiguration.from_runs(classifier_root, values, document)
+
+    def _stage_document(
+        self, section: str, study: StudyConfiguration, output_directory: Path, tracking
+    ) -> dict:
+        """Merge a tagged stage with the shared data, outputs and tracking into a study document."""
+        return {
+            **deepcopy(getattr(self, section)),
+            **self.data,
+            "output_directory": output_directory,
+            "mlflow": tracking,
+            "tuning": study.to_dict(),
+        }
+
+    def _supcon_tracking(self) -> dict | None:
+        """Return SupCon tracking settings: pipeline candidates are never registry versions."""
+        if self.mlflow is None:
+            return None
+        else:
+            return asdict(replace(self.mlflow, registered_model_name=None))
+
+    @staticmethod
+    def _validate_classifier_encoder(settings: Mapping) -> None:
+        """Require the deferred encoder placeholder, before or after sweep expansion."""
+        initialization = settings.get("initialization")
+        if not isinstance(initialization, Mapping) or initialization.get("encoder") != {
+            "source": "selected_supcon"
+        }:
+            raise ValueError(
+                "classifier encoder must be exactly {source: selected_supcon}, without checkpoint"
+            )
 
     @staticmethod
     def _validate_stage_ownership(settings: Mapping, section: str) -> None:
@@ -153,6 +257,7 @@ class TwoStageConfiguration:
             "class_names",
             "output_directory",
             "mlflow",
+            "tuning",
         }
         conflicts = reserved & set(settings)
         if conflicts:
@@ -170,12 +275,7 @@ class TwoStageConfiguration:
             **settings,
             **self.data,
             "output_directory": self.output_directory / "supcon" / f"run_{index:03d}",
-            # Pipeline candidates are encoders, never classifier registry versions.
-            "mlflow": (
-                asdict(replace(self.mlflow, registered_model_name=None))
-                if self.mlflow is not None
-                else None
-            ),
+            "mlflow": self._supcon_tracking(),
         }
         try:
             config = TrainingConfiguration.from_mapping(values)
@@ -188,24 +288,35 @@ class TwoStageConfiguration:
 
     def _validate_output_paths(self) -> None:
         """Protect shared datasets and model/head inputs from every generated artifact."""
-        stages = (*self.supcon_configurations, *self._classifier_sweep.configurations)
+        stages = (*self.supcon_configurations, *self.classifier_candidates)
         # Selected encoder checkpoints are pipeline outputs, not external inputs.
         sources = [config.model_name for config in self.supcon_configurations]
         sources.extend(config.model_card_template for config in stages)
         sources.extend(
             config.initialization["head"].get("checkpoint")
-            for config in self._classifier_sweep.configurations
+            for config in self.classifier_candidates
+        )
+        supcon_outputs = self._candidate_outputs(
+            self.supcon_configurations, self.supcon_study is not None
+        )
+        classifier_outputs = self._candidate_outputs(
+            self.classifier_candidates, self._classifier_sweep is None
         )
         validate_output_paths(
-            [config.output_directory for config in stages],
+            [*supcon_outputs, *classifier_outputs],
             (self.data["train_dataset"], self.data["validation_dataset"]),
             sources,
-            (self.output_directory, self._classifier_sweep.output_directory),
-            native_directories=[
-                config.output_directory
-                for config in self._classifier_sweep.configurations
-            ],
+            (self.output_directory, self.output_directory / "classifier"),
+            native_directories=classifier_outputs,
         )
+
+    @staticmethod
+    def _candidate_outputs(configurations, is_study: bool) -> list[Path]:
+        """Return a stage's run directories; study candidates share their reference trial's."""
+        if is_study:
+            return [configurations[0].output_directory]
+        else:
+            return [configuration.output_directory for configuration in configurations]
 
     @classmethod
     def from_mapping(cls, values: Mapping) -> "TwoStageConfiguration":
@@ -251,6 +362,8 @@ class TwoStageConfiguration:
         }
         if self.mlflow is not None:
             values["mlflow"] = asdict(self.mlflow)
+        if self.tuning is not None:
+            values["tuning"] = settings_dict(self.tuning)
         return _plain_values(values)
 
     def classifier_configuration(self, checkpoint: Path) -> ClassifierConfiguration:
@@ -279,8 +392,49 @@ class TwoStageConfiguration:
 
         Returns:
             The shared sweep settings with concrete encoder paths for every run.
+
+        Raises:
+            ValueError: The classifier stage runs as an Optuna study.
         """
+        if self._classifier_sweep is None:
+            raise ValueError(
+                "The classifier stage runs as an Optuna study; use classifier_study"
+            )
         return self._classifier_sweep.with_supcon_encoder(checkpoint)
+
+    def classifier_study(
+        self, checkpoint: Path, encoder_provenance: Mapping | None = None
+    ) -> ClassifierStudy:
+        """Prepare the classifier study on one SupCon encoder checkpoint.
+
+        Args:
+            checkpoint: Selected SupCon best.pt (or a placeholder for prevalidation).
+            encoder_provenance: Selected encoder and parent-run metadata.
+
+        Returns:
+            A prevalidated study whose trials all use this encoder.
+
+        Raises:
+            ValueError: The classifier stage runs as a grid sweep.
+        """
+        if self.tuning is None or self.tuning.classifier is None:
+            raise ValueError(
+                "The classifier stage runs as a grid sweep; use classifier_sweep_configuration"
+            )
+        tracking = asdict(self.mlflow) if self.mlflow is not None else None
+        document = self._stage_document(
+            "classifier",
+            self.tuning.classifier,
+            self.output_directory / "classifier",
+            tracking,
+        )
+        document["initialization"]["encoder"] = {
+            "source": "supcon",
+            "checkpoint": str(checkpoint),
+        }
+        return ClassifierStudy(
+            document, encoder_provenance=encoder_provenance, prefix="classifier"
+        )
 
 
 @result_dataclass(frozen=True)
@@ -331,11 +485,20 @@ class TwoStageExperiment:
         """Prepare every stage's independent inputs before training or output creation."""
         self.configuration = configuration
         self._validate_classifier_freeze(configuration)
-        self.supcon_experiments = tuple(
-            SupConExperiment(candidate)
-            for candidate in configuration.supcon_configurations
+        # Study stages create their trainers per trial; sweeps prepare them all now.
+        self.supcon_experiments = (
+            tuple(
+                SupConExperiment(candidate)
+                for candidate in configuration.supcon_configurations
+            )
+            if configuration.supcon_study is None
+            else ()
         )
-        self.classifiers = ClassifierSweepExperiment(configuration._classifier_sweep)
+        self.classifiers = (
+            ClassifierSweepExperiment(configuration._classifier_sweep)
+            if configuration._classifier_sweep is not None
+            else None
+        )
 
     @staticmethod
     def _validate_classifier_freeze(configuration: TwoStageConfiguration) -> None:
@@ -353,7 +516,7 @@ class TwoStageExperiment:
         )
         for model_name in model_names:
             layer_count = len(YOLO(model_name, task="classify").model.model)
-            for classifier in configuration._classifier_sweep.configurations:
+            for classifier in configuration.classifier_candidates:
                 try:
                     classifier.native_freeze(layer_count)
                 except ValueError as error:
@@ -373,6 +536,7 @@ class TwoStageExperiment:
                 unchanged; failed candidates are never skipped.
         """
         config = self.configuration
+        self._preflight_studies()
         if config.mlflow is None:
             return self._run_pipeline()
         with config.mlflow.start_run(config.output_directory.name) as run:
@@ -381,6 +545,14 @@ class TwoStageExperiment:
             for name in ("config.yaml", "selection.yaml"):
                 mlflow.log_artifact(str(config.output_directory / name))
             return result
+
+    def _preflight_studies(self) -> None:
+        """Find study storage/output conflicts of both stages before any training."""
+        config = self.configuration
+        if config.supcon_study is not None:
+            config.supcon_study.preflight()
+        if config._classifier_sweep is None:
+            config.classifier_study(config.encoder_placeholder).preflight()
 
     def _run_pipeline(self, run_id: str | None = None) -> TwoStageResult:
         """Run stage composition, using explicit child ownership only when tracking is enabled."""
@@ -406,25 +578,7 @@ class TwoStageExperiment:
         (root / "config.yaml").write_text(
             yaml.safe_dump(config.to_dict()), encoding="utf-8"
         )
-        results = []
-        context = {"parent_run_id": run_id} if run_id is not None else {}
-        for experiment in self.supcon_experiments:
-            candidate = experiment.configuration
-            result = experiment.run_with_result(**context)
-            if result.tracked_metric != candidate.effective_tracked_metric:
-                raise ValueError(
-                    "SupCon result tracked metric does not match configuration"
-                )
-            if result.tracked_mode != candidate.effective_tracked_mode:
-                raise ValueError(
-                    "SupCon result tracked mode does not match configuration"
-                )
-            if result.validation_dataset != candidate.validation_dataset:
-                raise ValueError(
-                    "SupCon result validation dataset does not match configuration"
-                )
-            results.append(result)
-        selected = select_best_experiment(results)
+        results, selected = self._run_supcon_stage(run_id)
         with selected.best_checkpoint.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
         summary = {
@@ -444,25 +598,81 @@ class TwoStageExperiment:
             "encoder_best_value": selected.best_value,
             "pipeline_run_id": run_id,
         }
-        self.classifiers.bind_supcon_encoder(
-            selected.best_checkpoint, encoder_provenance
+        classifier_results, selected_classifier, champion_version = (
+            self._run_classifier_stage(selected, encoder_provenance, run_id)
         )
-        classifiers = self.classifiers.run(**context)
-        classifier_report = classifiers.to_dict()
-        for name in (
-            "classifier_results",
-            "selected_classifier",
-            "registered_champion_version",
-        ):
-            summary[name] = classifier_report[name]
-        if len(classifiers.classifier_results) == 1:
-            summary["classifier_result"] = classifiers.classifier_results[0].to_dict()
+        summary["classifier_results"] = [
+            result.to_dict() for result in classifier_results
+        ]
+        summary["selected_classifier"] = (
+            selected_classifier.to_dict() if selected_classifier is not None else None
+        )
+        summary["registered_champion_version"] = champion_version
+        if len(classifier_results) == 1:
+            summary["classifier_result"] = classifier_results[0].to_dict()
         summary_path.write_text(yaml.safe_dump(summary), encoding="utf-8")
         return TwoStageResult(
             root,
             tuple(results),
             selected,
-            classifiers.classifier_results,
-            classifiers.selected_classifier,
+            tuple(classifier_results),
+            selected_classifier,
             run_id,
         )
+
+    def _run_supcon_stage(
+        self, run_id: str | None
+    ) -> tuple[list[ExperimentResult], ExperimentResult]:
+        """Run the SupCon study or sweep and return its results and configured-metric winner."""
+        config = self.configuration
+        if config.supcon_study is not None:
+            study = config.supcon_study.run(parent_run_id=run_id)
+            return list(study.results), study.selected
+        else:
+            results = []
+            context = {"parent_run_id": run_id} if run_id is not None else {}
+            for experiment in self.supcon_experiments:
+                candidate = experiment.configuration
+                result = experiment.run_with_result(**context)
+                if result.tracked_metric != candidate.effective_tracked_metric:
+                    raise ValueError(
+                        "SupCon result tracked metric does not match configuration"
+                    )
+                if result.tracked_mode != candidate.effective_tracked_mode:
+                    raise ValueError(
+                        "SupCon result tracked mode does not match configuration"
+                    )
+                if result.validation_dataset != candidate.validation_dataset:
+                    raise ValueError(
+                        "SupCon result validation dataset does not match configuration"
+                    )
+                results.append(result)
+            return results, select_best_experiment(results)
+
+    def _run_classifier_stage(
+        self,
+        selected: ExperimentResult,
+        encoder_provenance: Mapping,
+        run_id: str | None,
+    ) -> tuple[tuple[ExperimentResult, ...], ExperimentResult | None, str | None]:
+        """Train the classifier study or sweep on the selected encoder.
+
+        Returns:
+            All completed results, the winner, and the champion version after promotion.
+        """
+        if self.classifiers is None:
+            study = self.configuration.classifier_study(
+                selected.best_checkpoint.resolve(), encoder_provenance
+            ).run(parent_run_id=run_id)
+            return study.results, study.selected, study.registered_champion_version
+        else:
+            self.classifiers.bind_supcon_encoder(
+                selected.best_checkpoint, encoder_provenance
+            )
+            context = {"parent_run_id": run_id} if run_id is not None else {}
+            sweep = self.classifiers.run(**context)
+            return (
+                sweep.classifier_results,
+                sweep.selected_classifier,
+                sweep.registered_champion_version,
+            )

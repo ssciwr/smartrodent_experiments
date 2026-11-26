@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import optuna
 import pytest
 import torch
 import yaml
@@ -704,7 +705,7 @@ def test_tracked_classifier_study_nests_trials_and_promotes_only_the_winner(
         store.registry_name, store.configuration["champion_alias"]
     )
     assert champion.run_id == result.selected.mlflow_run_id
-    assert result.selected.registered_model_version == champion.version
+    assert result.selected.registered_model_version == str(champion.version)
 
 
 # --------------------------------------------------------------------------------------
@@ -978,5 +979,183 @@ def test_grid_sweeps_inside_a_study_stage_are_rejected(
             tmp_path,
             studies={"supcon": tuning(), "classifier": tuning()},
         )
+        TwoStageExperiment(config).run()
+    assert recorded_trials.events == []
+
+
+# --- Review round 1 additions ---
+
+
+def test_invalid_base_settings_are_not_blamed_on_a_search_parameter(
+    search_api, supcon_document, recorded_trials, tmp_path
+):
+    """A mistake in a fixed setting is reported as such, not as a bad sampled value."""
+    supcon_document["epochz"] = 3
+    path = _write(tmp_path / "supcon.yaml", supcon_document, {"__LR__": LR_TAG})
+    with pytest.raises(ValueError, match="epochz") as error:
+        search_api.SupConStudy.from_yaml(path).run()
+    assert "Search parameter" not in str(error.value)
+    assert recorded_trials.events == []
+
+
+def test_real_classifier_freeze_combinations_that_do_not_fit_fail_only_their_trial(
+    search_api, classifier_configuration, tmp_path
+):
+    """Freeze validity depends on the head mode and network depth, known only at trial time.
+
+    Fixture network: 0=Conv, 1=Dropout, 2=Classify. freeze=3 also freezes the head's
+    conv, which only a linear head replacement allows.
+    """
+    document = classifier_configuration.to_dict()
+    document.update(
+        epochs=1,
+        tracked_metric="balanced_accuracy",
+        tracked_mode="max",
+        validation_metrics={
+            "balanced_accuracy": {"function": "balanced_accuracy_score"}
+        },
+        freeze="__F__",
+        tuning=tuning(
+            n_trials=10,
+            sampler={"name": "BruteForceSampler", "parameters": {"seed": 0}},
+        ),
+    )
+    document["initialization"]["head"]["replace"] = "__HEAD__"
+    path = _write(
+        tmp_path / "classifier.yaml",
+        document,
+        {
+            "__F__": "!suggest-int {low: 2, high: 3}",
+            "__HEAD__": "!suggest-categorical {choices: [linear, full]}",
+        },
+    )
+    result = search_api.ClassifierStudy.from_yaml(path).run()
+    trials = study_report(document["output_directory"])["trials"]
+    states = {
+        (t["params"]["freeze"], t["params"]["initialization.head.replace"]): t
+        for t in trials
+    }
+    assert {key: trial["state"] for key, trial in states.items()} == {
+        (2, "linear"): "COMPLETE",
+        (3, "linear"): "COMPLETE",
+        (2, "full"): "COMPLETE",
+        (3, "full"): "FAIL",
+    }
+    assert "freeze" in states[(3, "full")]["error"]
+    assert len(result.results) == 3
+
+
+def test_pipeline_study_parameters_use_full_document_paths_like_sweeps(
+    study_pipeline, recorded_trials, tmp_path
+):
+    """Coupled targets and parameter names keep the pipeline's full paths in study mode."""
+    study_pipeline["classifier"]["initialization"]["head"]["replace"] = "__HEAD__"
+    study_pipeline["classifier"]["encoder_batchnorm"] = "__BN__"
+    config = _pipeline(
+        study_pipeline,
+        {
+            "__LR__": "0.001",
+            "__LR0__": LR_TAG,
+            "__HEAD__": "!suggest-categorical {choices: [linear, full]}",
+            "__BN__": "!coupled-sweep {target: classifier.initialization.head.replace, values: [eval, adapt]}",
+        },
+        tmp_path,
+        studies={"classifier": tuning()},
+    )
+    TwoStageExperiment(config).run()
+    report = study_report(Path(study_pipeline["output_directory"]) / "classifier")
+    assert all(
+        set(trial["params"])
+        == {"classifier.train_kwargs.lr0", "classifier.initialization.head.replace"}
+        for trial in report["trials"]
+    )
+    for call in recorded_trials.classifier:
+        replace_mode = call.configuration.initialization["head"]["replace"]
+        assert (
+            call.configuration.encoder_batchnorm
+            == {"linear": "eval", "full": "adapt"}[replace_mode]
+        )
+
+
+@pytest.mark.parametrize(
+    "studies", [{}, {"supcon": None}, {"supcon": None, "classifier": None}]
+)
+def test_a_pipeline_tuning_section_must_name_a_stage(
+    study_pipeline, recorded_trials, tmp_path, studies
+):
+    """An empty tuning section is a mistake, not a silent grid sweep."""
+    with pytest.raises(ValueError, match="tuning"):
+        _pipeline(
+            study_pipeline,
+            {"__LR__": "0.001", "__LR0__": "0.004"},
+            tmp_path,
+            studies=studies,
+        )
+    assert recorded_trials.events == []
+
+
+# --- Review round 2 additions ---
+
+
+def test_an_invalid_reference_document_names_the_reference_values(
+    search_api, supcon_document, recorded_trials, tmp_path
+):
+    """A cross-field error at the low end still says which values were used."""
+    supcon_document.update(
+        samples_per_class="__M__", samples_per_epoch=4
+    )  # batch = 2 * M
+    path = _write(
+        tmp_path / "supcon.yaml",
+        supcon_document,
+        {"__LR__": LR_TAG, "__M__": "!suggest-int {low: 3, high: 4}"},
+    )
+    with pytest.raises(ValueError, match="samples_per_class.*3"):
+        search_api.SupConStudy.from_yaml(path).run()
+    assert recorded_trials.events == []
+
+
+def test_resumed_classifier_studies_refuse_a_changed_encoder(
+    search_api, classifier_document, classifier_assets, recorded_trials, tmp_path
+):
+    """Trials trained on different encoder bytes are not comparable."""
+    classifier_document["tuning"] = tuning(
+        n_trials=1, storage=f"sqlite:///{tmp_path / 'optuna.db'}", load_if_exists=True
+    )
+    path = _write(tmp_path / "classifier.yaml", classifier_document, CLASSIFIER_TAGS)
+    search_api.ClassifierStudy.from_yaml(path).run()
+    search_api.ClassifierStudy.from_yaml(path).run()  # same encoder: resumes
+    assert len(recorded_trials.classifier) == 2
+    with classifier_assets.supcon.open("ab") as stream:  # test-owned fixture file
+        stream.write(b"retrained")
+    with pytest.raises(ValueError, match="encoder checkpoint"):
+        search_api.ClassifierStudy.from_yaml(path).run()
+    assert len(recorded_trials.classifier) == 2
+
+
+@pytest.mark.parametrize("conflict", ["foreign_report", "existing_study"])
+def test_classifier_study_conflicts_are_found_before_supcon_trains(
+    study_pipeline, recorded_trials, tmp_path, conflict
+):
+    """Storage and output conflicts of the later stage must not wait for the SupCon stage."""
+    storage = f"sqlite:///{tmp_path / 'optuna.db'}"
+    root = Path(study_pipeline["output_directory"])
+    if conflict == "foreign_report":
+        (root / "classifier").mkdir(parents=True)
+        (root / "classifier" / "study.yaml").write_text(
+            yaml.safe_dump({"study_name": "other"})
+        )
+        match = "study_name"
+    elif conflict == "existing_study":
+        optuna.create_study(study_name="ce", storage=storage, direction="maximize")
+        match = "load_if_exists"
+    else:
+        raise AssertionError(conflict)
+    config = _pipeline(
+        study_pipeline,
+        {"__LR__": "!sweep {values: [0.001, 0.002]}", "__LR0__": LR_TAG},
+        tmp_path,
+        studies={"classifier": tuning(study_name="ce", storage=storage)},
+    )
+    with pytest.raises(ValueError, match=match):
         TwoStageExperiment(config).run()
     assert recorded_trials.events == []

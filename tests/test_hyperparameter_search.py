@@ -553,17 +553,17 @@ class ScriptedRunner:
         best, last = output_directory / "best.pt", output_directory / "last.pt"
         best.write_text(f"best {index}")
         last.write_text(f"last {index}")
-        result = ExperimentResult(
-            output_directory=output_directory,
-            last_checkpoint=last,
-            best_checkpoint=best,
-            best_epoch=1,
-            best_value=self.score(document),
-            tracked_metric="balanced_accuracy",
-            tracked_mode=self.mode,
-            validation_dataset=self.validation,
-            **self.overrides.get(index, {}),
-        )
+        fields = {
+            "output_directory": output_directory,
+            "last_checkpoint": last,
+            "best_checkpoint": best,
+            "best_epoch": 1,
+            "best_value": self.score(document),
+            "tracked_metric": "balanced_accuracy",
+            "tracked_mode": self.mode,
+            "validation_dataset": self.validation,
+        }
+        result = ExperimentResult(**{**fields, **self.overrides.get(index, {})})
         self.results.append(result)
         return result
 
@@ -899,3 +899,193 @@ def test_resuming_with_the_opposite_direction_fails_before_any_trial(
         ).study.run()
     assert runner.calls == []
     assert len(optuna.load_study(study_name=STUDY_NAME, storage=storage).trials) == 1
+
+
+# --- Review round 1 additions ---
+
+
+@pytest.mark.parametrize(
+    "objective",
+    [
+        {"tracked_metric": "accuracy"},
+        {"validation_dataset": "other-val"},
+    ],
+)
+def test_resuming_with_a_different_objective_fails_before_any_trial(
+    search_api, study_case, tmp_path, objective
+):
+    """Stored trials ranked on another metric or split cannot be compared with new ones."""
+    storage = f"sqlite:///{tmp_path / 'optuna.db'}"
+    study_case(n_trials=1, storage=storage, load_if_exists=True).study.run()
+    values = {
+        "tracked_metric": "balanced_accuracy",
+        "tracked_mode": "max",
+        "validation_dataset": tmp_path / "val",
+    }
+    values.update(
+        {
+            key: tmp_path / value if key == "validation_dataset" else value
+            for key, value in objective.items()
+        }
+    )
+    runner = ScriptedRunner(values["validation_dataset"])
+    study = search_api.HyperparameterStudy(
+        search_api.SearchSpace.from_document(_load(SPACE)),
+        search_api.StudyConfiguration.from_mapping(
+            tuning(n_trials=1, storage=storage, load_if_exists=True)
+        ),
+        runner,
+        output_directory=tmp_path / "study",
+        objective=search_api.StudyObjective(**values),
+    )
+    with pytest.raises(ValueError, match="objective"):
+        study.run()
+    assert runner.calls == []
+    assert len(optuna.load_study(study_name=STUDY_NAME, storage=storage).trials) == 1
+
+
+def test_another_study_cannot_reuse_an_output_directory(study_case, tmp_path):
+    """Trial directories of one study must never be overwritten by a differently named study."""
+    study_case(n_trials=1).study.run()
+    runner = ScriptedRunner(tmp_path / "val")
+    with pytest.raises(ValueError, match="study_name"):
+        study_case(runner, n_trials=1, study_name="another-study").study.run()
+    assert runner.calls == []
+    assert study_report(tmp_path / "study")["study_name"] == STUDY_NAME
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"lr": 0.15},  # between two steps of 0.1
+        {"lr": "0.1"},  # not a number
+        {"n": 2.5},  # not an integer
+        {"n": True},  # a boolean is not an integer
+        {"n": 3},  # between two steps of 2
+        {"c": 1.0},  # equal to the choice 1, but a different type
+        {"c": True},  # equal to the choice 1, but a different type
+    ],
+)
+def test_resolution_requires_exact_members_of_each_distribution(search_api, params):
+    """Values must be on the declared step grid and of the declared type, never coerced."""
+    space = _space(
+        search_api,
+        """
+lr: !suggest-float {low: 0.0, high: 1.0, step: 0.1}
+n: !suggest-int {low: 0, high: 10, step: 2}
+c: !suggest-categorical {choices: [1, a]}
+""",
+    )
+    valid = {"lr": 0.3, "n": 4, "c": 1}
+    assert space.resolve(valid) == valid
+    name = next(iter(params))
+    with pytest.raises(ValueError, match=name):
+        space.resolve({**valid, **params})
+
+
+def test_prefixed_spaces_name_parameters_and_couplings_by_full_document_path(
+    search_api,
+):
+    """A stage embedded in a larger document keeps the document's full parameter paths."""
+    space = search_api.SearchSpace.from_document(
+        _load(
+            """
+initialization:
+  head:
+    replace: !suggest-categorical {choices: [linear, full]}
+freeze: !coupled-sweep
+  target: classifier.initialization.head.replace
+  values: [11, 10]
+tracked_metric: accuracy
+"""
+        ),
+        protected=("tracked_metric",),
+        prefix="classifier",
+    )
+    assert set(space.distributions) == {"classifier.initialization.head.replace"}
+    resolved = space.resolve({"classifier.initialization.head.replace": "full"})
+    assert (
+        resolved["freeze"] == 10
+        and resolved["initialization"]["head"]["replace"] == "full"
+    )
+
+
+# --- Review round 2 additions ---
+
+
+def _identity_study(search_api, tmp_path, runner, identity, **settings):
+    """A real study over SPACE with an extra stored identity."""
+    return search_api.HyperparameterStudy(
+        search_api.SearchSpace.from_document(_load(SPACE)),
+        search_api.StudyConfiguration.from_mapping(tuning(**settings)),
+        runner,
+        output_directory=tmp_path / "study",
+        objective=search_api.StudyObjective(
+            tracked_metric="balanced_accuracy",
+            tracked_mode="max",
+            validation_dataset=tmp_path / "val",
+        ),
+        identity=identity,
+    )
+
+
+def test_resuming_requires_the_same_extra_identity(search_api, tmp_path):
+    """Callers can pin more than space and objective, e.g. the encoder all trials share."""
+    storage = f"sqlite:///{tmp_path / 'optuna.db'}"
+    settings = {"n_trials": 1, "storage": storage, "load_if_exists": True}
+    _identity_study(
+        search_api,
+        tmp_path,
+        ScriptedRunner(tmp_path / "val"),
+        {"encoder checkpoint": "sha-a"},
+        **settings,
+    ).run()
+    same = ScriptedRunner(tmp_path / "val")
+    _identity_study(
+        search_api, tmp_path, same, {"encoder checkpoint": "sha-a"}, **settings
+    ).run()
+    assert len(same.calls) == 1
+    changed = ScriptedRunner(tmp_path / "val")
+    with pytest.raises(ValueError, match="encoder checkpoint"):
+        _identity_study(
+            search_api, tmp_path, changed, {"encoder checkpoint": "sha-b"}, **settings
+        ).run()
+    assert changed.calls == []
+
+
+def test_preflight_reports_conflicts_without_running_or_recording_anything(
+    search_api, study_case, tmp_path
+):
+    """The check used before long earlier stages: read-only, and silent when all is well."""
+    storage = f"sqlite:///{tmp_path / 'optuna.db'}"
+    fresh = study_case(n_trials=1, storage=storage)
+    fresh.study.preflight()
+    assert optuna.get_all_study_names(storage=storage) == []
+    assert not fresh.root.exists()
+    fresh.study.run()
+    with pytest.raises(ValueError, match="load_if_exists"):
+        study_case(n_trials=1, storage=storage).study.preflight()
+    with pytest.raises(ValueError, match="study_name"):
+        study_case(n_trials=1, study_name="another-study").study.preflight()
+    with pytest.raises(ValueError, match="search space"):
+        study_case(
+            space="lr: !suggest-float {low: 0.0, high: 1.0}\n",
+            n_trials=1,
+            storage=storage,
+            load_if_exists=True,
+        ).study.preflight()
+    study_case(n_trials=1, storage=storage, load_if_exists=True).study.preflight()
+    assert len(optuna.load_study(study_name=STUDY_NAME, storage=storage).trials) == 1
+
+
+def test_protected_paths_are_named_with_the_stage_prefix(search_api):
+    """Messages use one naming style: the full pipeline path."""
+    with pytest.raises(
+        ValueError,
+        match=r"'supcon\.temperature' cannot be searched: 'supcon\.temperature'",
+    ):
+        search_api.SearchSpace.from_document(
+            _load("temperature: !suggest-float {low: 0.05, high: 0.2}\n"),
+            protected=("temperature",),
+            prefix="supcon",
+        )

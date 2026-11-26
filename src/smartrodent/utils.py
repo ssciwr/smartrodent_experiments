@@ -24,6 +24,43 @@ def assign_at_path(cfg: dict, path: Sequence[Any], value: Any) -> None:
     target[path[-1]] = value
 
 
+def parse_path(text: str) -> tuple:
+    """Parse a dotted configuration path such as ``a.b[0]`` into ``("a", "b", 0)``.
+
+    Args:
+        text: Dotted path, with list indices in brackets (the coupled-sweep syntax).
+
+    Returns:
+        Keys and indices leading to the addressed value.
+    """
+    components = []
+    for token in text.split("."):
+        key, *indices = token.split("[")
+        components.append(key)
+        components.extend(int(index.rstrip("]")) for index in indices)
+    return tuple(components)
+
+
+def format_path(path: Sequence[Any]) -> str:
+    """Format configuration keys and indices as a dotted path such as ``a.b[0]``.
+
+    Args:
+        path: Keys and list indices leading to a value.
+
+    Returns:
+        The dotted path, the inverse of ``parse_path``.
+    """
+    text = ""
+    for component in path:
+        if isinstance(component, int) and not isinstance(component, bool):
+            text += f"[{component}]"
+        elif text:
+            text += f".{component}"
+        else:
+            text = str(component)
+    return text
+
+
 def resolve_data_path(path: str | Path) -> Path:
     """Resolve a possibly-relative data path against the project root.
 
