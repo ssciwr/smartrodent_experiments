@@ -48,14 +48,15 @@ When implementing features, work like this:
     6) when user approved: implement feature
     7) review by subagent up to 4 times and correct code according to feedback until ok
     8) human review
-    9) when approved: refactor code
+    9) when approved: refactor code.
     10) review by subagent up to 4 times and correct code according to feedback until ok
     11) final human review, iterate until human approves
 
-- The reviewer agent should find issues with maintainability, logic errors, requirement violations, going off-topic or making unnecessary changes, introducing additional complexity where not needed. It should verify correctness (run tests, cross check logic) and adherence to plan.
+- The reviewer agent should find issues with maintainability, logic errors, requirement violations, going off-topic or making unnecessary changes, introducing additional complexity where not needed or redundant tests or overtesting. It should verify correctness (run tests, cross check logic) and adherence to plan.
 
 The 'refactor' step aims at simplifying the implementation as much as possible and remove as much as possible complexity without
 compromising functionality or best practices and without violating the requirements.
+It should also simplify and streamline tests and remove superfluous tests. Tests always should test functionality, not implementation details.
 
 ## Coding guidelines
 - Adhere to SOLID principles
