@@ -4,16 +4,20 @@ Python tools for acquiring, reviewing, preparing, and learning from wildlife
 images, with a focus on rodents, snakes, birds, and other small animals. The
 repository contains an iNaturalist/LILA data workflow, SpeciesNet-assisted YOLO
 dataset creation, an Ultralytics detector training wrapper, and independent PyTorch
-supervised-contrastive (SupCon) and cross-entropy (CE) training workflows.
+supervised-contrastive (SupCon) and cross-entropy (CE) training workflows. The
+SupCon and CE stages run either as grid sweeps or as Optuna hyperparameter
+studies.
 
 ## Contents
 
 - [Installation](#installation)
 - [Repository layout and library overview](#repository-layout-and-library-overview)
+- [For developers: Project structure](#for-developers-project-structure)
 - [CLI reference](#cli-reference)
 - [Configuration guide](#configuration-guide)
 - [Dataset workflow](#dataset-workflow)
 - [Training workflows](#training-workflows)
+- [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna)
 - [Checkpoints, results, and model cards](#checkpoints-results-and-model-cards)
 - [DVC workflow](#dvc-workflow)
 - [MLflow workflow](#mlflow-workflow)
@@ -29,7 +33,7 @@ mode in an activated virtual environment. `uv sync` installs this project in
 editable mode by default.
 
 For the CLI workflows documented here, install the `experiments` extra, which
-provides DVC and MLflow:
+provides DVC, MLflow, and Optuna:
 
 ```bash
 uv sync --extra experiments
@@ -43,13 +47,14 @@ uv sync --extra experiments --extra dev
 source .venv/bin/activate
 ```
 
-The documented environment includes MLflow even when tracking is disabled:
-some package imports depend on it. A base-only `uv sync` does not select the
-`experiments` extra.
+The documented environment includes MLflow and Optuna even when tracking is
+disabled and no study is configured: some package imports depend on them, and
+the SupCon and classifier training scripts import the study modules. A
+base-only `uv sync` does not select the `experiments` extra.
 
 | Extra | Purpose |
 | --- | --- |
-| `experiments` | DVC and MLflow. |
+| `experiments` | DVC, MLflow, and Optuna. |
 | `dev` | pytest, Hypothesis, coverage, and test helpers. |
 | `jupyter` | IPython kernel support for notebooks. |
 | `ollama` | Ollama client extra; the client is also a runtime dependency. The Ollama server is separate. |
@@ -112,7 +117,10 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`supcon_model.py`](src/smartrodent/supcon_model.py), [`supcon_training.py`](src/smartrodent/supcon_training.py) | `YoloSupConModel`, `TrainingConfiguration`, `SupConExperiment`, `load_training_configurations()`, `run_training()`. |
 | [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierBuilder`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and native Ultralytics training with configurable layer freezing. |
 | [`classifier_sweeps.py`](src/smartrodent/classifier_sweeps.py) | `ClassifierSweepConfiguration`, `ClassifierSweepExperiment`: prepare/run candidates and select the validated winner. |
-| [`two_stage_training.py`](src/smartrodent/two_stage_training.py) | `TwoStageConfiguration`, `TwoStageExperiment`: SupCon selection followed by a classifier sweep. |
+| [`search_space.py`](src/smartrodent/search_space.py) | `SearchSpace`: named Optuna distributions declared by `!suggest-float`, `!suggest-int`, and `!suggest-categorical` tags, including `!coupled-sweep` values that follow a categorical choice. |
+| [`hyperparameter_search.py`](src/smartrodent/hyperparameter_search.py) | `HyperparameterStudy`, `StudyConfiguration`, `StudyObjective`, `StudyResult`: trainer-independent Optuna studies that run, rank, and report trials of one search space. |
+| [`training_studies.py`](src/smartrodent/training_studies.py) | `SupConStudy`, `ClassifierStudy`, `is_study_configuration()`: bind `HyperparameterStudy` to the SupCon and classifier trainers, with one `trial_NNNN` directory per trial. |
+| [`two_stage_training.py`](src/smartrodent/two_stage_training.py) | `TwoStageConfiguration`, `TwoStageExperiment`: SupCon selection (fixed runs or a study) followed by a classifier sweep or study. |
 | [`experiment_support.py`](src/smartrodent/experiment_support.py), [`experiment_results.py`](src/smartrodent/experiment_results.py) | Transforms, schedulers, stopping, checkpoint storage, tracking/publication, and structured results. |
 | [`onnx_export.py`](src/smartrodent/onnx_export.py) | `OnnxExporter`: ONNX export of CE classifiers (probabilities) and SupCon encoders (pooled features). |
 | [`classifier_champions.py`](src/smartrodent/classifier_champions.py) | `ClassifierChampionRegistry`: provenance-aware historical comparison and promotion. |
@@ -123,6 +131,578 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 
 Some data-processing scripts also contain workflow-specific pandas/file
 operations. The modern training scripts delegate training to the library.
+
+## For developers: Project structure
+
+The diagrams below describe `src/smartrodent/` and the scripts that drive it.
+They are derived from the package's import statements and class definitions;
+update them when modules, public classes, or their relationships change.
+
+### Module dependencies
+
+Arrows point from the importing module to the imported module.
+
+#### Scripts and their library entry points
+
+Each script is a thin entry point that delegates to one or two library
+modules. `reconcile_filtered_data.py`, `materialize_filtered_data.py`, and
+`downsample_dataset.py` only use pandas and file operations and import nothing
+from `smartrodent`.
+
+```mermaid
+flowchart LR
+    subgraph scripts["scripts/"]
+        s_inat[download_inaturalist_data.py]
+        s_lila[download_lila_data.py]
+        s_filter[filter_data_vlm.py]
+        s_split[split_dataset.py]
+        s_sample[sample_training_dataset.py]
+        s_yolo[create_yolo_dataset.py]
+        s_det[train_yolo_detector.py]
+        s_supcon[train_supcon.py]
+        s_clf[train_classifier.py]
+        s_two[train_two_stage.py]
+    end
+
+    subgraph lib["src/smartrodent/"]
+        inaturalist
+        lila
+        filter
+        dataset_splitting
+        yolo_dataset_creation
+        config_utils
+        training
+        supcon_training
+        classifier_sweeps
+        training_studies
+        two_stage_training
+    end
+
+    s_inat --> inaturalist
+    s_lila --> lila
+    s_filter -->|via package root| filter
+    s_split --> dataset_splitting
+    s_sample --> dataset_splitting
+    s_yolo --> yolo_dataset_creation
+    s_yolo --> config_utils
+    s_det -->|via package root| training
+    s_supcon --> supcon_training
+    s_supcon --> training_studies
+    s_clf --> classifier_sweeps
+    s_clf --> training_studies
+    s_two --> two_stage_training
+```
+
+#### Data acquisition and preparation modules
+
+All data modules implement a protocol from `base` and read their settings
+through `config_utils.load_section`. Settings are validated with types from
+`training_validation`.
+
+```mermaid
+flowchart TB
+    subgraph data["Data acquisition and preparation"]
+        inaturalist
+        lila
+        filter
+        dataset_splitting
+        yolo_dataset_creation
+    end
+
+    subgraph foundation["Foundation"]
+        base
+        config_utils
+        training_validation
+        utils
+    end
+
+    inaturalist --> base
+    inaturalist --> config_utils
+    inaturalist --> training_validation
+    lila --> base
+    lila --> config_utils
+    lila --> training_validation
+    filter --> base
+    filter --> config_utils
+    filter --> training_validation
+    dataset_splitting --> base
+    dataset_splitting --> config_utils
+    dataset_splitting --> training_validation
+    yolo_dataset_creation --> base
+    yolo_dataset_creation --> config_utils
+    yolo_dataset_creation --> training_validation
+    yolo_dataset_creation --> utils
+    config_utils --> utils
+```
+
+#### Training modules
+
+Almost every training module imports `training_validation` (settings types
+and parsing), and the orchestration modules also import `config_utils`. To
+keep the graph readable, those foundation edges are left out here.
+`search_space` additionally imports `config_utils` and `utils`.
+
+```mermaid
+flowchart TB
+    subgraph orchestration["Sweeps, studies, and two-stage orchestration"]
+        two_stage_training
+        training_studies
+        classifier_sweeps
+        hyperparameter_search
+        search_space
+    end
+
+    subgraph stages["Single-stage experiments"]
+        supcon_training
+        classifier_training
+    end
+
+    subgraph models["Models and export"]
+        supcon_model
+        classifier_model
+        onnx_export
+    end
+
+    subgraph support["Shared experiment infrastructure"]
+        datasets
+        experiment_support
+        experiment_results
+        classifier_champions
+        model_card
+    end
+
+    subgraph standalone["Standalone"]
+        training["training (Ultralytics detector wrapper)"]
+        eval["eval (representation evaluation)"]
+    end
+
+    two_stage_training --> training_studies
+    two_stage_training --> classifier_sweeps
+    two_stage_training --> hyperparameter_search
+    two_stage_training --> supcon_training
+    two_stage_training --> classifier_training
+    two_stage_training --> experiment_support
+    two_stage_training --> experiment_results
+
+    training_studies --> hyperparameter_search
+    training_studies --> search_space
+    training_studies --> supcon_training
+    training_studies --> classifier_training
+    training_studies --> classifier_champions
+    training_studies --> experiment_support
+    training_studies --> experiment_results
+
+    classifier_sweeps --> classifier_training
+    classifier_sweeps --> experiment_results
+
+    hyperparameter_search --> search_space
+    hyperparameter_search --> experiment_results
+
+    supcon_training --> supcon_model
+    supcon_training --> onnx_export
+    supcon_training --> datasets
+    supcon_training --> experiment_support
+    supcon_training --> experiment_results
+    supcon_training --> model_card
+
+    classifier_training --> classifier_model
+    classifier_training --> onnx_export
+    classifier_training --> datasets
+    classifier_training --> experiment_support
+    classifier_training --> experiment_results
+    classifier_training --> classifier_champions
+    classifier_training --> model_card
+
+    classifier_model --> supcon_model
+    onnx_export --> supcon_model
+
+    classifier_champions --> experiment_support
+    classifier_champions --> experiment_results
+```
+
+`training_validation`, `datasets`, `model_card`, `supcon_model`, and `utils`
+import nothing else from the package, so they are the safest places to
+start reading.
+
+### Class diagrams
+
+Notation: `<|--` inheritance or protocol implementation, `*--` the owner
+creates and keeps the part as an attribute, `o--` the owner keeps a part
+built elsewhere, and `..>` creates temporarily, uses, or returns. `<<dataclass>>` marks frozen
+dataclasses. Only the main public methods are listed. The
+`TypedDict` settings schemas in `training_validation` are omitted.
+
+#### Data acquisition and preparation
+
+The `Configurable` protocol family in `base` defines the contracts. Scripts
+build every data component with `from_config()`.
+
+```mermaid
+classDiagram
+    direction TB
+
+    class Configurable {
+        <<Protocol>>
+        +from_config(config_path)$
+    }
+    class DatasetLoader {
+        <<Protocol>>
+        +retrieve_records()
+        +download_images()
+        +download()
+    }
+    class Filterable {
+        <<Protocol>>
+        +filter_data(records_by_species)
+    }
+    class YoloDatasetCreatorBase {
+        <<abstract>>
+        +create()
+    }
+
+    class InaturalistDataset
+    class LilaDataset
+    class VLMFilter {
+        +filter_data(records_by_species)
+        +parse_response(raw)
+        +close()
+    }
+    class FilterOllama {
+        +classify(path)
+    }
+    class FilterVLLM {
+        +classify(path)
+        +build_conversation(image_path)
+    }
+    class DatasetSplitter {
+        +split(frame)
+    }
+    class TrainingDatasetSampler {
+        +sample(frame)
+    }
+    class _SpeciesNetDatasetMixin {
+        <<mixin>>
+        +initialize_speciesnet()
+        +infer_batch(paths)
+    }
+    class _SpeciesNetDatasetCreatorBase {
+        +create()
+    }
+    class YoloDetectorDatasetCreatorFromSpeciesnet
+    class YoloClassifierDatasetCreatorFromSpeciesnet
+
+    Configurable <|-- DatasetLoader
+    Configurable <|-- Filterable
+    Configurable <|-- YoloDatasetCreatorBase
+    Configurable <|-- DatasetSplitter
+    Configurable <|-- TrainingDatasetSampler
+
+    DatasetLoader <|-- InaturalistDataset
+    DatasetLoader <|-- LilaDataset
+
+    Filterable <|-- VLMFilter
+    VLMFilter <|-- FilterOllama
+    VLMFilter <|-- FilterVLLM
+
+    YoloDatasetCreatorBase <|-- _SpeciesNetDatasetCreatorBase
+    _SpeciesNetDatasetMixin <|-- _SpeciesNetDatasetCreatorBase
+    _SpeciesNetDatasetCreatorBase <|-- YoloDetectorDatasetCreatorFromSpeciesnet
+    _SpeciesNetDatasetCreatorBase <|-- YoloClassifierDatasetCreatorFromSpeciesnet
+```
+
+#### Single-stage experiments: SupCon and CE classifier
+
+Each experiment is built from a frozen configuration dataclass and returns an
+`ExperimentResult`. The SupCon stage runs its own PyTorch loop. The classifier
+stage plugs custom subclasses into Ultralytics' native classification trainer.
+
+```mermaid
+classDiagram
+    direction LR
+
+    class TrainingConfiguration {
+        <<dataclass>>
+        +from_yaml(path)$
+        +from_mapping(values)$
+        +to_dict()
+    }
+    class SupConExperiment {
+        +run()
+        +run_with_result(epoch_callback)
+    }
+    class ClassifierConfiguration {
+        <<dataclass>>
+        +from_yaml(path)$
+        +from_mapping(values)$
+        +native_freeze(layer_count)
+        +to_dict()
+    }
+    class ClassifierExperiment {
+        +run()
+        +run_with_result(epoch_callback)
+        +champion_registry
+    }
+    class ExperimentResult {
+        <<dataclass>>
+        +best_checkpoint
+        +best_value
+        +to_dict()
+    }
+
+    class YoloSupConModel {
+        +from_checkpoint(path)$
+        +forward(images)
+        +finalize()
+    }
+    class YoloClassifierBuilder {
+        +initialize(...)$
+        +prepare_head(...)$
+        +load_native(path)$
+    }
+    class ClassificationTrainer {
+        <<Ultralytics>>
+    }
+    class ClassificationValidator {
+        <<Ultralytics>>
+    }
+    class Dataset {
+        <<PyTorch>>
+    }
+    class Module {
+        <<PyTorch>>
+    }
+    class _ClassifierTrainer
+    class _ClassifierValidator
+    class ImageDataset
+    class MultiViewImageDataset
+    class ImageTransforms {
+        +training()
+        +validation()
+    }
+    class CheckpointStore {
+        +save(...)
+    }
+    class EarlyStopping
+    class SchedulerConfiguration {
+        +build(optimizer)
+    }
+    class MlflowConfiguration {
+        <<dataclass>>
+        +start_run()
+    }
+    class ModelPublication {
+        +publish(...)
+    }
+    class ClassifierChampionRegistry {
+        +promote(result)
+    }
+    class OnnxExporter {
+        +classifier(checkpoint)
+        +encoder(checkpoint)
+    }
+
+    SupConExperiment o-- TrainingConfiguration
+    TrainingConfiguration o-- MlflowConfiguration
+    TrainingConfiguration o-- SchedulerConfiguration
+    SupConExperiment ..> YoloSupConModel : trains
+    SupConExperiment *-- MultiViewImageDataset
+    SupConExperiment *-- ImageDataset
+    SupConExperiment *-- ImageTransforms
+    SupConExperiment *-- CheckpointStore
+    SupConExperiment ..> EarlyStopping
+    SupConExperiment *-- OnnxExporter
+    SupConExperiment ..> ModelPublication
+    SupConExperiment ..> ExperimentResult
+
+    Dataset <|-- ImageDataset
+    ImageDataset <|-- MultiViewImageDataset
+    Module <|-- YoloSupConModel
+    ClassificationTrainer <|-- _ClassifierTrainer
+    ClassificationValidator <|-- _ClassifierValidator
+
+    ClassifierExperiment o-- ClassifierConfiguration
+    ClassifierConfiguration o-- MlflowConfiguration
+    ClassifierExperiment *-- ImageDataset
+    ClassifierExperiment *-- ImageTransforms
+    ClassifierExperiment *-- OnnxExporter
+    ClassifierExperiment ..> _ClassifierTrainer : trains with
+    _ClassifierTrainer ..> _ClassifierValidator
+    ClassifierExperiment ..> YoloClassifierBuilder
+    ClassifierExperiment ..> ClassifierChampionRegistry
+    ClassifierExperiment ..> ModelPublication
+    ClassifierExperiment ..> ExperimentResult
+
+    YoloClassifierBuilder ..> YoloSupConModel : loads SupCon encoder
+    OnnxExporter ..> YoloSupConModel : exports pooled features
+```
+
+#### Sweeps, hyperparameter studies, and two-stage training
+
+Fixed sweeps expand YAML `!sweep` and `!coupled-sweep` tags into candidate
+configurations. Optuna studies sample a `SearchSpace` built from
+`!suggest-float`, `!suggest-int`, and `!suggest-categorical` tags. `_StageStudy` adapts
+the generic `HyperparameterStudy` to one training stage. `TwoStageExperiment`
+chains a SupCon stage (fixed runs or a study) into a classifier stage (a sweep
+or a study) through the selected encoder checkpoint.
+
+```mermaid
+classDiagram
+    direction TB
+
+    class TwoStageConfiguration {
+        <<dataclass>>
+        +from_yaml(path)$
+        +classifier_sweep_configuration(checkpoint)
+        +classifier_study(checkpoint)
+    }
+    class StageStudies {
+        <<dataclass>>
+    }
+    class TwoStageExperiment {
+        +run() TwoStageResult
+    }
+    class TwoStageResult {
+        <<dataclass>>
+    }
+
+    class ClassifierSweepConfiguration {
+        <<dataclass>>
+        +from_yaml(path)$
+        +with_supcon_encoder(checkpoint)
+    }
+    class ClassifierSweepExperiment {
+        +bind_supcon_encoder(...)
+        +run() ClassifierSweepResult
+    }
+    class ClassifierSweepResult {
+        <<dataclass>>
+    }
+
+    class _StageStudy {
+        <<abstract>>
+        +from_yaml(path)$
+        +preflight()
+        +run() StudyResult
+    }
+    class SupConStudy
+    class ClassifierStudy
+
+    class HyperparameterStudy {
+        +preflight()
+        +run() StudyResult
+    }
+    class SearchSpace {
+        +from_document(...)$
+        +sample(trial)
+        +resolve(params)
+    }
+    class StudyConfiguration {
+        <<dataclass>>
+        +build_sampler()
+        +build_pruner()
+    }
+    class StudyComponent {
+        <<dataclass>>
+        +build(module, base)
+    }
+    class StudyObjective {
+        <<dataclass>>
+        +direction
+        +validate(result)
+    }
+    class StudyResult {
+        <<dataclass>>
+    }
+
+    class SupConExperiment
+    class ClassifierExperiment
+    class TrainingConfiguration
+    class ClassifierConfiguration
+    class ExperimentResult
+
+    TwoStageExperiment o-- TwoStageConfiguration
+    TwoStageConfiguration *-- StageStudies
+    TwoStageConfiguration *-- TrainingConfiguration
+    TwoStageConfiguration *-- ClassifierSweepConfiguration
+    TwoStageConfiguration *-- SupConStudy
+    TwoStageConfiguration ..> ClassifierStudy : builds per encoder
+    TwoStageExperiment *-- SupConExperiment
+    TwoStageExperiment *-- ClassifierSweepExperiment
+    TwoStageExperiment ..> TwoStageResult
+
+    ClassifierSweepExperiment o-- ClassifierSweepConfiguration
+    ClassifierSweepConfiguration *-- ClassifierConfiguration
+    ClassifierSweepExperiment *-- ClassifierExperiment
+    ClassifierSweepExperiment ..> ClassifierSweepResult
+
+    _StageStudy <|-- SupConStudy
+    _StageStudy <|-- ClassifierStudy
+    _StageStudy *-- StudyConfiguration
+    _StageStudy *-- SearchSpace
+    _StageStudy *-- StudyObjective
+    _StageStudy ..> HyperparameterStudy : creates per run
+    SupConStudy ..> SupConExperiment : runs trials
+    ClassifierStudy ..> ClassifierExperiment : runs trials
+
+    HyperparameterStudy o-- SearchSpace
+    HyperparameterStudy o-- StudyConfiguration
+    HyperparameterStudy o-- StudyObjective
+    HyperparameterStudy ..> StudyResult
+    StudyConfiguration *-- StudyComponent
+
+    StudyResult o-- ExperimentResult
+    ClassifierSweepResult o-- ExperimentResult
+    TwoStageResult o-- ExperimentResult
+```
+
+#### Detector wrapper and representation evaluation
+
+These classes stand apart from the experiment framework above.
+`YoloDetectionTrainer` wraps Ultralytics detector training, tuning, and
+export. The `eval` classes extract features from a fixed image subset and
+compare them with t-SNE (see
+[`notebooks/`](notebooks/)).
+
+```mermaid
+classDiagram
+    direction LR
+
+    class YoloDetectionTrainer {
+        +from_config(config_path)$
+        +train()
+        +tune()
+        +export()
+        +dataframe()
+    }
+    class MlflowTrackingConfiguration {
+        <<dataclass>>
+        +configure(operation)
+    }
+
+    class Dataset {
+        <<PyTorch>>
+    }
+    class EvaluationImages
+    class FeatureExtractor {
+        +extract(dataset) EvaluationFeatures
+    }
+    class EvaluationFeatures {
+        <<dataclass>>
+        +pooled
+        +projected
+        +labels
+    }
+    class TsneComparison {
+        +project(features)
+        +plot(...)
+    }
+
+    YoloDetectionTrainer *-- MlflowTrackingConfiguration
+    Dataset <|-- EvaluationImages
+    FeatureExtractor ..> EvaluationImages : reads
+    FeatureExtractor ..> EvaluationFeatures : produces
+    TsneComparison ..> EvaluationFeatures : projects
+```
 
 ## CLI reference
 
@@ -193,10 +773,15 @@ These commands initialize models and start actual training. They do not expose
 
 | Command | Workflow and reported output |
 | --- | --- |
-| `python scripts/train_supcon.py configs/train_supcon_config.yaml` | Fresh standalone SupCon runs; prints each final `last.pt` path. |
-| `python scripts/train_classifier.py configs/train_classifier_config.yaml` | Fresh standalone CE classifier candidates; prints final checkpoints and, with validation, the selected `best.pt`. |
-| `python scripts/train_two_stage.py configs/train_two_stage_config.yaml` | SupCon sweep, encoder selection, then CE sweep; prints final classifier checkpoints and the selected classifier's `best.pt`. |
+| `python scripts/train_supcon.py configs/train_supcon_config.yaml` | Fresh standalone SupCon runs, or an Optuna study; prints each final `last.pt` path and, for a study, the selected `best.pt`. |
+| `python scripts/train_classifier.py configs/train_classifier_config.yaml` | Fresh standalone CE classifier candidates, or an Optuna study; prints final checkpoints and, with validation, the selected `best.pt`. |
+| `python scripts/train_two_stage.py configs/train_two_stage_config.yaml` | SupCon sweep or study, encoder selection, then CE sweep or study; prints final classifier checkpoints and the selected classifier's `best.pt`. |
 | `python scripts/train_yolo_detector.py configs/train_yolo_detector_config.yaml` | Ultralytics detector training followed by the configured export; prints the export location. |
+
+`train_supcon.py` and `train_classifier.py` run an Optuna study instead of the
+configured runs when the configuration has a top-level `tuning` section. In
+`train_two_stage.py`, the root `tuning` section chooses the stages that run as
+studies. See [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna).
 
 The detector script is separate from the modern SupCon/CE experiment
 implementation. It currently sets `CUDA_VISIBLE_DEVICES=0` in its process;
@@ -226,15 +811,15 @@ which uses `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
 | Splitting/sampling/downsampling | Input/output metadata roots, record discovery, split/sampling rules, seeds, or per-class caps. |
 | YOLO dataset creators | Exactly one key under `data`: `YoloDetectorDatasetCreatorFromSpeciesnet` or `YoloClassifierDatasetCreatorFromSpeciesnet`. |
 | Modern standalone training | Top-level data/output, transforms, validation, tracking, and model/initialization settings; SupCon uses AdamW options, CE uses native `train_kwargs`. |
-| Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, and optional shared `mlflow`. |
+| Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, optional shared `mlflow`, and optional per-stage `tuning`. |
+| Optuna studies | A standalone SupCon or CE configuration with `!suggest-*` tags plus a top-level `tuning` section; see [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna). |
 | Ultralytics detector wrapper | Dataset/model, trainer options, native train/tune/export kwargs, and optional wrapper-specific MLflow settings. |
 | Model cards | [`model_card_template.yaml`](configs/model_card_template.yaml): model, classes, validation, provenance, and editable narrative. |
 
 ### Sweeps and coupled values
 
-The modern training CLIs and Ultralytics classifier train/tune scripts use the
-custom loader in `smartrodent.config_utils`. Independent `!sweep` nodes form a
-Cartesian product. `!coupled-sweep` pairs values with another sweep by position,
+The modern training CLIs and `create_yolo_dataset.py` use the custom loader in
+`smartrodent.config_utils`. Independent `!sweep` nodes form a Cartesian product. `!coupled-sweep` pairs values with another sweep by position,
 without adding an independent dimension:
 
 ```yaml
@@ -257,11 +842,15 @@ root. In a two-stage document, the corresponding target is
 choose one value. Stage sweeps in the two-stage workflow expand independently;
 classifier choices do not multiply SupCon training runs.
 
-The loader also provides `!range`, `!random_uniform`, `!reference`, and
-`!pyobject` helpers. These serve the broader configuration/tuning machinery;
-they are not all expanded as Cartesian training dimensions by `ConfigHandler`.
-In particular, `!random_uniform` draws values while loading and `!pyobject`
-imports Python objects. Only load trusted configuration files. Plain
+A grid sweep and an Optuna study are mutually exclusive within one stage: grid
+expansion rejects `!suggest-float`, `!suggest-int`, and `!suggest-categorical`
+tags, and a study rejects `!sweep`. In a study, `!coupled-sweep` follows a
+`!suggest-categorical` choice instead; see
+[Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna).
+
+The loader also provides `!reference` and `!pyobject` helpers, which
+`ConfigHandler` does not expand as training dimensions. `!pyobject` imports
+Python objects while loading, so only load trusted configuration files. Plain
 `yaml.safe_load()` does not provide these custom tags without registering the
 project loader.
 
@@ -330,6 +919,12 @@ classifier_sweep = ClassifierSweepConfiguration.from_yaml(
 pipeline = TwoStageConfiguration.from_yaml("configs/train_two_stage_config.yaml")
 print(len(supcon_runs), len(classifier_sweep.configurations))
 ```
+
+Study configurations prevalidate the same way: `SupConStudy.from_yaml(path)` and
+`ClassifierStudy.from_yaml(path)` from `smartrodent.training_studies` parse the
+`tuning` section and search space and build every prevalidated candidate. They
+do not open the Optuna storage or start trials. `is_study_configuration(path)`
+reports whether a file has a `tuning` section.
 
 Parsing is not a complete donor/architecture/device compatibility check. Creating
 an experiment additionally prepares datasets, transforms, scorers, and templates;
@@ -514,7 +1109,9 @@ SupCon and classifier sweeps are not a cross-stage Cartesian product. With S
 SupCon candidates and C classifier candidates, execution trains S SupCon models
 and C classifiers, not S*C classifiers. Stage failures propagate rather than
 being skipped. Two-stage selection uses existing validation data, never a test
-split.
+split. Either stage can instead run as an Optuna study through the root
+`tuning` section. Its winner then takes the place of the sweep winner in steps
+3–5; see [Studies in the two-stage pipeline](#studies-in-the-two-stage-pipeline).
 
 ### Ultralytics detector wrapper
 
@@ -525,6 +1122,205 @@ The `train_yolo_detector.py` command delegates training to Ultralytics through
 `project`/`name` settings, not the modern experiment directory convention.
 The wrapper uses a different MLflow schema and does not implement the modern
 classifier champion-comparison workflow.
+
+## Hyperparameter studies with Optuna
+
+Instead of a grid sweep, the SupCon and CE stages can sample their settings
+with [Optuna](https://optuna.org/). A study configuration is an ordinary stage
+configuration. Some of its values are replaced by search tags, and a `tuning`
+section holds the study settings. Each trial resolves the tags to one concrete
+configuration, trains it with the existing trainer, and is ranked by that
+trainer's tracked metric and mode.
+
+There is no study example among the sample configurations. Add tags and a
+`tuning` section to a copy of
+[`train_supcon_config.yaml`](configs/train_supcon_config.yaml) or
+[`train_classifier_config.yaml`](configs/train_classifier_config.yaml):
+
+```yaml
+# Fragments within a standalone SupCon configuration:
+optimizer:
+  lr: !suggest-float {low: 1.0e-5, high: 1.0e-3, log: true}
+dropout: !suggest-categorical {choices: [0.0, 0.1, 0.3]}
+
+tuning:
+  study_name: supcon-lr-dropout
+  storage: sqlite:///optuna.db  # null = in-memory, cannot be resumed
+  n_trials: 20                  # Trials to run in this invocation.
+  sampler:
+    name: TPESampler
+    parameters: {seed: 42}
+  pruner:                       # null = never prune
+    name: MedianPruner
+    parameters: {n_warmup_steps: 3}
+  load_if_exists: true          # Optional, default false.
+  timeout: null                 # Optional wall-clock budget in seconds.
+```
+
+```bash
+python scripts/train_supcon.py path/to/supcon_study.yaml
+python scripts/train_classifier.py path/to/classifier_study.yaml
+```
+
+### Search tags
+
+Parameters are named by their full dotted path, for example `optimizer.lr` or
+`transforms.random_resized_crop.scale[0]`.
+
+| Tag | Settings | Optuna call |
+| --- | --- | --- |
+| `!suggest-float` | `low`, `high`, optional `step` and `log` | `trial.suggest_float` |
+| `!suggest-int` | Integer `low`, `high`, optional `step` and `log` | `trial.suggest_int` |
+| `!suggest-categorical` | `choices`: a list of unique values (`1`, `1.0`, and `true` count as equal) | `trial.suggest_categorical` |
+| `!coupled-sweep` | `target`: dotted path of a `!suggest-categorical`; `values`: one per choice | None. The value follows the target's sampled choice. |
+
+Settings are strict. Booleans or fractional values for integer bounds,
+nonfinite bounds, unknown keys, and a range that is not a multiple of `step`
+are rejected, not coerced. A study needs at least one `!suggest-*` tag and
+cannot contain `!sweep`. For example, a classifier study can tie `freeze` to a
+sampled head mode:
+
+```yaml
+initialization:
+  encoder: {source: supcon, checkpoint: runs/supcon/best.pt}
+  head:
+    replace: !suggest-categorical {choices: [linear, full]}
+    source: random
+    checkpoint: null
+freeze: !coupled-sweep
+  target: initialization.head.replace
+  values: [11, 10]
+```
+
+Settings that define comparability or locations cannot be searched:
+`tracked_metric`, `tracked_mode`, `validation_metrics`, `train_dataset`,
+`validation_dataset`, `class_names`, `output_directory`, and `mlflow`. SupCon
+studies also keep `temperature` fixed, as SupCon sweeps do. A study requires
+`validation_dataset`, because trials are ranked on validation data.
+
+### The `tuning` section
+
+| Key | Meaning |
+| --- | --- |
+| `study_name` | Optuna study name; also the resume key in persistent storage. |
+| `storage` | Optuna storage URL such as `sqlite:///optuna.db`, or `null` for an in-memory study. Relative SQLite paths depend on the working directory. |
+| `n_trials` | Positive number of trials to run in this invocation; a resumed study adds that many. |
+| `sampler` | `name` of a concrete class in `optuna.samplers` and its constructor `parameters` (default `{}`). |
+| `pruner` | `name` of a class in `optuna.pruners` with `parameters`, or `null` to never prune. |
+| `load_if_exists` | Optional, default `false`. Resume an existing study of the same name instead of failing. |
+| `timeout` | Optional positive seconds. Optuna starts no new trial after this budget. |
+
+Sampler and pruner settings are constructed while the configuration loads, so
+a wrong name or parameter fails before any training.
+
+### Prevalidation, trials, and selection
+
+Before the first trial, the study builds a reference configuration with every
+parameter at its first choice or low end. It then builds one candidate per other
+choice or high end, varying one parameter at a time. An invalid bound or choice
+therefore fails immediately and names the parameter. Invalid *combinations* of
+individually valid values are found only when sampled.
+
+Each trial trains in its own `trial_NNNN` directory under `output_directory`.
+After each epoch the trainer reports its tracked validation value to the
+pruner, so a configured pruner can stop unpromising trials early.
+
+| Trial outcome | Effect |
+| --- | --- |
+| Completed | Ranked by the configured tracked metric and direction. |
+| Pruned | Recorded as `PRUNED`; the study continues. |
+| Invalid sampled combination, for example a freeze that does not fit the head | Recorded as `FAIL` with its error; the study continues. |
+| Nonfinite loss or tracked metric (`FloatingPointError`) | Recorded as `FAIL`; the study continues. |
+| Any other error | Recorded as `FAIL`, `study.yaml` is written, and the error stops the study. |
+
+The winner is the best completed trial over the whole study, including trials
+from earlier invocations; exact ties keep the earliest trial. A study with no
+completed trial raises an error. `study.yaml` in `output_directory` is rewritten
+after every trial. It lists each trial's number, state, sampled parameters,
+value, intermediate values, result, and error, plus the selected trial.
+
+```text
+<output_directory>/
+  study.yaml
+  trial_0000/        # Same artifacts as one standalone SupCon or CE run
+  trial_0001/
+  ...
+```
+
+### Resuming a study
+
+With persistent `storage` and `load_if_exists: true`, rerunning the same
+configuration resumes the study and runs another `n_trials`. A resumed study
+must match what was recorded when it was created. Otherwise it is refused, and
+you need a new `study_name` and `output_directory`:
+
+- the search space (distributions and couplings),
+- the objective: tracked metric, mode, and resolved validation path,
+- the stored optimization direction,
+- for classifier studies, the SHA-256 of every encoder checkpoint, so moving an
+  unchanged file is allowed.
+
+An existing study with `load_if_exists: false` is refused rather than extended.
+An `output_directory` whose `study.yaml` names another study is also refused,
+because its trial directories would be overwritten.
+
+### Studies in the two-stage pipeline
+
+The two-stage root accepts a `tuning` mapping with one optional entry per
+stage. A stage named there runs as a study. An omitted stage runs as a grid
+sweep, and an empty `tuning` mapping is an error. Stage sections must not
+contain their own `tuning` key.
+
+```yaml
+classifier:
+  initialization:
+    encoder:
+      source: selected_supcon
+    head:
+      replace: !suggest-categorical {choices: [linear, full]}
+      source: random
+      checkpoint: null
+  freeze: !coupled-sweep
+    target: classifier.initialization.head.replace  # Full path from the root.
+    values: [11, 10]
+  train_kwargs:
+    lr0: !suggest-float {low: 1.0e-4, high: 1.0e-2, log: true}
+  # ... remaining classifier settings ...
+
+tuning:
+  classifier:  # Add supcon: for a SupCon study; omit a stage for its grid sweep.
+    study_name: two-stage-classifier
+    storage: sqlite:///optuna.db
+    n_trials: 10
+    sampler: {name: TPESampler, parameters: {seed: 42}}
+    pruner: null
+```
+
+- A SupCon study writes to `<output_directory>/supcon/` (`study.yaml` and
+  `trial_NNNN/`). Its winning trial's `best.pt` becomes the encoder.
+- A classifier study is keyed by the selected encoder. It runs in
+  `<output_directory>/classifier/<key>/` under the study name
+  `<study_name>-<key>`, where `<key>` is the first 12 hex characters of the
+  encoder's SHA-256. A new SupCon winner therefore starts a fresh classifier
+  study, and an unchanged winner can resume its own.
+- SupCon-study storage and output conflicts are checked before any training.
+  One case still fails late: a persistent classifier study with
+  `load_if_exists: false` whose rerun selects the same encoder fails only after
+  SupCon has trained.
+
+### Studies and MLflow
+
+With `mlflow` configured, a standalone study opens one parent run, named after
+its `output_directory`. Each trial is a nested child run. The parent logs
+`study.yaml` and a `best_validation_<tracked_metric>` metric. In the two-stage
+pipeline, trials are children of the pipeline run instead.
+
+With a classifier registry configured, every completed trial registers its
+model, as sweep candidates do. Only the study winner is compared against the
+champion alias, after all trials, using the
+[promotion rules](#registration-and-classifier-champion-promotion). SupCon
+trials follow standalone SupCon registration semantics. Two-stage SupCon trials
+are never registered.
 
 ## Checkpoints, results, and model cards
 
@@ -660,8 +1456,10 @@ print(names[int(output.argmax(axis=1)[0])])
 
 For library-driven execution, use `SupConExperiment(configuration).run_with_result()`,
 `ClassifierExperiment(configuration).run_with_result()`,
-`ClassifierSweepExperiment(sweep).run()`, or
-`TwoStageExperiment(configuration).run()`. These **execute training**. The
+`ClassifierSweepExperiment(sweep).run()`,
+`SupConStudy.from_yaml(path).run()`, `ClassifierStudy.from_yaml(path).run()`, or
+`TwoStageExperiment(configuration).run()`. These **execute training**. Studies
+return a `StudyResult` with every completed trial result and the selected one. The
 single-experiment `run()` methods return `last.pt`; structured results expose
 best/last paths, best epoch/value, tracked metric/direction, validation identity,
 and tracking information.
@@ -726,8 +1524,7 @@ DVC declares unsuffixed paths. For example, `filter_animal` declares
 `datasets/stage1_filtered_animal_srilanka`. The detector-creation config
 currently reads stage 6 and writes `stage8_yolo_detector_not_oversampled`,
 whereas its DVC stage declares a stage-7 dependency and `stage8_yolo_detector`
-output. Classifier training/tuning project paths also differ from declared DVC
-outputs. Align configs and stage `deps`/`outs` for the intended dataset before
+output. Align configs and stage `deps`/`outs` for the intended dataset before
 reproduction; DVC does not rewrite paths inside YAML for you.
 
 The three modern training scripts (`train_supcon.py`, `train_classifier.py`,
@@ -757,7 +1554,7 @@ dvc repro download_lila
 `dvc repro` is not a dry run. It can download large datasets/weights, run VLM or
 SpeciesNet inference, replace managed outputs, and train/export models. A bare
 `dvc repro` considers the whole declared pipeline, including both download
-branches and classifier tuning. Human decisions needed by reconciliation must
+branches and detector training. Human decisions needed by reconciliation must
 already exist; automatic reproduction cannot replace review.
 
 DVC uses declared dependencies, parameters, output hashes, and a generated
@@ -821,6 +1618,9 @@ working directory.
   The parent logs configuration/selection summaries; children log stage metrics
   and selected best-model artifacts. SupCon children are encoder candidates,
   not registered CE classifier versions.
+- **Optuna study:** standalone, one study parent run with one child run per
+  trial. In the two-stage pipeline, trials are children of the pipeline run. See
+  [Studies and MLflow](#studies-and-mlflow).
 
 Runs record stage-specific parameters and epoch metrics, selected best values
 and epochs, source Git/data tags, and best checkpoint/cards (plus `best.onnx` with `onnx_export`). CE metrics use
@@ -917,7 +1717,10 @@ weights and use substantial GPU resources; enable them intentionally.
 | Unknown YAML tag | Use a sweep-aware CLI/library loader; not every script accepts custom training tags. |
 | Dataset class is missing/empty | Verify exact species-directory names, selected population, split paths, and indexed suffixes. Modern datasets default to `.jpg` and `.png`. |
 | Head transfer or checkpoint loading fails | Match source format, donor dimensions, and exact labels/IDs. Starting ImageNet weights are not automatically valid species-head donors. |
-| CUDA/backend failure | Check installed hardware/runtime and modern `device` settings; legacy YOLO scripts mask visible GPUs to device 0. |
+| CUDA/backend failure | Check installed hardware/runtime and modern `device` settings; `train_yolo_detector.py` masks visible GPUs to device 0. |
+| `!suggest-*` tag rejected in a sweep, or `!sweep` rejected in a study | One stage is either a grid sweep or a study. Add a `tuning` section (two-stage: a `tuning` entry for that stage) or replace the tags. |
+| Study refuses to start or resume | The `study_name` already exists without `load_if_exists: true`, or its stored search space, objective, direction, or encoder checksums differ. Use a new `study_name` and `output_directory`. |
+| Study ends with no completed trial | Inspect each trial's `state` and `error` in `study.yaml`; pruned and failed trials are never selected. |
 | No validated winner or champion | Check validation configuration; training-only results are not validated candidates. |
 | Champion metadata rejected | Compare scorer/options, split identity, labels, direction, and revision; do not erase provenance simply to force promotion. |
 | DVC reports missing outputs or ignores a changed input | Compare the script's configured paths with declared `deps`/`outs` and listed code dependencies; current example configs and graph are not fully aligned. |
