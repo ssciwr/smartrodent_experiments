@@ -81,6 +81,7 @@ def test_training_only_result_is_not_eligible_for_automatic_ranking():
         ({"tracked_metric": "supcon_loss_mean"}, "metric"),
         ({"tracked_mode": "min"}, "mode"),
         ({"validation_dataset": Path("/different-data/val")}, "validation"),
+        ({"validation_dataset": None}, "validation"),
     ],
 )
 def test_incompatible_tracked_results_cannot_be_ranked_together(updates, message):

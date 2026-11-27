@@ -5,6 +5,7 @@ import requests
 from http_test_support import DROP
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
 from smartrodent.http_session import retrying_session
 
 

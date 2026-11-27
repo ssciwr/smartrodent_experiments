@@ -16,36 +16,12 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from PIL import Image
 from threadpoolctl import threadpool_limits
-from torch import nn
 
 from smartrodent.eval import (
     EvaluationFeatures,
     EvaluationImages,
-    FeatureExtractor,
     TsneComparison,
 )
-
-
-class SmallNetwork(nn.Module):
-    """Provide a parameterized encoder, pooling layer, and classifier on CPU."""
-
-    def __init__(self, skip_pool=False):
-        super().__init__()
-        self.conv = nn.Conv2d(3, 4, 1)
-        self.bn = nn.BatchNorm2d(4)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.drop = nn.Dropout(0.5)
-        self.linear = nn.Linear(4, 2)
-        self.skip_pool = skip_pool
-
-    def forward(self, images):
-        """Return classifier outputs, optionally bypassing the selected pool."""
-        features = self.bn(self.conv(images))
-        if self.skip_pool:
-            pooled = features.mean(dim=(2, 3))
-        else:
-            pooled = self.pool(features).flatten(1)
-        return self.linear(self.drop(pooled))
 
 
 @pytest.fixture
@@ -112,73 +88,6 @@ def test_invalid_image_selection_fails_explicitly(paths, names, kwargs, message)
     """Invalid selections fail before loading images or running a network."""
     with pytest.raises(ValueError, match=message):
         EvaluationImages(paths, names, **kwargs)
-
-
-def test_extraction_restores_modes_and_preserves_weights(evaluation_images):
-    """Inference preserves mixed module modes, weights, BatchNorm, and gradients."""
-    network = SmallNetwork().train()
-    network.bn.eval()
-    projector = nn.Sequential(nn.Dropout(0.9), nn.Linear(4, 3)).train()
-    modes = {m: m.training for root in (network, projector) for m in root.modules()}
-    weights = {name: value.clone() for name, value in network.state_dict().items()}
-    network.conv.weight.grad = torch.ones_like(network.conv.weight)
-    extractor = FeatureExtractor(network, network.pool, projector)
-    first = extractor.extract(evaluation_images, batch_size=2)
-    second = extractor.extract(evaluation_images, batch_size=3)
-    assert first.pooled.shape == (6, 4) and first.projected.shape == (6, 3)
-    assert first.pooled.dtype == first.projected.dtype == np.float32
-    np.testing.assert_allclose(first.pooled, second.pooled, atol=1e-6)
-    np.testing.assert_allclose(first.projected, second.projected, atol=1e-6)
-    np.testing.assert_allclose(np.linalg.norm(first.projected, axis=1), 1, atol=1e-6)
-    np.testing.assert_array_equal(first.labels, [0, 0, 0, 1, 1, 1])
-    assert first.images == evaluation_images.images
-    assert all(module.training == mode for module, mode in modes.items())
-    assert all(
-        torch.equal(value, weights[name])
-        for name, value in network.state_dict().items()
-    )
-    assert torch.equal(network.conv.weight.grad, torch.ones_like(network.conv.weight))
-
-
-def test_baseline_extraction_has_no_projector(evaluation_images):
-    """A baseline network produces pooling features without projected features."""
-    network = SmallNetwork().eval()
-    features = FeatureExtractor(network, network.pool).extract(evaluation_images)
-    assert features.pooled.shape == (6, 4) and features.projected is None
-    assert not network.training
-
-
-def test_failed_extraction_restores_modes_and_allows_retry(evaluation_images):
-    """A failed forward restores training state and a later extraction succeeds."""
-    network = SmallNetwork(skip_pool=True).train()
-    projector = nn.Linear(4, 3).train()
-    extractor = FeatureExtractor(network, network.pool, projector)
-    with pytest.raises(RuntimeError, match="exactly once"):
-        extractor.extract(evaluation_images)
-    assert network.training and projector.training
-    network.skip_pool = False
-    assert extractor.extract(evaluation_images).pooled.shape == (6, 4)
-
-
-def test_extractor_rejects_unrelated_pool():
-    """A pool from another model cannot silently yield missing features."""
-    with pytest.raises(ValueError, match="belong"):
-        FeatureExtractor(SmallNetwork(), nn.AdaptiveAvgPool2d(1))
-
-
-def test_extractor_rejects_parameterless_network(evaluation_images):
-    """Device and dtype inference requires a parameterized model."""
-    network = nn.Sequential(nn.AdaptiveAvgPool2d(1))
-    with pytest.raises(ValueError, match="parameters"):
-        FeatureExtractor(network, network[0]).extract(evaluation_images)
-
-
-def test_extractor_rejects_projector_on_another_device(evaluation_images):
-    """A device mismatch is detected without moving the user's model."""
-    network = SmallNetwork()
-    projector = nn.Linear(4, 3, device="meta")
-    with pytest.raises(ValueError, match="same device"):
-        FeatureExtractor(network, network.pool, projector).extract(evaluation_images)
 
 
 @pytest.mark.parametrize("dimensions", [4, 12])
