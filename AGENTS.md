@@ -1,8 +1,10 @@
 # Rodent-experiments
+
 The "rodent-experiments" project is a python-based data science project dealing with
 object-detection and classification of camera trap images of small animals: rodents, snakes, some birds, both for RGB only and RGB-T.
 
 ## Tech stack
+
 - python >= 3.12
 - DVC for data management and pipeline definition
 - pandas and matplotlib for data analysis
@@ -16,6 +18,7 @@ object-detection and classification of camera trap images of small animals: rode
 - pytest as general testing framework and 'Hypothesis' for proprety-based testing
 
 ## Structure
+
 - dvc.yaml: Contains pipeline definition
 - scripts: Contains excecutable scripts. These make up the steps of the dvc pipeline
 - datasets: Contains image data, raw and processed
@@ -23,48 +26,62 @@ object-detection and classification of camera trap images of small animals: rode
 - src/smartrodent: Contains the library code
 
 ## Usage
+
 This project uses DVC as its core driver.
+
 - A DVC pipeline is defined in ./dvc.yaml which can be used to find out the steps
 - Always run from an activated virtual environment with this project installed in it in editable mode (because this is still WIP)
 - Run a step using: `dvc repor 'step_name'`
 - Run tests with `pytest --cov=smartrodent --cov-report=term-missing` to run the tests and get line coverage report and `pytest --cov=smartrodent --cov-report=term-missing --cov-branch` to get branch coverage. Both are important
 
 ## Restrictions
+
 - do not commit anything to git unless told so explicitly
 - never commit secrets into git, e.g., API keys
 - never edit code without asking first and giving a clear step-by-step plan first
 - never modify the data in the ./datasets directory unless explicitly told to do so. It contains the data of the project in various stages or. processing and must hence be held sacred! If told to modify it, raise the concern that this is normally forbidden first, plan out a step-by-step workflow and ask for explicit permission to execute it first.
 - config files are treated as ephemeral and do not need tests
 
+## Role separation
+
+The main agent acts as an orchestrator, not an implementer.
+
+- Delegate implementation, testing and refactoring.
+- Delegate verification to independent reviewers.
+- Retain responsibility for architectural coherence.
+- Resolve conflicts between subagents.
+- Escalate specification ambiguities and consequential
+  architectural decisions to the human.
+- Do not make unapproved changes to the specification.
+- Require concise, evidence-based subagent reports.
+
 ## Workflow
+
 When implementing features, work like this:
-- use test driven development paradigm
+
+- use the test driven development paradigm
 - after the user gives you the requirements, use the following process when tasked with implementation:
-    1) plan out features and ask human for plan approval
-    2) write tests that assertain the plan's specified functionality and behavior
-    3) review by subagent up to 4 times and correct code according to feedback until ok
+    1) plan out features and ask human for plan approval with the planner subagent
+    2) write tests that assertain the plan's specified functionality and behavior with an implementation subagent
+    3) review using the reviewer subagent up to 4 times and correct code according to feedback until ok
     4) correct until ok
     5) pass to user for review
-    6) when user approved: implement feature
-    7) review by subagent up to 4 times and correct code according to feedback until ok
-    8) human review
-    9) when approved: refactor code.
-    10) review by subagent up to 4 times and correct code according to feedback until ok
-    11) final human review, iterate until human approves
-
-- The reviewer agent should find issues with maintainability, logic errors, requirement violations, going off-topic or making unnecessary changes, introducing additional complexity where not needed or redundant tests or overtesting. It should verify correctness (run tests, cross check logic) and adherence to plan.
-
-The 'refactor' step aims at simplifying the implementation as much as possible and remove as much as possible complexity without
-compromising functionality or best practices and without violating the requirements.
-It should also simplify and streamline tests and remove superfluous tests. Tests always should test functionality, not implementation details.
+    6) when user approved: implement feature with an implemenation subagent
+    7) review busing the reviewer subagent up to 4 times and correct code according to feedback until ok
+    8) refactor code using the refactorer subagent
+    9) review using the reviewer subagent up to 4 times and correct code according to feedback until ok
+    10) final human review, iterate until human approves
 
 ## Coding guidelines
+
 - Adhere to SOLID principles
-    - single responsibility principle: One code unit (function, class, module) should have one single purpose
-    - open-closed principle: Code should be open to extension, but closed to modification, i.e., we should not have to modify existing code extensively to extend the functionality of the system
-    - liskov substitution: derived- or child classes must be able to replace their parent classes, i.e., child classes should extend the parent classes without breaking the behavioral contract
-    - interface segregation: A client should not be forced to depend on parts of an interface that is not relevant to it
-    - dependency inversion: Higher-level elements of the code should not depend on lower-level elements of the code, both should depend on abstractions that define behavior, not restrict implementation.
+
+  - single responsibility principle: One code unit (function, class, module) should have one single purpose
+  - open-closed principle: Code should be open to extension, but closed to modification, i.e., we should not have to modify existing code extensively to extend the functionality of the system
+  - liskov substitution: derived- or child classes must be able to replace their parent classes, i.e., child classes should extend the parent classes without breaking the behavioral contract
+  - interface segregation: A client should not be forced to depend on parts of an interface that is not relevant to it
+  - dependency inversion: Higher-level elements of the code should not depend on lower-level elements of the code, both should depend on abstractions that define behavior, not restrict implementation.
+
 - Use the DRY principle. Avoid repetition.
 - Use the KISS principle. Avoid complexity and complicated structures wherever possible, keep things simple.
 - keep control flow and data flow as flat as possible. Go with the minimum amount of hierarchical depth that solves the problem at hand.
@@ -77,6 +94,7 @@ It should also simplify and streamline tests and remove superfluous tests. Tests
 - keep the hot path of a function clean: configuration, parameter handling and preparation should happen on as high a level as possible
 - handle edge cases explicitly. Do not rely on silent defaults that can alter behavior without the user knowing
 - exceptions should be handled explicitly and early when they are expected or anticipated. In cases where unexpected/unanticipated things happen, make them bubble up to the highest level and handle them there:
+
 ```python
 try:
     func()
@@ -87,6 +105,7 @@ except AnticipatedException2 as e2:  # might happen and we know what to do
 except Exception as e:  # unknown exception branch for unexpected stuff
     raise SpecificErrorForThisCase("Specific message here")
 ```
+
 - no changes to the code are made without a corresponding test of the new or changed funcationality
 - property-based testing is a first-class test system
 - all public methods and classes should have google style docstrings
