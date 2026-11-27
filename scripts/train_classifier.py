@@ -1,13 +1,12 @@
-"""Train a native Ultralytics classifier run or Optuna study from one YAML configuration."""
+"""Train a Lightning classifier run or Optuna study from one YAML configuration."""
 
 import argparse
 from pathlib import Path
 
-from smartrodent.classifier_training import (
-    ClassifierConfiguration,
-    ClassifierExperiment,
-)
-from smartrodent.training_studies import ClassifierStudy, is_study_configuration
+from smartrodent.classifier_training import ClassifierExperiment
+from smartrodent.stage_configurations import ClassifierConfiguration
+from smartrodent.stages import CLASSIFIER
+from smartrodent.training_studies import StageStudy, is_study_configuration
 
 
 def main() -> None:
@@ -16,7 +15,7 @@ def main() -> None:
     parser.add_argument("configuration", type=Path)
     args = parser.parse_args()
     if is_study_configuration(args.configuration):
-        result = ClassifierStudy.from_yaml(args.configuration).run()
+        result = StageStudy.from_yaml(CLASSIFIER, args.configuration).run()
         for classifier in result.results:
             print(f"Final checkpoint: {classifier.last_checkpoint}")
         print(f"Selected classifier checkpoint: {result.selected.best_checkpoint}")

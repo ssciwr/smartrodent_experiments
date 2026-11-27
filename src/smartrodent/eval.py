@@ -111,24 +111,18 @@ class EvaluationFeatures:
 
 
 class FeatureExtractor:
-    """Extract pooling features and optional projector outputs without training.
+    """Extract encoder features and optional projector outputs without training.
 
     Args:
-        network: Underlying PyTorch image network, rather than the YOLO API wrapper.
-        pool: Pooling module belonging to that network.
-        projector: Optional projection module, on the same device as the network.
+        encoder: Encoder returning ``(B, feature_dim)`` features for RGB in [0, 1].
+        projector: Optional projection module, on the same device as the encoder.
 
     Raises:
-        ValueError: The supplied pooling module does not belong to the network.
+        ValueError: The encoder has no parameters, or the devices differ.
     """
 
-    def __init__(
-        self, network: nn.Module, pool: nn.Module, projector: nn.Module | None = None
-    ):
-        if not any(module is pool for module in network.modules()):
-            raise ValueError("pool must belong to network")
-        self.network = network
-        self.pool = pool
+    def __init__(self, encoder: nn.Module, projector: nn.Module | None = None):
+        self.encoder = encoder
         self.projector = projector
 
     @torch.inference_mode()
@@ -139,9 +133,8 @@ class FeatureExtractor:
         batch_size: Count = 8,
         num_workers: NonnegativeInt = 0,
     ) -> EvaluationFeatures:
-        """Extract CPU arrays in subset order and restore module training flags.
+        """Extract CPU arrays in dataset order and restore module training flags.
 
-        A temporary hook works even after the training wrapper was finalized.
         Parameters, gradients, and device placement are left intact. BatchNorm
         statistics and dropout remain fixed during extraction.
 
@@ -151,21 +144,20 @@ class FeatureExtractor:
             num_workers: CPU image-loading worker count.
 
         Returns:
-            Pooled and optional projected features, with labels and source paths.
+            Encoder and optional projected features, with labels and source paths.
 
         Raises:
             ValueError: Loader settings or devices are incompatible.
-            RuntimeError: Pooling does not run exactly once in a forward pass.
         """
-        parameter = next(self.network.parameters(), None)
+        parameter = next(self.encoder.parameters(), None)
         if parameter is None:
             raise ValueError(
-                "network must have parameters to determine its device and dtype"
+                "encoder must have parameters to determine its device and dtype"
             )
         if self.projector is not None and any(
             p.device != parameter.device for p in self.projector.parameters()
         ):
-            raise ValueError("projector and network must be on the same device")
+            raise ValueError("projector and encoder must be on the same device")
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -173,34 +165,21 @@ class FeatureExtractor:
             num_workers=num_workers,
             pin_memory=parameter.device.type == "cuda",
         )
-        roots = [self.network]
+        roots = [self.encoder]
         if self.projector is not None:
             roots.append(self.projector)
         states = {
             module: module.training for root in roots for module in root.modules()
         }
-        captured = []
-
-        def capture_pool(module, inputs, output):
-            """Capture only this forward pass's spatially pooled tensor."""
-            captured.append(output.flatten(1))
-
-        handle = self.pool.register_forward_hook(capture_pool)
         pooled_rows, projected_rows, label_rows = [], [], []
         try:
             for root in roots:
                 root.eval()
             for labels, images in loader:
-                captured.clear()
                 images = images.to(
                     device=parameter.device, dtype=parameter.dtype, non_blocking=True
                 )
-                self.network(images)
-                if len(captured) != 1:
-                    raise RuntimeError(
-                        "Expected the selected pooling module to run exactly once"
-                    )
-                pooled = captured.pop()
+                pooled = self.encoder(images)
                 pooled_rows.append(pooled.float().cpu().numpy())
                 if self.projector is not None:
                     projected = nn.functional.normalize(
@@ -209,8 +188,6 @@ class FeatureExtractor:
                     projected_rows.append(projected.cpu().numpy())
                 label_rows.append(labels.numpy())
         finally:
-            handle.remove()
-            captured.clear()
             # Restore each flag directly to preserve mixed states such as frozen
             # BatchNorm modules inside an otherwise training-mode encoder.
             for module, training in states.items():

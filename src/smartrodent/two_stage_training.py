@@ -16,27 +16,26 @@ import mlflow
 import yaml
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
-from ultralytics import YOLO
 
 from smartrodent import config_loading
-from smartrodent.classifier_model import YoloClassifierBuilder
-from smartrodent.classifier_training import (
-    ClassifierConfiguration,
-    ClassifierExperiment,
-)
+from smartrodent.encoders import build_encoder, preflight_encoders
 from smartrodent.experiment_results import ExperimentResult
-from smartrodent.experiment_support import MlflowConfiguration, validate_stopping
+from smartrodent.experiment_support import MlflowConfiguration
 from smartrodent.hyperparameter_search import StudyConfiguration
 from smartrodent.model_card import load_training_template
+from smartrodent.output_paths import validate_output_paths
 from smartrodent.search_space import reject_search_tags
-from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
-from smartrodent.training_studies import ClassifierStudy, SupConStudy
+from smartrodent.stage_configurations import (
+    ClassifierConfiguration,
+    SupConConfiguration,
+)
+from smartrodent.stages import CLASSIFIER, SUPCON
+from smartrodent.training_studies import StageStudy
 from smartrodent.training_validation import (
     MappingInput,
     SharedData,
     parse_settings,
     settings_dict,
-    validate_output_paths,
 )
 
 
@@ -62,27 +61,13 @@ def _validate_stage_ownership(settings: Mapping, section: str) -> None:
         "mlflow",
         "tuning",
     }
+    if section == "classifier":
+        reserved.add("encoder")  # supplied by the pipeline: the winning SupCon encoder
     conflicts = reserved & set(settings)
     if conflicts:
         raise ValueError(
             f"{section} cannot override shared or deferred settings: {sorted(conflicts)}"
         )
-
-
-def _validate_classifier_encoder(settings: Mapping) -> None:
-    """Require the deferred encoder placeholder; SupCon supplies the checkpoint."""
-    initialization = settings.get("initialization")
-    if not isinstance(initialization, Mapping) or initialization.get("encoder") != {
-        "source": "selected_supcon"
-    }:
-        raise ValueError(
-            "classifier encoder must be exactly {source: selected_supcon}, without checkpoint"
-        )
-
-
-def _distinct_outputs(configurations) -> list[Path]:
-    """Return the output directories of stage candidates; a study's share its reference trial's."""
-    return list(dict.fromkeys(config.output_directory for config in configurations))
 
 
 @dataclass(frozen=True, kw_only=True, config=ConfigDict(extra="forbid"))
@@ -114,7 +99,7 @@ class TwoStageConfiguration:
         output_directory: Root for the unified configuration and stage artifacts.
         data: Shared training/validation paths and class names, never a test split.
         supcon: Standalone SupCon settings without data or output overrides.
-        classifier: Standalone CE settings with encoder source selected_supcon.
+        classifier: Standalone CE settings without an encoder, which SupCon supplies.
         mlflow: Optional shared tracking; registry publication applies only to CE.
         tuning: Optional per-stage Optuna study settings; tagged stages need one.
     """
@@ -130,7 +115,6 @@ class TwoStageConfiguration:
         """Keep shared data, outputs, tracking and the encoder owned by the pipeline root."""
         for section in ("supcon", "classifier"):
             _validate_stage_ownership(getattr(self, section), section)
-        _validate_classifier_encoder(self.classifier)
 
     def study(self, stage: str) -> StudyConfiguration | None:
         """Return a stage's study settings, or None when the stage runs once.
@@ -174,7 +158,7 @@ class TwoStageConfiguration:
         """Return an independent YAML-compatible document, retaining search tags.
 
         Returns:
-            Unified settings including the selected_supcon encoder placeholder.
+            Unified settings; the classifier encoder is supplied at run time.
         """
         values = {
             "output_directory": self.output_directory,
@@ -193,7 +177,8 @@ class TwoStagePlan:
     """Validate every stage candidate of a pipeline before anything trains or is written.
 
     The SupCon winner is unknown until SupCon has run, so classifier candidates are
-    validated against a placeholder encoder, and a freeze must fit every SupCon model.
+    validated against a placeholder encoder checkpoint, and their encoder policies
+    must fit every SupCon candidate's encoder.
 
     Args:
         configuration: Parsed pipeline settings.
@@ -207,7 +192,8 @@ class TwoStagePlan:
         self.classifier_root = root / "classifier"
         supcon_study = configuration.study("supcon")
         self.supcon_study = (
-            SupConStudy(
+            StageStudy(
+                SUPCON,
                 self._stage_document("supcon", self.supcon_root, supcon_study),
                 prefix="supcon",
             )
@@ -221,41 +207,39 @@ class TwoStagePlan:
             else (self._supcon_run(),)
         )
         # The selected encoder does not exist yet; classifiers are validated against
-        # the path of the reference SupCon candidate's best.pt instead.
-        placeholder = self.supcon_configurations[0].output_directory / "best.pt"
+        # the path of the reference SupCon candidate's best.ckpt instead.
+        placeholder = self.supcon_configurations[0].artifacts.best_checkpoint
         self.classifier_candidates = (
             self.classifier_study(placeholder, None).configurations
             if configuration.study("classifier") is not None
             else (self.classifier_run(placeholder),)
         )
         self._validate_output_paths()
-        self._validate_classifier_freeze()
-        self.head_cache = {}
-        self._prepare_classifier_inputs()
+        self._preflight_encoders()
+        # Read every template now: a malformed one must not fail after SupCon trained.
+        for candidate in self.classifier_candidates:
+            load_training_template(Path(candidate.model_card_template))
 
     def classifier_run(self, checkpoint: Path) -> ClassifierConfiguration:
         """Return the single classifier run on a SupCon encoder.
 
         Args:
-            checkpoint: The selected SupCon best.pt, or a placeholder for validation.
+            checkpoint: The selected SupCon best.ckpt, or a placeholder for validation.
 
         Returns:
             Ordinary standalone CE configuration using that SupCon source.
         """
         reject_search_tags(self.configuration.classifier, prefix="classifier")
-        values = self._classifier_document(checkpoint, self.classifier_root)
-        # Ultralytics' get_cfg reports wrongly typed train_kwargs as TypeError.
-        try:
-            return ClassifierConfiguration.from_mapping(values)
-        except TypeError as error:
-            raise ValueError(f"Invalid classifier settings: {error}") from error
+        return ClassifierConfiguration.from_mapping(
+            self._classifier_document(checkpoint, self.classifier_root)
+        )
 
     def classifier_study(
         self,
         checkpoint: Path,
         encoder_key: str | None,
         encoder_provenance: Mapping | None = None,
-    ) -> ClassifierStudy:
+    ) -> StageStudy:
         """Prepare the classifier study on one SupCon encoder.
 
         Each selected encoder gets its own study: trials on different encoders are
@@ -263,7 +247,7 @@ class TwoStagePlan:
         an unchanged winner can resume its own.
 
         Args:
-            checkpoint: Selected SupCon best.pt, or a placeholder for validation.
+            checkpoint: Selected SupCon best.ckpt, or a placeholder for validation.
             encoder_key: Short checksum of the selected encoder; it names the study
                 (``<study_name>-<key>``) and its directory (``classifier/<key>``).
                 None validates against the whole classifier stage directory.
@@ -281,20 +265,19 @@ class TwoStagePlan:
         )
         if encoder_key is not None:
             document["tuning"]["study_name"] += f"-{encoder_key}"
-        return ClassifierStudy(
-            document, encoder_provenance=encoder_provenance, prefix="classifier"
+        return StageStudy(
+            CLASSIFIER,
+            document,
+            prefix="classifier",
+            encoder_provenance=encoder_provenance,
         )
 
-    def _supcon_run(self) -> TrainingConfiguration:
+    def _supcon_run(self) -> SupConConfiguration:
         """Return the single SupCon run, which writes to the stage directory."""
         reject_search_tags(self.configuration.supcon, prefix="supcon")
-        configuration = TrainingConfiguration.from_mapping(
+        return SupConConfiguration.from_mapping(
             self._stage_document("supcon", self.supcon_root)
         )
-        # Standalone configurations may infer the direction; the pipeline also
-        # requires stopping and scheduling to agree with it.
-        validate_stopping(configuration, configuration.effective_tracked_mode)
-        return configuration
 
     def _stage_document(
         self,
@@ -321,10 +304,7 @@ class TwoStagePlan:
     ) -> dict:
         """Return the classifier stage document with the SupCon checkpoint as its encoder."""
         document = self._stage_document("classifier", output_directory, study)
-        document["initialization"]["encoder"] = {
-            "source": "supcon",
-            "checkpoint": str(checkpoint),
-        }
+        document["encoder"] = {"checkpoint": str(checkpoint)}
         return document
 
     def _tracking(self, section: str) -> dict | None:
@@ -334,62 +314,49 @@ class TwoStagePlan:
             return None
         elif section == "supcon":
             return asdict(replace(tracking, registered_model_name=None))
-        elif section == "classifier":
-            return asdict(tracking)
-        else:
-            raise ValueError(f"Unknown pipeline stage '{section}'")
+        return asdict(tracking)  # the classifier stage
 
     def _validate_output_paths(self) -> None:
-        """Protect shared datasets and model/head inputs from every generated artifact."""
+        """Protect shared datasets and model inputs from every generated artifact."""
+        candidates = [*self.supcon_configurations, *self.classifier_candidates]
+        # A study's candidates share their reference trial's directory.
+        runs = list(dict.fromkeys(c.artifacts for c in candidates))
         # The selected encoder is an output of the SupCon stage, not an external input.
         sources = [
-            *(f for config in self.supcon_configurations for f in config.input_files()),
+            *(f for c in self.supcon_configurations for f in c.input_files()),
             *(
                 f
-                for config in self.classifier_candidates
-                for f in config.input_files(include_encoder=False)
+                for c in self.classifier_candidates
+                for f in c.input_files()
+                if f != c.encoder.checkpoint
             ),
         ]
-        supcon_outputs = _distinct_outputs(self.supcon_configurations)
-        classifier_outputs = _distinct_outputs(self.classifier_candidates)
         data = self.configuration.data
+        root = self.configuration.output_directory
         validate_output_paths(
-            [*supcon_outputs, *classifier_outputs],
+            runs,
             (data["train_dataset"], data["validation_dataset"]),
             sources,
-            (self.configuration.output_directory, self.classifier_root),
-            native_directories=classifier_outputs,
+            files=(root / "config.yaml", root / "selection.yaml"),
         )
 
-    def _validate_classifier_freeze(self) -> None:
-        """Reject classifier freeze settings that do not fit every SupCon candidate's network.
+    def _preflight_encoders(self) -> None:
+        """Check every classifier candidate's encoder policies against every SupCon encoder.
 
-        The winning encoder is unknown until the SupCon stage finishes. Its network
-        keeps the layer count of its ``model_name``, so checking every candidate
-        architecture now avoids failing only after all SupCon training.
+        The winning encoder is unknown until the SupCon stage finishes, so a policy
+        that fits only some candidates would fail after all SupCon training.
         """
-        model_names = sorted(
-            {str(candidate.model_name) for candidate in self.supcon_configurations}
-        )
-        for model_name in model_names:
-            layer_count = len(YOLO(model_name, task="classify").model.model)
-            for classifier in self.classifier_candidates:
-                try:
-                    classifier.native_freeze(layer_count)
-                except ValueError as error:
-                    raise ValueError(
-                        f"Classifier freeze does not fit SupCon model {model_name}: {error}"
-                    ) from error
-
-    def _prepare_classifier_inputs(self) -> None:
-        """Read every classifier candidate's head donor and card template before SupCon trains."""
-        for candidate in self.classifier_candidates:
-            load_training_template(Path(candidate.model_card_template))
-            labels = {
-                name: index for index, name in enumerate(sorted(candidate.class_names))
-            }
-            YoloClassifierBuilder.prepare_head(
-                candidate.initialization["head"], labels, cache=self.head_cache
+        encoders = [
+            build_encoder(configuration.encoder)
+            for configuration in self.supcon_configurations
+        ]
+        for classifier in self.classifier_candidates:
+            preflight_encoders(
+                encoders,
+                freeze=classifier.freeze,
+                reinitialization=classifier.reinitialization,
+                native=classifier.native_checkpoint,
+                full_head=classifier.head == "full",
             )
 
 
@@ -426,13 +393,13 @@ class TwoStageExperiment:
         self.configuration = configuration
         self.plan = TwoStagePlan(configuration)
         self.supcon_experiment = (
-            SupConExperiment(self.plan.supcon_configurations[0])
+            SUPCON.experiment(self.plan.supcon_configurations[0])
             if self.plan.supcon_study is None
             else None
         )
 
     def run(self) -> TwoStageResult:
-        """Run the SupCon stage, select its best.pt, and train the classifier stage on it.
+        """Run the SupCon stage, select its best.ckpt, and train the classifier stage on it.
 
         Returns:
             Structured results for all candidates, their winner, and the classifier.
@@ -554,16 +521,11 @@ class TwoStageExperiment:
                 encoder, checksum[:12], encoder_provenance
             ).run(parent_run_id=run_id)
             return study.results, study.selected, study.registered_champion_version
-        else:
-            experiment = ClassifierExperiment(
-                self.plan.classifier_run(encoder),
-                encoder_provenance=encoder_provenance,
-                head_cache=self.plan.head_cache,
-            )
-            registry = experiment.champion_registry
-            # Promote explicitly, as a study does, to report the champion version.
-            result = experiment.run_with_result(
-                parent_run_id=run_id, defer_promotion=registry is not None
-            )
-            champion = registry.promote(result) if registry is not None else None
-            return (result,), result, champion
+        configuration = self.plan.classifier_run(encoder)
+        experiment = CLASSIFIER.experiment(
+            configuration, encoder_provenance=encoder_provenance
+        )
+        # Promote explicitly, as a study does, to report the champion version.
+        result = experiment.run_with_result(parent_run_id=run_id, defer_promotion=True)
+        champion = CLASSIFIER.experiment.promote(configuration, result)
+        return (result,), result, champion

@@ -3,8 +3,10 @@
 import argparse
 from pathlib import Path
 
-from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
-from smartrodent.training_studies import SupConStudy, is_study_configuration
+from smartrodent.stage_configurations import SupConConfiguration
+from smartrodent.stages import SUPCON
+from smartrodent.supcon_training import SupConExperiment
+from smartrodent.training_studies import StageStudy, is_study_configuration
 
 
 def _parse_args() -> argparse.Namespace:
@@ -20,12 +22,12 @@ def main() -> None:
     """Run a study for configurations with a tuning section, else the single run."""
     config = _parse_args().config
     if is_study_configuration(config):
-        result = SupConStudy.from_yaml(config).run()
+        result = StageStudy.from_yaml(SUPCON, config).run()
         for trial in result.results:
             print("Final checkpoint:", trial.last_checkpoint)
         print("Selected checkpoint:", result.selected.best_checkpoint)
     else:
-        experiment = SupConExperiment(TrainingConfiguration.from_yaml(config))
+        experiment = SupConExperiment(SupConConfiguration.from_yaml(config))
         print("Final checkpoint:", experiment.run())
 
 

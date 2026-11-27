@@ -10,6 +10,60 @@ from smartrodent.training_validation import FiniteNumber, Mode, Nonblank, settin
 
 
 @dataclass(frozen=True, config=ConfigDict(extra="forbid"))
+class Objective:
+    """Identify the metric and direction used to compare trained results.
+
+    Args:
+        metric: Metric reported by the experiment.
+        mode: Whether lower or higher values of the metric are better.
+    """
+
+    metric: Nonblank
+    mode: Mode
+
+    def check(self, other: "Objective") -> None:
+        """Verify that two objectives compare the same metric in the same direction.
+
+        Args:
+            other: Objective of another experiment.
+
+        Raises:
+            ValueError: The objectives differ in metric or direction.
+        """
+        if self.metric != other.metric:
+            raise ValueError("Experiments must use the same tracked metric")
+        if self.mode != other.mode:
+            raise ValueError("Experiments must use the same tracked mode")
+
+    def select_best(self, results: Sequence["ExperimentResult"]) -> "ExperimentResult":
+        """Choose a result using the objective and a shared validation split.
+
+        Args:
+            results: Nonempty completed runs ordered by the caller's tie preference.
+
+        Returns:
+            The original winning result. The first result wins an exact tie.
+
+        Raises:
+            ValueError: A result has a different objective or split, or lacks one.
+        """
+        split = results[0].validation_dataset
+        if split is None:
+            raise ValueError("Automatic experiment ranking requires validation data")
+        split = split.resolve()
+        for result in results:
+            if result.validation_dataset is None:
+                raise ValueError(
+                    "Automatic experiment ranking requires validation data"
+                )
+            self.check(result.objective)
+            if result.validation_dataset.resolve() != split:
+                raise ValueError("Experiments must use the same validation dataset")
+        rank = min if self.mode == "min" else max
+        return rank(results, key=lambda result: result.best_value)
+
+
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class ExperimentResult:
     """Describe a completed run without inspecting checkpoint files.
 
@@ -39,6 +93,11 @@ class ExperimentResult:
     registered_model_version: str | None = None
     onnx_model: Path | None = None
 
+    @property
+    def objective(self) -> Objective:
+        """Return the objective while preserving the serialized result fields."""
+        return Objective(self.tracked_metric, self.tracked_mode)
+
     def to_dict(self) -> dict:
         """Serialize result paths without changing scores or optional registry metadata.
 
@@ -65,22 +124,4 @@ def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentRes
     """
     if not results:
         raise ValueError("Cannot select a winner from an empty set of results")
-    reference = results[0]
-    for result in results:
-        if result.validation_dataset is None:
-            raise ValueError("Automatic experiment ranking requires validation data")
-        if result.tracked_metric != reference.tracked_metric:
-            raise ValueError("Experiments must use the same tracked metric")
-        if result.tracked_mode != reference.tracked_mode:
-            raise ValueError("Experiments must use the same tracked mode")
-        # Input aliases identify the same split; preserve original report paths
-        # while matching the canonical identity used during prevalidation.
-        if (
-            result.validation_dataset.resolve()
-            != reference.validation_dataset.resolve()
-        ):
-            raise ValueError("Experiments must use the same validation dataset")
-    # Result construction validates the direction. Both builtins preserve the
-    # first exact tie and return the original object, without sorting or copying.
-    rank = min if reference.tracked_mode == "min" else max
-    return rank(results, key=lambda result: result.best_value)
+    return results[0].objective.select_best(results)

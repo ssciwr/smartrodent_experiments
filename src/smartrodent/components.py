@@ -2,6 +2,7 @@
 
 import importlib
 import inspect
+from collections.abc import Callable
 from dataclasses import field
 from types import ModuleType
 from typing import Any
@@ -25,8 +26,21 @@ class ComponentSpec:
     name: Nonblank
     parameters: dict[str, Any] = field(default_factory=dict)
 
-    def _resolve(self, namespace: ModuleType) -> Any:
-        """Return the named class or function without calling it; ValueError if it is unknown."""
+    def resolve(
+        self, namespace: ModuleType, base: type | None = None, /
+    ) -> Callable[..., Any]:
+        """Resolve the configured class or function without calling it.
+
+        Args:
+            namespace: Module in which a bare name is looked up.
+            base: Required base class, or None for any callable.
+
+        Returns:
+            The configured callable.
+
+        Raises:
+            ValueError: The name is unknown, or does not identify an allowed callable.
+        """
         module_name, separator, attribute = self.name.rpartition(":")
         if separator:
             try:
@@ -39,7 +53,16 @@ class ComponentSpec:
             module = namespace
         if not hasattr(module, attribute):
             raise ValueError(f"'{attribute}' is not defined in {module.__name__}")
-        return getattr(module, attribute)
+        component = getattr(module, attribute)
+        if base is not None and not (
+            isinstance(component, type)
+            and issubclass(component, base)
+            and not inspect.isabstract(component)
+        ):
+            raise ValueError(f"'{self.name}' is not a concrete {base.__name__}")
+        elif not callable(component):
+            raise ValueError(f"'{self.name}' is not callable")
+        return component
 
     def build(
         self, namespace: ModuleType, base: type | None = None, /, *args, **supplied
@@ -62,15 +85,7 @@ class ComponentSpec:
                 ``ValueError`` raised by the call itself, including inside a function
                 component, is reported as rejected arguments.
         """
-        component = self._resolve(namespace)
-        if base is not None and not (
-            isinstance(component, type)
-            and issubclass(component, base)
-            and not inspect.isabstract(component)
-        ):
-            raise ValueError(f"'{self.name}' is not a concrete {base.__name__}")
-        elif not callable(component):
-            raise ValueError(f"'{self.name}' is not callable")
+        component = self.resolve(namespace, base)
         collisions = sorted(set(self.parameters) & set(supplied))
         if collisions:
             raise ValueError(
