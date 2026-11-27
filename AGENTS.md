@@ -62,13 +62,14 @@ When implementing features, work like this:
 - use the test driven development paradigm
 - after the user gives you the requirements, use the following process when tasked with implementation:
     1) plan: Write a plan for implementation including the test list and -functionality (one line per behaviour, Hypothesis candidates marked). Ask the human to approve plan and test list in one stop.
-    2) tests: an implementation subagent writes the approved test list and confirms it is red for the right reason (missing code, not test bugs).
-    3) implementation: an implementation subagent writes the minimal code that turns the tests green: only what the plan and tests require, no speculative helpers or compatibility shims.
-    4) review: the reviewer subagent reviews tests and implementation together, at most 2 rounds. Blockers and should-fix findings are fixed and re-reviewed; nits are fixed by the implementation subagent without another round.
-    5) refactor: run the refactorer subagent only when the review flags unneeded complexity; its result gets one review round.
-    6) final human review, iterate until the human approves
+    2) tests and implementation: one implementation subagent writes the approved test list, confirms it is red for the right reason (missing code, not test bugs), then writes the minimal code that turns the tests green: only what the plan and tests require, no speculative helpers or compatibility shims.
+    3) review: the reviewer subagent reviews tests and implementation together in one round. The same implementation subagent (resumed, not a new one) fixes all findings. Only blocker fixes get a second, targeted review round.
+    4) refactor: run the refactorer subagent only when the review flags unneeded complexity; its result gets one review round.
+    5) final human review, iterate until the human approves
 - the human sees the tests again only with the final result, unless writing or reviewing them raises a specification question
-- subagents run the test suite in the foreground and once at the end of their step (targeted test files while iterating are fine); they report the commands and counts
+- the full test suite runs once per step, by the subagent doing that step, in the foreground (targeted test files while iterating are fine). It reports the commands and counts. The orchestrator does not re-run it.
+- keep context small: delegation prompts name the exact files to read and the scope; subagent reports and orchestrator messages are short and contain only results, decisions and open questions
+- the delegation prompt is the handoff: it contains the approved test list, the API signatures the tests target, and the files to create or modify. The subagent reads only those files plus one existing test file for style. It does not read the plans, AGENTS.md or unrelated modules; whatever it needs from them belongs in the prompt.
 
 ## Coding guidelines
 
