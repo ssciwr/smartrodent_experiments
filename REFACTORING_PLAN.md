@@ -84,6 +84,9 @@ Each rename also updates imports, `__init__.py`, `dvc.yaml` deps, README, test f
     - tags don't leak into `yaml.safe_load`;
     - the dataset list is processed.
 
+Status: DONE
+
+
 ## Part 3: library swaps
 
 | Where | Replace with |
@@ -122,6 +125,8 @@ Refactor items in the touched modules:
 - **`base.py`:** keep the `Configurable`, `Filterable` and `DatasetLoader` protocols and mark their methods `@abstractmethod`, so an incomplete implementation fails when it is created. `YoloDatasetCreatorBase` is replaced by `YoloDatasetCreator`.
 
 Do not re-run any DVC data stage.
+
+Status: DONE
 
 ## Part 2: Lightning, custom encoders, standalone Ultralytics trainer
 
