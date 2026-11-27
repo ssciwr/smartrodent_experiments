@@ -1,5 +1,5 @@
 name = "refactorer"
-description = "Refactors existing code according to given criteria"
+description = "Simplifies implementation and tests flagged as unnecessarily complex, without changing behaviour"
 model = "gpt-6.2-sol"
 model_reasoning_effort = "medium"
 

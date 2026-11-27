@@ -1,6 +1,6 @@
 ---
 name: refactorer
-description: Independently reviews code and tests
+description: Simplifies implementation and tests flagged as unnecessarily complex, without changing behaviour
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash

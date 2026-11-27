@@ -61,16 +61,14 @@ When implementing features, work like this:
 
 - use the test driven development paradigm
 - after the user gives you the requirements, use the following process when tasked with implementation:
-    1) plan out features and ask human for plan approval with the planner subagent
-    2) write tests that assertain the plan's specified functionality and behavior with an implementation subagent
-    3) review using the reviewer subagent up to 4 times and correct code according to feedback until ok
-    4) correct until ok
-    5) pass to user for review
-    6) when user approved: implement feature with an implemenation subagent
-    7) review busing the reviewer subagent up to 4 times and correct code according to feedback until ok
-    8) refactor code using the refactorer subagent
-    9) review using the reviewer subagent up to 4 times and correct code according to feedback until ok
-    10) final human review, iterate until human approves
+    1) plan: the planner subagent writes the plan including the test list (one line per behaviour, Hypothesis candidates marked). Ask the human to approve plan and test list in one stop.
+    2) tests: an implementation subagent writes the approved test list and confirms it is red for the right reason (missing code, not test bugs).
+    3) implementation: an implementation subagent writes the minimal code that turns the tests green: only what the plan and tests require, no speculative helpers or compatibility shims.
+    4) review: the reviewer subagent reviews tests and implementation together, at most 2 rounds. Blockers and should-fix findings are fixed and re-reviewed; nits are fixed by the implementation subagent without another round.
+    5) refactor: run the refactorer subagent only when the review flags unneeded complexity; its result gets one review round.
+    6) final human review, iterate until the human approves
+- the human sees the tests again only with the final result, unless writing or reviewing them raises a specification question
+- subagents run the test suite in the foreground and once at the end of their step (targeted test files while iterating are fine); they report the commands and counts
 
 ## Coding guidelines
 

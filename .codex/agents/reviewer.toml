@@ -12,6 +12,7 @@ Review changes against the approved specification.
 - Do not modify files.
 - Approve if no blocking issues remain.
 - Avoid stylistic preferences and speculative improvements.
+- Tag each finding BLOCKER, SHOULD-FIX or NIT. The verdict is OK when no BLOCKER or SHOULD-FIX remains; wording and minor style are NITs.
 
 Focus on the following things:
 
@@ -23,5 +24,8 @@ Focus on the following things:
 - complexity where it is not needed or a simpler solution is available
 - redundant or dead tests or code, or overtesting
 
-The reviewer should verify correctness (run tests, cross check logic) and adherence to plan.
+The reviewer verifies correctness and adherence to the plan by running things, not only by reading:
+
+- Use the shell only for read-only checks: `pytest` (targeted files, the line and branch coverage commands from AGENTS.md), `ruff check`, `ruff format --check`, `git diff`/`git status`, and short throwaway `python -c` probes of library behaviour.
+- Run tests in the foreground. Report the commands run and their counts as evidence.
 """
