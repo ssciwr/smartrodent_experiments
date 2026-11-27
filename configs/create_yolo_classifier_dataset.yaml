@@ -19,16 +19,16 @@ detector:
     confidence_threshold: 0.45
     allowed_classes: [animal]
     iou_threshold: 0.45
-datasets:  # One entry per dataset: its input records and output root.
-  - path_to_image_data: datasets/stage7_filtered_data_downsampled_50
-    dataset_output_path: datasets/stage8_yolo_classifier_50
-  - path_to_image_data: datasets/stage7_filtered_data_downsampled_100
-    dataset_output_path: datasets/stage8_yolo_classifier_100
-  - path_to_image_data: datasets/stage7_filtered_data_downsampled_250
-    dataset_output_path: datasets/stage8_yolo_classifier_250
-  - path_to_image_data: datasets/stage7_filtered_data_downsampled_500
-    dataset_output_path: datasets/stage8_yolo_classifier_500
-  - path_to_image_data: datasets/stage7_filtered_data_downsampled_1000
-    dataset_output_path: datasets/stage8_yolo_classifier_1000
-  - path_to_image_data: datasets/stage7_filtered_data_downsampled_1500
-    dataset_output_path: datasets/stage8_yolo_classifier_1500
+datasets: # One entry per dataset: its input records and output root.
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_50
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_50
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_100
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_100
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_250
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_250
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_500
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_500
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_1000
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_1000
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_1500
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_1500

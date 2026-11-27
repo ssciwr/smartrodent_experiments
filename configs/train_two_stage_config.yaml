@@ -1,14 +1,12 @@
 # python scripts/train_two_stage.py configs/train_two_stage_config.yaml
 # Stages named under the root `tuning` section run as Optuna studies.
-# Searched values: !suggest-float {low, high, step?, log?} | !suggest-int {low, high, step?, log?}
-#   | !suggest-categorical {choices: [...]}.
-# !coupled {target, values} follows a !suggest-categorical choice identified by its full dotted path.
-output_directory: runs/two_stage_xl_srilanka # Directory path.
+# Searched values: !suggest-float | !suggest-int | !suggest-categorical {choices: [...]}.
+output_directory: runs/two_stage_xl_srilanka
 
 data:
-  train_dataset: datasets/stage8_yolo_classifier_srilanka/train # Class-folder split path.
-  validation_dataset: datasets/stage8_yolo_classifier_srilanka/val # Class-folder split path.
-  class_names: # List of unique species-directory names.
+  train_dataset: datasets/stage8_yolo_classifier_srilanka/train
+  validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
+  class_names:
     - Rattus rattus
     - Rattus norvegicus
     - Bandicota bengalensis
@@ -37,158 +35,92 @@ data:
     - Pavo cristatus
 
 supcon:
-  model_name: ./yolo26x-cls.pt # YOLO classification checkpoint (.pt) or architecture YAML.
-  epochs: 30 # Integer >0.
-  transforms: &tf # torchvision v2 keyword arguments.
-    image_size: 480 # Integer >0; square image size.
-    resize:
-      interpolation: bilinear # nearest | nearest-exact | bilinear | bicubic
-      antialias: true # true | false
-    random_adjust_sharpness:
-      sharpness_factor: 0.5 # >=0: 0=blur, 1=unchanged, >1=sharpen.
-      p: 0.2 # Probability in [0, 1]: 0=off, 1=always.
-    random_grayscale:
-      p: 0.2 # Probability in [0, 1].
-    random_perspective:
-      distortion_scale: 0.5 # Float in [0, 1].
-      p: 0.2 # Probability in [0, 1].
-      interpolation: bilinear # nearest | bilinear
-      fill: 0 # Scalar or per-channel fill values.
-    random_horizontal_flip:
-      p: 0.2 # Probability in [0, 1].
-    random_resized_crop:
-      scale: [0.75, 1.0] # [min, max] crop-area fractions.
-      ratio: [0.75, 1.3333333333333333] # [min, max] aspect ratios.
-      interpolation: bilinear # nearest | nearest-exact | bilinear | bicubic
-      antialias: true # true | false
-  optimizer: # AdamW keyword arguments; also accepts native options such as foreach/fused.
-    lr: 0.0001 # Float >0.
-    betas: [0.9, 0.999] # Two moment-decay rates, each in [0, 1).
-    eps: 1.0e-08 # Nonnegative numerical-stability term.
-    weight_decay: 0.01 # Float >=0.
-    amsgrad: false # true | false
-  classes_per_batch: 4 # Integer >=2; distinct classes per batch (P).
-  samples_per_class: 4 # Integer >=1; source images per class (M).
-  samples_per_epoch: 100000 # Integer >=P*M; source-image selections per epoch.
-  workers: 12 # Integer >=0; 0=main process, >0=worker processes.
-  prefetch_factor: 4 # Integer >0; batches prefetched per worker.
-  seed: 42 # Integer in [0, 2**32).
-  device: cuda # cpu | cuda | cuda:N | another available PyTorch device.
-  dropout: 0.0 # Projection-head dropout probability in [0, 1].
-  output_features: 128 # Integer >0; projection dimension.
-  temperature: 0.1 # Float >0; SupCon temperature.
-  freeze: [] # List of layer indices: []=none frozen, e.g. [0, 1].
-  log_every: 10 # Integer >0; progress-log interval in steps.
-  validation_metrics: # Named sklearn scorer specifications | null (native losses only).
-    accuracy:
-      function: accuracy_score # sklearn.metrics function returning a scalar from labels.
-    balanced_accuracy:
-      function: balanced_accuracy_score
-    f1_macro:
-      function: f1_score
-      average: macro # binary | micro | macro | weighted
-      zero_division: 0 # warn | 0 | 1 | .nan
-  # Options: supcon_loss_min | supcon_loss_mean | supcon_loss_std |
-  # supcon_loss_max | a validation_metrics alias. Default: supcon_loss_mean.
-  tracked_metric: supcon_loss_mean
-  tracked_mode: min # min | max | null (infer direction).
-  scheduler: # Scheduler settings | null (constant learning rate).
-    name: ReduceLROnPlateau # Supported scheduler: ReduceLROnPlateau.
-    parameters:
-      mode: min # min | max
-      factor: 0.5 # Float strictly between 0 and 1.
-      patience: 2 # Integer >=0; bad epochs tolerated.
-      threshold: 0.001 # Float >=0; improvement threshold.
-      threshold_mode: abs # abs | rel
-      min_lr: 0.000001 # Float >=0; learning-rate floor.
-      cooldown: 0 # Integer >=0; cooldown epochs.
-      # eps: 1.0e-08  # Optional float >=0; minimum learning-rate change.
-  early_stopping: # Stopping settings | null (disabled).
-    patience: 6 # Integer >0; consecutive insufficient improvements.
-    tolerance: 0.005 # Float >=0; absolute improvement tolerance.
-    comparison: less # less (minimize) | greater (maximize)
-  # model_card_template: configs/model_card_template.yaml  # Optional template path.
-  onnx_export: # ONNX export of best.pt's pooled encoder features (embeddings), written next to best.pt | null (no export).
-    dynamic: false # true | false; true=any batch and image size, false=batch 1 at image_size.
-    simplify: true # true | false; onnxslim graph simplification.
+  encoder:  # Component class or factory (name or module:attr) with its keyword arguments.
+    name: YoloEncoder
+    parameters: {model_name: ./yolo26x-cls.pt}
+  freeze: {prefixes: [], batchnorm: eval}
+  optimizer: {name: AdamW, parameters: {lr: 0.0001, weight_decay: 0.01}}
+  scheduler:  # Learning-rate phases (empty list = constant). All but the last set `epochs`.
+    - {name: ReduceLROnPlateau, parameters: {factor: 0.5, patience: 2, threshold: 0.001, threshold_mode: abs, min_lr: 0.000001}}
+  early_stopping: {patience: 6, min_delta: 0.005}  # Native EarlyStopping options | null.
+  trainer:  # Native lightning.Trainer arguments; max_epochs is required.
+    accelerator: gpu
+    devices: 1
+    max_epochs: 30
+    precision: 32-true
+  classes_per_batch: 4
+  samples_per_class: 4
+  samples_per_epoch: 100000
+  workers: 12
+  prefetch_factor: 4
+  seed: 42
+  dropout: 0.0
+  output_features: 128
+  temperature: 0.1
+  transforms:  # Fixed preprocessing, then augmentations in order (torchvision.transforms.v2 classes).
+    image_size: 480  # Integer >0; square image size.
+    resize: {interpolation: bilinear, antialias: true}
+    augmentations:
+      - {name: RandomAdjustSharpness, parameters: {sharpness_factor: 0.5, p: 0.2}}
+      - {name: RandomGrayscale, parameters: {p: 0.2}}
+      - {name: RandomPerspective, parameters: {distortion_scale: 0.5, p: 0.2, fill: 0}}
+      - {name: RandomHorizontalFlip, parameters: {p: 0.2}}
+      - {name: RandomResizedCrop, parameters: {size: [480, 480], scale: [0.75, 1.0], ratio: [0.75, 1.3333333333333333], antialias: true}}
+  onnx_export:  # ONNX export of best.ckpt written next to it | null (no export).
+    dynamic: false
+    simplify: true
 
-classifier:
-  initialization:
-    encoder:
-      source: selected_supcon
-    head:
-      replace:
-        !suggest-categorical # linear (final Linear layer) | full (entire Classify block)
-        choices:
-          - linear
-          - full
-      source:
-        !suggest-categorical # random (fresh weights) | yolo_checkpoint (donor weights)
-        choices:
-          - random
-          - yolo_checkpoint
-      checkpoint:
-        !coupled # null (random) | native YOLO classifier checkpoint path
-        target: classifier.initialization.head.source # Full dotted path of the paired choice.
-        values:
-          - null
-          - ./yolo26x-cls.pt
-  # Layer count N (freezes layers 0..N-1) | list of unique layer indices | 0 / [] (train all).
-  # YOLO26-cls has 11 layers: 0-9 encoder, 10 = Classify head. Index 10 is only valid with
-  # replace=linear and freezes the head's conv, so only Linear trains (linear probe).
-  freeze:
-    !coupled # Linear probe (11) | frozen encoder with trainable full head (10).
-    target: classifier.initialization.head.replace
-    values: [11, 10]
-  encoder_batchnorm: eval # Frozen layers' BN: eval (fixed) | adapt (update); omit when nothing is frozen.
-  epochs: 30 # Integer >0.
-  batch_size: 24 # Integer >0; single-view CE batch size.
-  workers: 12 # Integer >=0; 0=main process, >0=worker processes.
-  device: cuda # cpu | cuda | cuda:N | another available PyTorch device.
-  seed: 42 # Integer in [0, 2**32).
-  transforms: *tf
-  train_kwargs: # Native Ultralytics options; shared paths/batch/device/seed stay outside this mapping.
-    optimizer: AdamW # auto | Adam | Adamax | AdamW | NAdam | RAdam | RMSprop | SGD | MuSGD
-    lr0: 0.0005 # Positive initial learning rate; auto chooses its own rate.
-    momentum: 0.9 # SGD momentum / Adam first-moment decay.
-    weight_decay: 0.01 # Nonnegative native weight decay.
-    cos_lr: false # false=linear LR schedule; true=cosine.
-    lrf: 0.01 # Final learning rate as a fraction of lr0; 1 keeps it constant after warmup.
-    warmup_epochs: 0.0 # Nonnegative warmup duration; fractional epochs are supported.
-    patience: 6 # Native early-stopping patience; 0 disables stopping.
-    amp: false # false/fp32=FP32; true/fp16=AMP; bf16=BF16 AMP.
-    plots: false # true writes native diagnostic plots.
-  validation_metrics: # Named sklearn scorer specifications | null (CE loss only).
-    accuracy:
-      function: accuracy_score # sklearn.metrics function returning a scalar from labels.
-    balanced_accuracy:
-      function: balanced_accuracy_score
-    f1_macro:
-      function: f1_score
-      average: macro # binary | micro | macro | weighted
-      zero_division: 0 # warn | 0 | 1 | .nan
-  tracked_metric: balanced_accuracy # ce_loss_mean | a validation_metrics alias.
-  tracked_mode: max # min | max | null (infer direction).
-  # model_card_template: configs/model_card_template.yaml  # Optional template path.
-  onnx_export: # ONNX export of best.pt (class probabilities), written next to best.pt | null (no export).
-    dynamic: false # true | false; true=any batch and image size, false=batch 1 at image_size.
-    simplify: true # true | false; onnxslim graph simplification.
+classifier:  # No `encoder` key: the pipeline supplies the winning SupCon best.ckpt.
+  head: !suggest-categorical  # linear (new final layer only) | full (also renew the encoder's post-pooling part)
+    choices: [linear, full]
+  freeze:  # Linear probe (whole encoder) | layers 0-9 frozen with a trainable renewed Classify convolution.
+    prefixes: !coupled
+      target: classifier.head
+      values: [[network], [network.model.0, network.model.1, network.model.2, network.model.3, network.model.4, network.model.5, network.model.6, network.model.7, network.model.8, network.model.9]]
+    batchnorm: eval
+  native_checkpoint: false
+  optimizer: {name: AdamW, parameters: {lr: !suggest-categorical {choices: [0.001, 0.0005]}}}
+  scheduler:  # Learning-rate phases (empty list = constant). All but the last set `epochs`.
+    - {name: ReduceLROnPlateau, parameters: {factor: 0.5, patience: 2, threshold: 0.001, threshold_mode: abs, min_lr: 0.000001}}
+  early_stopping: {patience: 6, min_delta: 0.005}  # Native EarlyStopping options | null.
+  trainer:  # Native lightning.Trainer arguments; max_epochs is required.
+    accelerator: gpu
+    devices: 1
+    max_epochs: 30
+    precision: 32-true
+  batch_size: 24
+  workers: 12
+  seed: 42
+  validation_metrics:
+    balanced_accuracy: {name: balanced_accuracy_score}
+  tracked_metric: balanced_accuracy
+  tracked_mode: max
+  transforms:  # Fixed preprocessing, then augmentations in order (torchvision.transforms.v2 classes).
+    image_size: 480  # Integer >0; square image size.
+    resize: {interpolation: bilinear, antialias: true}
+    augmentations:
+      - {name: RandomAdjustSharpness, parameters: {sharpness_factor: 0.5, p: 0.2}}
+      - {name: RandomGrayscale, parameters: {p: 0.2}}
+      - {name: RandomPerspective, parameters: {distortion_scale: 0.5, p: 0.2, fill: 0}}
+      - {name: RandomHorizontalFlip, parameters: {p: 0.2}}
+      - {name: RandomResizedCrop, parameters: {size: [480, 480], scale: [0.75, 1.0], ratio: [0.75, 1.3333333333333333], antialias: true}}
+  onnx_export:  # ONNX export of best.ckpt written next to it | null (no export).
+    dynamic: false
+    simplify: true
 
-mlflow: # Tracking settings | null (disabled).
-  tracking_uri: sqlite:///mlflow.db # SQLite URI | HTTP(S) tracking-server URI.
-  experiment_name: two-stage-sri-lanka-xl # Nonempty experiment-name string.
-  registered_model_name: species-classifier-xl # Nonempty model name | null (no registration).
-  model_artifact_name: species-classifier-xl # Nonempty logged-model name.
-  champion_alias: champion # Nonempty registered-model alias.
-  # dataset_revision: <immutable-data-revision>  # Optional nonempty revision string.
+mlflow:  # Tracking settings | null (disabled).
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: two-stage-sri-lanka-xl
+  registered_model_name: species-classifier-xl  # Nonempty model name | null (no registration).
+  model_artifact_name: species-classifier-xl
+  champion_alias: champion
+  # dataset_revision: <revision>
 
-tuning: # Per-stage Optuna studies; an omitted stage runs once (no search tags).
+tuning:  # Per-stage Optuna studies; an omitted stage runs once (no search tags).
   classifier:
-    study_name: two-stage-classifier-xl # Suffixed with the selected encoder's checksum.
-    storage: sqlite:///optuna.db # Optuna storage URL | null (in-memory, not resumable).
-    n_trials: 4 # Integer >0; trials per invocation.
-    sampler: # Class name in optuna.samplers and its constructor parameters.
-      name: BruteForceSampler # Tries every head combination once, then stops the study.
-      parameters: { seed: 42 }
-    pruner: null # Class name in optuna.pruners with parameters | null (never prune).
-    load_if_exists: true # true resumes this study on rerun with the same encoder.
+    study_name: two-stage-classifier-xl  # Suffixed with the selected encoder's checksum.
+    storage: sqlite:///optuna.db
+    n_trials: 4
+    sampler: {name: BruteForceSampler, parameters: {seed: 42}}
+    pruner: null
+    load_if_exists: true  # true resumes this study on rerun with the same encoder.
