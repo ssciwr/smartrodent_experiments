@@ -1,4 +1,4 @@
-"""Input, inference wiring, and output contracts for record-based YOLO creators."""
+"""Input, inference wiring, and output contracts for record-based YOLO dataset creation."""
 
 import json
 import os
@@ -9,39 +9,62 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
+import torch
 import yaml
 from bundle_test_support import move_bundle, write_stage_records
-from hypothesis import given
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from PIL import Image
 from speciesnet_test_support import SpeciesNetDetectorStub, SpeciesNetStub, detection
+from ultralytics.utils.metrics import box_iou
 
 from smartrodent import yolo_dataset_creation
 from smartrodent.yolo_dataset_creation import (
+    ClassifierLayout,
     DatasetCreationPlan,
-    YoloClassifierDatasetCreatorFromSpeciesnet,
-    YoloDetectorDatasetCreatorFromSpeciesnet,
-    _SpeciesNetDatasetMixin,
+    DetectorLayout,
+    SpeciesNetDetector,
+    YoloDatasetCreator,
+    load_split_records,
 )
 
 
-@pytest.fixture(
-    params=[
-        YoloDetectorDatasetCreatorFromSpeciesnet,
-        YoloClassifierDatasetCreatorFromSpeciesnet,
-    ]
-)
-def creator_type(request):
-    """Exercise both public creators with the same input contract."""
-    return request.param
+@pytest.fixture(params=[DetectorLayout, ClassifierLayout])
+def layout(request):
+    """Exercise both output layouts with the same input contract."""
+    return request.param()
 
 
-# Record loading, validation, configuration, detection and filtering are implemented
-# once in the shared creator base; tests of that behavior use one creator. Both
-# creators are exercised where their output layouts differ.
-SHARED_BASE = pytest.mark.parametrize(
-    "creator_type", [YoloDetectorDatasetCreatorFromSpeciesnet], indirect=True
-)
+def make_creator(
+    input_root,
+    output,
+    *,
+    model=None,
+    layout=None,
+    class_names=None,
+    batch_size=32,
+    **detector_settings,
+):
+    """A creator with an injected detector model and the detector layout by default."""
+    return YoloDatasetCreator(
+        input_root,
+        output,
+        layout=layout if layout is not None else DetectorLayout(),
+        detector=SpeciesNetDetector(model=model, **detector_settings),
+        class_names=class_names,
+        batch_size=batch_size,
+    )
+
+
+def stub_for(paths, *detections, **kwargs):
+    """A SpeciesNet substitute that returns the same detections for every path."""
+    return SpeciesNetStub(
+        [
+            {"filepath": str(path), "detections": list(detections or [detection(0.9)])}
+            for path in paths
+        ],
+        **kwargs,
+    )
 
 
 def write_species(root, species, splits):
@@ -63,73 +86,57 @@ def write_species(root, species, splits):
     return directory
 
 
-@SHARED_BASE
-def test_creators_discover_classes_and_load_existing_split_records(
-    creator_type, tmp_path
-):
+# --- record loading ---------------------------------------------------------------
+
+
+def test_classes_are_discovered_in_sorted_order_with_existing_splits(tmp_path):
     """Species folders define sorted classes and existing splits are not resampled."""
     root = tmp_path / "input"
     write_species(root, "shrew", ["test"])
     write_species(root, "mouse", ["train", "validation", "test"])
-    output = tmp_path / "output"
 
-    creator = creator_type(path_to_image_data=root, dataset_output_path=output)
+    records_by_species = load_split_records(root)
 
-    assert creator.class_names == ["mouse", "shrew"]
-    assert creator.classes == {0: "mouse", 1: "shrew"}
-    assert list(creator.records_by_species) == ["mouse", "shrew"]
-    records = creator.records_by_species["mouse"]
+    assert list(records_by_species) == ["mouse", "shrew"]
+    records = records_by_species["mouse"]
     assert records["dataset_split"].tolist() == ["train", "val", "test"]
     assert records["photo_id"].tolist() == [0, 1, 2]
     assert records["image_path"].tolist() == [
         str((root / "mouse" / f"photo_{index}.jpg").resolve()) for index in range(3)
     ]
-    assert not output.exists()
 
 
-@SHARED_BASE
-def test_explicit_classes_select_directories_and_define_index_order(
-    creator_type, tmp_path
-):
+def test_explicit_classes_select_directories_and_define_index_order(tmp_path):
     """Unselected directories need no valid metadata, and supplied order is retained."""
     root = tmp_path / "input"
     write_species(root, "mouse", ["train"])
     write_species(root, "shrew", ["test"])
     (root / "ignored").mkdir()
-    requested = ["shrew", "mouse"]
 
-    creator = creator_type(root, tmp_path / "output", class_names=requested)
-    requested.reverse()
-
-    assert creator.class_names == ["shrew", "mouse"]
-    assert creator.classes == {0: "shrew", 1: "mouse"}
-    assert list(creator.records_by_species) == ["shrew", "mouse"]
+    assert list(load_split_records(root, ["shrew", "mouse"])) == ["shrew", "mouse"]
 
 
-@SHARED_BASE
-def test_unknown_class_directories_are_rejected(creator_type, tmp_path):
+def test_unknown_class_directories_are_rejected(tmp_path):
     """Selections must name immediate species directories, never paths outside them."""
     root = tmp_path / "input"
     write_species(root, "mouse", ["train"])
 
     with pytest.raises(ValueError, match="class"):
-        creator_type(root, tmp_path / "output", class_names=["../mouse"])
+        load_split_records(root, ["../mouse"])
 
 
-@SHARED_BASE
 @pytest.mark.parametrize("split", ["invalid", None])
-def test_invalid_split_assignments_are_rejected(creator_type, tmp_path, split):
+def test_invalid_split_assignments_are_rejected(tmp_path, split):
     """No row receives a silently defaulted or recomputed split."""
     root = tmp_path / "input"
     write_species(root, "mouse", [split])
 
     with pytest.raises(ValueError, match="dataset_split"):
-        creator_type(root, tmp_path / "output")
+        load_split_records(root)
 
 
-@SHARED_BASE
 @pytest.mark.parametrize("column", ["image_path", "dataset_split"])
-def test_missing_required_columns_are_reported(creator_type, tmp_path, column):
+def test_missing_required_columns_are_reported(tmp_path, column):
     """Every selected species requires image-path and split columns."""
     root = tmp_path / "input"
     directory = write_species(root, "mouse", ["train"])
@@ -137,13 +144,10 @@ def test_missing_required_columns_are_reported(creator_type, tmp_path, column):
     records.to_csv(directory / "records.csv", index=False)
 
     with pytest.raises(ValueError, match=column):
-        creator_type(root, tmp_path / "output")
+        load_split_records(root)
 
 
-@SHARED_BASE
-def test_relative_image_paths_resolve_against_shared_dataset_root(
-    creator_type, tmp_path
-):
+def test_relative_image_paths_resolve_against_shared_dataset_root(tmp_path):
     """Relative paths use the stage's parent directory, not its species CSV."""
     root = tmp_path / "input"
     directory = write_species(root, "mouse", ["train"])
@@ -151,16 +155,13 @@ def test_relative_image_paths_resolve_against_shared_dataset_root(
     records["image_path"] = [str((directory / "photo_0.jpg").relative_to(root.parent))]
     records.to_csv(directory / "records.csv", index=False)
 
-    creator = creator_type(root, tmp_path / "output")
-
-    assert creator.records_by_species["mouse"]["image_path"].tolist() == [
+    assert load_split_records(root)["mouse"]["image_path"].tolist() == [
         str(directory / "photo_0.jpg")
     ]
 
 
-@SHARED_BASE
 @pytest.mark.parametrize("path", [None, "missing.jpg"])
-def test_invalid_image_paths_are_reported(creator_type, tmp_path, path):
+def test_invalid_image_paths_are_reported(tmp_path, path):
     """Blank paths and nonexistent images fail explicitly during input validation."""
     root = tmp_path / "input"
     directory = write_species(root, "mouse", ["train"])
@@ -170,14 +171,11 @@ def test_invalid_image_paths_are_reported(creator_type, tmp_path, path):
     error = FileNotFoundError if path == "missing.jpg" else ValueError
 
     with pytest.raises(error, match="image_path"):
-        creator_type(root, tmp_path / "output")
+        load_split_records(root)
 
 
-@SHARED_BASE
 @pytest.mark.parametrize("across_species", [False, True])
-def test_same_image_cannot_belong_to_different_splits(
-    creator_type, tmp_path, across_species
-):
+def test_same_image_cannot_belong_to_different_splits(tmp_path, across_species):
     """Reject existing split leakage without resampling or dropping records."""
     root = tmp_path / "input"
     mouse = write_species(root, "mouse", ["train"])
@@ -191,7 +189,7 @@ def test_same_image_cannot_belong_to_different_splits(
         pd.concat([records, conflicting]).to_csv(mouse / "records.csv", index=False)
 
     with pytest.raises(ValueError, match="multiple splits"):
-        creator_type(root, tmp_path / "output")
+        load_split_records(root)
 
 
 @given(indices=st.lists(st.integers(min_value=0, max_value=2), min_size=1, max_size=20))
@@ -205,11 +203,8 @@ def test_record_order_and_oversampled_multiplicity_are_preserved(indices):
         selected.to_csv(species / "records.csv", index=False)
         before = (species / "records.csv").read_bytes()
 
-        creator = YoloDetectorDatasetCreatorFromSpeciesnet(
-            root, Path(directory) / "output"
-        )
+        loaded = load_split_records(root)["mouse"]
 
-        loaded = creator.records_by_species["mouse"]
         assert loaded["photo_id"].tolist() == indices
         assert loaded["dataset_split"].tolist() == [
             ["train", "val", "test"][index] for index in indices
@@ -218,53 +213,40 @@ def test_record_order_and_oversampled_multiplicity_are_preserved(indices):
         assert (species / "records.csv").read_bytes() == before
 
 
-@SHARED_BASE
 @pytest.mark.parametrize("invalid_root", ["missing", "empty"])
-def test_input_requires_a_directory_with_species(creator_type, tmp_path, invalid_root):
-    """Missing, non-directory, and classless inputs have explicit errors."""
+def test_input_requires_a_directory_with_species(tmp_path, invalid_root):
+    """Missing and classless inputs have explicit errors."""
     root = tmp_path / "input"
-    if invalid_root == "file":
-        root.touch()
-    elif invalid_root == "empty":
+    if invalid_root == "empty":
         root.mkdir()
 
     with pytest.raises(ValueError):
-        creator_type(root, tmp_path / "output")
+        load_split_records(root)
 
 
-@SHARED_BASE
-def test_selected_species_requires_records_csv(creator_type, tmp_path):
+def test_selected_species_requires_records_csv(tmp_path):
     """Missing metadata in a selected species is not silently ignored."""
     root = tmp_path / "input"
     (root / "mouse").mkdir(parents=True)
 
     with pytest.raises(FileNotFoundError, match="records.csv"):
-        creator_type(root, tmp_path / "output")
+        load_split_records(root)
 
 
-@SHARED_BASE
-def test_header_only_species_records_remain_an_explicit_empty_class(
-    creator_type, tmp_path
-):
+def test_header_only_species_records_remain_an_explicit_empty_class(tmp_path):
     """A valid class with no selected rows remains present with its CSV columns."""
     root = tmp_path / "input"
     species = root / "mouse"
     species.mkdir(parents=True)
     (species / "records.csv").write_text("image_path,dataset_split,photo_id\n")
 
-    creator = creator_type(root, tmp_path / "output")
+    records = load_split_records(root)["mouse"]
 
-    assert creator.class_names == ["mouse"]
-    assert creator.records_by_species["mouse"].empty
-    assert creator.records_by_species["mouse"].columns.tolist() == [
-        "image_path",
-        "dataset_split",
-        "photo_id",
-    ]
+    assert records.empty
+    assert records.columns.tolist() == ["image_path", "dataset_split", "photo_id"]
 
 
-@SHARED_BASE
-def test_records_without_headers_are_rejected(creator_type, tmp_path):
+def test_records_without_headers_are_rejected(tmp_path):
     """An empty file is malformed metadata rather than an empty class."""
     root = tmp_path / "input"
     species = root / "mouse"
@@ -272,24 +254,318 @@ def test_records_without_headers_are_rejected(creator_type, tmp_path):
     (species / "records.csv").touch()
 
     with pytest.raises(ValueError, match="header"):
-        creator_type(root, tmp_path / "output")
+        load_split_records(root)
 
 
-@SHARED_BASE
-def test_constructor_does_not_load_speciesnet(creator_type, tmp_path, monkeypatch):
-    """Input setup stays separate from baseline-model inference."""
-    from smartrodent import yolo_dataset_creation
+def test_records_read_shared_root_paths_after_bundle_move(bundle):
+    """Records find originals without consulting the old location or the cwd."""
+    dataset_root, records_by_species = bundle
+    for records in records_by_species.values():
+        records["dataset_split"] = ["train", "validation", "test"] * 2
+    write_stage_records(dataset_root / "stage7_sampled", records_by_species)
+    moved_root = move_bundle(dataset_root)
 
-    def unexpected_model_load(*args, **kwargs):
-        raise AssertionError("Input setup must not load model weights")
+    loaded = load_split_records(moved_root / "stage7_sampled")
 
-    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", unexpected_model_load)
-    root = tmp_path / "input"
-    write_species(root, "mouse", ["train"])
+    for species, original in records_by_species.items():
+        assert [Path(path).resolve() for path in loaded[species]["image_path"]] == [
+            moved_root / path for path in original["image_path"]
+        ]
+        stored = pd.read_csv(moved_root / "stage7_sampled" / species / "records.csv")
+        assert stored["image_path"].tolist() == original["image_path"].tolist()
 
-    creator = creator_type(root, tmp_path / "output")
 
-    assert creator.class_names == ["mouse"]
+# --- detection ----------------------------------------------------------------------
+
+
+def detect(paths, predictions, *, threshold=0.5):
+    """Run the detector with an external model substitute."""
+    detector = SpeciesNetDetector(
+        model=SpeciesNetStub(predictions),
+        confidence_threshold=threshold,
+        allowed_classes=("animal",),
+        iou_threshold=0.45,
+    )
+    return detector.detect(paths)
+
+
+def test_results_preserve_full_paths_and_extract_independent_crops(images):
+    """Same-named source images retain distinct metadata and correct crop pixels."""
+    result = detect(images, stub_for(images).predictions)
+
+    assert set(result) == {str(path) for path in images}
+    for path, color in zip(images, [(255, 0, 0), (0, 0, 255)], strict=True):
+        (record,) = result[str(path)]
+        assert record["bbox"] == [0.25, 0.2, 0.5, 0.6]
+        assert record["confidence"] == 0.9
+        assert record["label"] == "animal"
+        assert record["detection_index"] == 0
+        assert isinstance(record["crop"], Image.Image)
+        assert record["crop"].size == (10, 6)
+        assert all(
+            record["crop"].getpixel((x, y)) == color
+            for x in range(10)
+            for y in range(6)
+        )
+
+
+def test_confidence_boundary_and_allowed_labels_are_respected(images):
+    """The confidence boundary is inclusive and non-animal boxes are excluded."""
+    predictions = [
+        {
+            "filepath": str(images[0]),
+            "detections": [
+                detection(0.49),
+                detection(0.5),
+                detection(0.99, label="human"),
+            ],
+        }
+    ]
+
+    (record,) = detect(images[:1], predictions)[str(images[0])]
+
+    assert record["confidence"] == 0.5
+    assert record["detection_index"] == 1
+
+
+def test_nms_keeps_strongest_overlap_and_separate_detection(images):
+    """Overlapping boxes are suppressed without losing separate animals."""
+    predictions = [
+        {
+            "filepath": str(images[0]),
+            "detections": [
+                detection(0.7),
+                detection(0.95),
+                detection(0.8, bbox=(0.0, 0.0, 0.1, 0.1)),
+            ],
+        }
+    ]
+
+    records = detect(images[:1], predictions)[str(images[0])]
+
+    assert [record["detection_index"] for record in records] == [1, 2]
+    assert [record["confidence"] for record in records] == [0.95, 0.8]
+
+
+def _xyxy(detection_):
+    """SpeciesNet's normalized xywh box as a one-row xyxy tensor."""
+    x, y, width, height = detection_["bbox"]
+    return torch.tensor([[x, y, x + width, y + height]], dtype=torch.float32)
+
+
+def _greedy_nms_reference(detections, iou_threshold):
+    """The hand-written NMS loop that torchvision replaces, kept to compare against.
+
+    Temporary: remove this and its test once the swap has been reviewed.
+    """
+
+    def xyxy(index):
+        return _xyxy(detections[index])
+
+    order = sorted(
+        range(len(detections)), key=lambda i: detections[i]["conf"], reverse=True
+    )
+    keep, suppressed = [], set()
+    for position, index in enumerate(order):
+        if index in suppressed:
+            continue
+        keep.append(index)
+        for other in order[position + 1 :]:
+            if (
+                other not in suppressed
+                and box_iou(xyxy(index), xyxy(other)).item() > iou_threshold
+            ):
+                suppressed.add(other)
+    return keep
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    boxes=st.lists(
+        st.tuples(
+            st.floats(0.0, 0.5),
+            st.floats(0.0, 0.5),
+            st.floats(0.01, 0.5),
+            st.floats(0.01, 0.5),
+        ),
+        max_size=8,
+    ),
+    # Distinct even in float32, the precision NMS compares scores in.
+    confidences=st.lists(
+        st.integers(100, 10_000), min_size=8, max_size=8, unique=True
+    ).map(lambda values: [value / 10_000 for value in values]),
+    iou_threshold=st.floats(0.0, 1.0),
+)
+def test_nms_matches_the_replaced_greedy_loop(boxes, confidences, iou_threshold):
+    """Temporary old-vs-new check for distinct scores; ties may now resolve differently."""
+    detections = [
+        detection(confidence, bbox=box)
+        for box, confidence in zip(boxes, confidences, strict=False)
+    ]
+    # Ultralytics' IoU adds 1e-7 to the union and torchvision's does not, so a pair
+    # whose IoU is within rounding distance of the threshold may legitimately differ.
+    assume(
+        all(
+            abs(box_iou(_xyxy(first), _xyxy(second)).item() - iou_threshold) > 1e-3
+            for position, first in enumerate(detections)
+            for second in detections[position + 1 :]
+        )
+    )
+    with TemporaryDirectory() as directory:
+        path = (Path(directory) / "source.png").resolve()
+        Image.new("RGB", (20, 10)).save(path)
+        detector = SpeciesNetDetector(
+            model=SpeciesNetStub([{"filepath": str(path), "detections": detections}]),
+            confidence_threshold=0.0,
+            iou_threshold=iou_threshold,
+        )
+
+        records = detector.detect([path])[str(path)]
+
+    assert [record["detection_index"] for record in records] == _greedy_nms_reference(
+        detections, iou_threshold
+    )
+
+
+@pytest.mark.parametrize("detections", [[], [detection(0.1)]])
+def test_images_without_accepted_detections_remain_in_results(images, detections):
+    """An empty result is explicit rather than silently dropping its source image."""
+    predictions = [{"filepath": str(images[0]), "detections": detections}]
+
+    assert detect(images[:1], predictions) == {str(images[0]): []}
+
+
+@given(
+    confidence=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    threshold=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+)
+def test_confidence_filter_matches_inclusive_threshold(confidence, threshold):
+    """Every valid confidence/threshold pair obeys the same acceptance rule."""
+    # Each generated example owns its files; no function-scoped fixture state leaks
+    # between Hypothesis examples.
+    with TemporaryDirectory() as directory:
+        path = (Path(directory) / "source.png").resolve()
+        Image.new("RGB", (20, 10), "red").save(path)
+        predictions = [{"filepath": str(path), "detections": [detection(confidence)]}]
+
+        result = detect([path], predictions, threshold=threshold)
+
+        assert len(result[str(path)]) == int(confidence >= threshold)
+
+
+@pytest.mark.parametrize("model_name", [None, "custom-model"])
+def test_model_is_loaded_lazily_once_and_reused(monkeypatch, images, model_name):
+    """Successive calls reuse one detector loaded with the configured identifier."""
+    constructor = Mock(return_value=stub_for(images))
+    # Patch the external SDK symbols where the library imports them.
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    monkeypatch.setattr(yolo_dataset_creation, "DEFAULT_MODEL", "test-default")
+
+    detector = SpeciesNetDetector(model_name=model_name)
+    assert detector.detect([]) == {}
+    constructor.assert_not_called()
+
+    for path in images:
+        assert detector.detect([path])[str(path)][0]["confidence"] == 0.9
+
+    constructor.assert_called_once_with(
+        "test-default" if model_name is None else model_name,
+        components="detector",
+    )
+
+
+def test_injected_model_is_used_instead_of_loading_one(monkeypatch, images):
+    constructor = Mock(side_effect=AssertionError("Injected model must be reused"))
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    detector = SpeciesNetDetector(model=stub_for(images))
+
+    for _ in range(2):
+        assert set(detector.detect(images)) == {str(path) for path in images}
+
+    constructor.assert_not_called()
+
+
+def test_conflicting_model_settings_are_rejected():
+    """A supplied model and a model identifier cannot silently override each other."""
+    with pytest.raises(ValueError):
+        SpeciesNetDetector(model=SpeciesNetStub([]), model_name="other-model")
+
+
+def test_missing_model_result_is_not_silently_dropped(images):
+    """A missing prediction is an inference failure, not a negative detection."""
+    with pytest.raises(ValueError, match="prediction"):
+        detect(images, [])
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_external_detector_cutoff_is_restored_after_inference(images, fail):
+    """The caller's detector setting survives successful and failed inference."""
+    previous_threshold = SpeciesNetDetectorStub.DETECTION_THRESHOLD
+    detector = SpeciesNetDetector(model=stub_for(images[:1], fail=fail))
+
+    if fail:
+        with pytest.raises(RuntimeError, match="Model failed"):
+            detector.detect(images[:1])
+    else:
+        detector.detect(images[:1])
+
+    assert SpeciesNetDetectorStub.DETECTION_THRESHOLD == previous_threshold
+
+
+@pytest.mark.speciesnet_integration
+def test_real_speciesnet_api_returns_detection_metadata_and_crops(tmp_path):
+    """Infer real boxes/crops on a bundled photograph, without an SDK substitute.
+
+    Run with RUN_SPECIESNET_INTEGRATION=1. SPECIESNET_MODEL may point to a local
+    weights directory to avoid downloads; otherwise the SDK uses its default
+    model and may download weights into its normal cache.
+    """
+    if os.environ.get("RUN_SPECIESNET_INTEGRATION") != "1":
+        pytest.skip("Set RUN_SPECIESNET_INTEGRATION=1 to run real model inference")
+
+    from ultralytics.utils import ASSETS
+
+    # This installed sample has people and a bus, so use those detector labels
+    # rather than asserting animal detection on an artificial test image.
+    paths = [tmp_path / "first.jpg", tmp_path / "second.jpg"]
+    for path in paths:
+        shutil.copy2(ASSETS / "bus.jpg", path)
+
+    detector = SpeciesNetDetector(
+        model_name=os.environ.get("SPECIESNET_MODEL"),
+        confidence_threshold=0.5,
+        allowed_classes=("human", "vehicle"),
+        iou_threshold=0.45,
+    )
+    result = detector.detect(paths)
+
+    assert set(result) == {str(path) for path in paths}
+    for path in paths:
+        records = result[str(path)]
+        assert records, "Real inference must produce at least one accepted box"
+        with Image.open(path) as source:
+            source = source.convert("RGB")
+            for record in records:
+                assert 0.5 <= record["confidence"] <= 1.0
+                assert record["label"] in {"human", "vehicle"}
+                assert len(record["bbox"]) == 4
+                assert record["detection_index"] >= 0
+                crop = record["crop"]
+                assert crop.mode == "RGB"
+                x, y, width, height = record["bbox"]
+                expected = source.crop(
+                    (
+                        x * source.width,
+                        y * source.height,
+                        (x + width) * source.width,
+                        (y + height) * source.height,
+                    )
+                )
+                assert crop.size == expected.size
+                assert crop.tobytes() == expected.tobytes()
+
+
+# --- dataset creation ---------------------------------------------------------------
 
 
 @pytest.fixture
@@ -305,47 +581,35 @@ def creator_input(images):
     return images[0].parent.parent
 
 
-@SHARED_BASE
-def test_creators_use_injected_detector_without_changing_source_records(
-    creator_type, creator_input, images, tmp_path, monkeypatch
+def test_preparing_a_creator_loads_no_model_and_writes_nothing(
+    creator_input, tmp_path, monkeypatch
 ):
-    """Inference reuses the supplied model without altering splits or duplicate rows."""
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images],
-        max_batch_size=1,
+    """Input setup reads records only; inference and output wait for ``create``."""
+    monkeypatch.setattr(
+        yolo_dataset_creation, "SpeciesNet", Mock(side_effect=AssertionError("load"))
     )
-    constructor = Mock(side_effect=AssertionError("Injected model must be reused"))
-    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
     output = tmp_path / "output"
-    creator = creator_type(creator_input, output, model=model)
-    original = {
-        species: records.copy(deep=True)
-        for species, records in creator.records_by_species.items()
-    }
 
-    assert creator.speciesnet_model is model
-    for _ in range(2):
-        result = creator.infer_batch(images, batch_size=1)
-        assert set(result) == {str(path) for path in images}
-        assert all(len(item["detections"]) == 1 for item in result.values())
-    assert creator.speciesnet_model is model
-    constructor.assert_not_called()
-    for species, records in creator.records_by_species.items():
-        pd.testing.assert_frame_equal(records, original[species])
+    creator = YoloDatasetCreator(
+        creator_input,
+        output,
+        layout=DetectorLayout(),
+        detector=SpeciesNetDetector(model_name="custom-speciesnet"),
+        class_names=["shrew", "mouse"],
+    )
+
+    assert creator.class_names == ["shrew", "mouse"]
     assert len(creator.records_by_species["mouse"]) == 2
     assert not output.exists()
 
 
-def test_detector_create_symlinks_sources_and_writes_yolo_labels(
+def test_detector_layout_symlinks_sources_and_writes_yolo_labels(
     creator_input, images, tmp_path
 ):
     """Detector output preserves supplied splits and each oversampled occurrence."""
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
-    )
     output = tmp_path / "detector"
-    creator = YoloDetectorDatasetCreatorFromSpeciesnet(
-        creator_input, output, class_names=["shrew", "mouse"], model=model
+    creator = make_creator(
+        creator_input, output, class_names=["shrew", "mouse"], model=stub_for(images)
     )
 
     assert creator.create() == output
@@ -382,16 +646,13 @@ def test_detector_create_symlinks_sources_and_writes_yolo_labels(
     }
 
 
-def test_classifier_create_saves_crops_in_assigned_class_and_split(
+def test_classifier_layout_saves_crops_in_assigned_class_and_split(
     creator_input, images, tmp_path
 ):
     """Classifier outputs are actual crops, with duplicates retained in one split."""
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
-    )
     output = tmp_path / "classifier"
-    creator = YoloClassifierDatasetCreatorFromSpeciesnet(
-        creator_input, output, model=model
+    creator = make_creator(
+        creator_input, output, layout=ClassifierLayout(), model=stub_for(images)
     )
 
     assert creator.create() == output
@@ -416,7 +677,7 @@ def test_classifier_create_saves_crops_in_assigned_class_and_split(
                         crop.getpixel((5, 3)), color, strict=True
                     )
                 )
-    assert not list((output / "val").rglob("*.jpg"))
+    assert not list((output / "val").rglob("*.png"))
     data = yaml.safe_load((output / "data.yaml").read_text())
     assert data == {
         "path": str(output),
@@ -440,13 +701,10 @@ def test_classifier_crops_drop_source_icc_profiles_but_keep_pixels(
         pixels.save(path, icc_profile=broken_profile)
         with Image.open(path) as reloaded:
             assert reloaded.info["icc_profile"] == broken_profile
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
-    )
     output = tmp_path / "classifier"
 
-    YoloClassifierDatasetCreatorFromSpeciesnet(
-        creator_input, output, model=model
+    make_creator(
+        creator_input, output, layout=ClassifierLayout(), model=stub_for(images)
     ).create()
 
     crops = sorted(output.rglob("*.png"))
@@ -458,9 +716,8 @@ def test_classifier_crops_drop_source_icc_profiles_but_keep_pixels(
             assert crop.getpixel((5, 3)) == expected
 
 
-@SHARED_BASE
 def test_create_skips_images_without_accepted_boxes_and_records_why(
-    creator_type, creator_input, images, tmp_path
+    creator_input, images, tmp_path
 ):
     """Empty/filtered detections produce no examples but retain every metadata row."""
     model = SpeciesNetStub(
@@ -470,12 +727,10 @@ def test_create_skips_images_without_accepted_boxes_and_records_why(
         ]
     )
     output = tmp_path / "output"
-    creator = creator_type(creator_input, output, model=model)
 
-    assert creator.create() == output
+    assert make_creator(creator_input, output, model=model).create() == output
 
     metadata = json.loads((output / "metadata.json").read_text())["records"]
-    assert len(metadata) == 3
     assert [record["image_path"] for record in metadata] == [
         str(images[0]),
         str(images[0]),
@@ -494,7 +749,6 @@ def test_create_skips_images_without_accepted_boxes_and_records_why(
         assert record["outputs"] == []
     assert not list(output.rglob("*.txt"))
     assert not list(output.rglob("*.png"))
-    assert not list(output.rglob("*.jpg"))
 
 
 def test_detector_filenames_do_not_collide_for_same_named_sources_in_one_split(
@@ -505,15 +759,9 @@ def test_detector_filenames_do_not_collide_for_same_named_sources_in_one_split(
     records = pd.read_csv(records_path)
     records["dataset_split"] = "train"
     records.to_csv(records_path, index=False)
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
-    )
     output = tmp_path / "output"
-    creator = YoloDetectorDatasetCreatorFromSpeciesnet(
-        creator_input, output, model=model
-    )
 
-    creator.create()
+    make_creator(creator_input, output, model=stub_for(images)).create()
 
     links = list((output / "images" / "train").iterdir())
     assert len(links) == 3
@@ -523,10 +771,9 @@ def test_detector_filenames_do_not_collide_for_same_named_sources_in_one_split(
     assert len(list((output / "labels" / "train").glob("*.txt"))) == 3
 
 
-@SHARED_BASE
 @pytest.mark.parametrize("destination", ["input", "inside_input", "parent"])
 def test_create_rejects_destinations_overlapping_input(
-    creator_type, creator_input, tmp_path, destination
+    creator_input, tmp_path, destination
 ):
     """A dataset output must not overwrite or contaminate the source input tree."""
     if destination == "input":
@@ -535,7 +782,7 @@ def test_create_rejects_destinations_overlapping_input(
         output = creator_input / "generated"
     else:
         output = creator_input.parent
-    creator = creator_type(creator_input, output, model=SpeciesNetStub([], fail=True))
+    creator = make_creator(creator_input, output, model=SpeciesNetStub([], fail=True))
 
     with pytest.raises(ValueError, match="overlap"):
         creator.create()
@@ -544,41 +791,39 @@ def test_create_rejects_destinations_overlapping_input(
     assert not (creator_input / "generated").exists()
 
 
-@SHARED_BASE
-def test_create_rejects_existing_output_without_overwriting(
-    creator_type, creator_input, tmp_path
-):
+def test_create_rejects_existing_output_without_overwriting(creator_input, tmp_path):
     """Recreating a dataset requires an explicit new destination, not silent overwrite."""
     output = tmp_path / "output"
     output.mkdir()
     marker = output / "existing.txt"
     marker.write_text("keep me")
-    creator = creator_type(creator_input, output, model=SpeciesNetStub([], fail=True))
+    creator = make_creator(creator_input, output, model=SpeciesNetStub([], fail=True))
 
     with pytest.raises(FileExistsError):
         creator.create()
 
-    assert marker.read_text() == "keep me"
     assert list(output.iterdir()) == [marker]
+    assert marker.read_text() == "keep me"
 
 
-def test_empty_classes_create_layout_without_loading_model(creator_type, tmp_path):
+def test_empty_classes_create_layout_without_inference(layout, tmp_path):
     """An empty but valid input produces configuration and empty provenance."""
     root = tmp_path / "input"
     (root / "mouse").mkdir(parents=True)
     (root / "mouse" / "records.csv").write_text("image_path,dataset_split\n")
     output = tmp_path / "output"
-    creator = creator_type(root, output, model=SpeciesNetStub([], fail=True))
+    creator = make_creator(
+        root, output, layout=layout, model=SpeciesNetStub([], fail=True)
+    )
 
     assert creator.create() == output
 
     assert json.loads((output / "metadata.json").read_text()) == {"records": []}
     assert yaml.safe_load((output / "data.yaml").read_text())["names"] == {0: "mouse"}
-    assert creator.metadata_records == []
 
 
 def test_create_persists_successful_detection_and_output_provenance(
-    creator_type, creator_input, images, tmp_path
+    layout, creator_input, images, tmp_path
 ):
     """Written examples retain source metadata and JSON-safe detection/output records."""
     records_path = images[0].parent / "records.csv"
@@ -592,7 +837,7 @@ def test_create_persists_successful_detection_and_output_provenance(
         ]
     )
     output = tmp_path / "output"
-    creator = creator_type(creator_input, output, model=model)
+    creator = make_creator(creator_input, output, layout=layout, model=model)
     original = {
         species: records.copy(deep=True)
         for species, records in creator.records_by_species.items()
@@ -601,7 +846,6 @@ def test_create_persists_successful_detection_and_output_provenance(
     creator.create()
 
     metadata = json.loads((output / "metadata.json").read_text())["records"]
-    assert metadata == creator.metadata_records
     assert [record["status"] for record in metadata] == [
         "written",
         "written",
@@ -634,20 +878,22 @@ def test_create_persists_successful_detection_and_output_provenance(
         pd.testing.assert_frame_equal(records, original[species])
 
 
-@SHARED_BASE
 def test_create_preserves_loaded_numeric_metadata_precision(
-    creator_type, creator_input, images, tmp_path
+    creator_input, images, tmp_path
 ):
     """Serializing provenance must not further round the metadata loaded from CSV."""
     records_path = images[0].parent / "records.csv"
     frame = pd.read_csv(records_path)
     frame["measurement"] = [0.12345678901234567, 1.2345678901234567]
     frame.to_csv(records_path, index=False)
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": []} for path in images]
-    )
     output = tmp_path / "output"
-    creator = creator_type(creator_input, output, model=model)
+    creator = make_creator(
+        creator_input,
+        output,
+        model=SpeciesNetStub(
+            [{"filepath": str(path), "detections": []} for path in images]
+        ),
+    )
     expected = creator.records_by_species["mouse"]["measurement"].tolist()
 
     creator.create()
@@ -657,7 +903,7 @@ def test_create_preserves_loaded_numeric_metadata_precision(
 
 
 def test_create_writes_every_accepted_detection(
-    creator_type, creator_input, images, tmp_path
+    layout, creator_input, images, tmp_path
 ):
     """Multiple boxes become multiple labels or crops, not a single selected animal."""
     model = SpeciesNetStub(
@@ -673,11 +919,10 @@ def test_create_writes_every_accepted_detection(
         ]
     )
     output = tmp_path / "output"
-    creator = creator_type(creator_input, output, model=model)
 
-    creator.create()
+    make_creator(creator_input, output, layout=layout, model=model).create()
 
-    if creator_type is YoloDetectorDatasetCreatorFromSpeciesnet:
+    if isinstance(layout, DetectorLayout):
         labels = list((output / "labels" / "train").glob("*.txt"))
         assert len(labels) == 2
         for label in labels:
@@ -685,7 +930,7 @@ def test_create_writes_every_accepted_detection(
                 "0 0.5 0.5 0.5 0.6",
                 "0 0.05 0.05 0.1 0.1",
             ]
-    elif creator_type is YoloClassifierDatasetCreatorFromSpeciesnet:
+    elif isinstance(layout, ClassifierLayout):
         paths = list((output / "train" / "mouse").iterdir())
         assert len(paths) == 4
         sizes = []
@@ -695,14 +940,11 @@ def test_create_writes_every_accepted_detection(
         assert sizes.count((10, 6)) == 2
         assert sizes.count((2, 1)) == 2
     else:
-        pytest.fail("Unexpected creator type")
+        pytest.fail("Unexpected layout")
 
 
-@SHARED_BASE
 @pytest.mark.parametrize("batch_size", [7, 40])  # uneven batches, last one partial
-def test_create_handles_more_than_one_inference_batch(
-    creator_type, tmp_path, batch_size
-):
+def test_create_infers_in_bounded_batches(tmp_path, batch_size):
     """A capacity-limited detector processes a dataset larger than one batch."""
     root = tmp_path / "input"
     species = root / "mouse"
@@ -713,20 +955,15 @@ def test_create_handles_more_than_one_inference_batch(
     pd.DataFrame(
         [{"image_path": str(path), "dataset_split": "train"} for path in paths]
     ).to_csv(species / "records.csv", index=False)
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in paths],
-        max_batch_size=batch_size,
-    )
+    model = stub_for(paths, max_batch_size=batch_size)
     model.detect = Mock(wraps=model.detect)
     output = tmp_path / "output"
-    creator = creator_type(root, output, model=model, batch_size=batch_size)
 
-    creator.create()
+    make_creator(root, output, model=model, batch_size=batch_size).create()
 
     assert [len(call.kwargs["filepaths"]) for call in model.detect.call_args_list] == [
         min(batch_size, 65 - start) for start in range(0, 65, batch_size)
     ]
-
     metadata = json.loads((output / "metadata.json").read_text())["records"]
     assert [row["source_row"] for row in metadata] == list(range(65))
     assert all(row["status"] == "written" for row in metadata)
@@ -747,29 +984,21 @@ def test_create_filenames_are_deterministic_and_preserve_oversampling(indices):
             # Non-first observations must not be filtered by this format transformer.
             path = source_dir / "observation_1.png"
             Image.new("RGB", (20, 10), "red").save(path)
-            paths.append(path)
+            paths.append(path.resolve())
         pd.DataFrame(
             [
                 {
-                    "image_path": str(paths[index].resolve()),
+                    "image_path": str(paths[index]),
                     "dataset_split": "train",
                     "photo_id": index,
                 }
                 for index in indices
             ]
         ).to_csv(species / "records.csv", index=False)
-        model = SpeciesNetStub(
-            [
-                {"filepath": str(path.resolve()), "detections": [detection(0.9)]}
-                for path in paths
-            ]
-        )
+        model = stub_for(paths)
         output_names = []
         for output in [Path(directory) / "first", Path(directory) / "second"]:
-            creator = YoloDetectorDatasetCreatorFromSpeciesnet(
-                root, output, model=model
-            )
-            creator.create()
+            make_creator(root, output, model=model).create()
             metadata = json.loads((output / "metadata.json").read_text())["records"]
             assert [row["photo_id"] for row in metadata] == indices
             names = [row["outputs"][0]["image_path"] for row in metadata]
@@ -779,11 +1008,46 @@ def test_create_filenames_are_deterministic_and_preserve_oversampling(indices):
         assert output_names[0] == output_names[1]
 
 
+def test_detector_symlinks_survive_bundle_move(bundle):
+    """Every generated detector split links relatively to the original stage."""
+    dataset_root, records_by_species = bundle
+    sources = []
+    for records in records_by_species.values():
+        records["dataset_split"] = ["train", "validation", "test"] * 2
+        records["image_path"] = records["image_path"].map(
+            lambda path: str(dataset_root / path)
+        )
+        sources.extend(records["image_path"])
+    write_stage_records(dataset_root / "stage7_sampled", records_by_species)
+
+    output = make_creator(
+        dataset_root / "stage7_sampled",
+        dataset_root / "stage8_detector",
+        model=stub_for(sources),
+    ).create()
+
+    links = list((output / "images").glob("*/*"))
+    assert len(links) == 12
+    expected_targets = {}
+    for link in links:
+        assert link.is_symlink()
+        assert not link.readlink().is_absolute()
+        expected_targets[link.relative_to(dataset_root)] = link.resolve().relative_to(
+            dataset_root
+        )
+    moved_root = move_bundle(dataset_root)
+    for relative_link, relative_source in expected_targets.items():
+        link = moved_root / relative_link
+        source = moved_root / relative_source
+        assert link.resolve(strict=True) == source
+        assert link.read_bytes() == source.read_bytes()
+
+
 @pytest.fixture
 def ultralytics_input(tmp_path):
     """Provide valid, nonempty splits for testing real Ultralytics dataset loading."""
     root = tmp_path / "input"
-    predictions = []
+    sources = []
     for species, color in [("mouse", "red"), ("shrew", "blue")]:
         directory = root / species
         directory.mkdir(parents=True)
@@ -797,11 +1061,9 @@ def ultralytics_input(tmp_path):
             rows.append(row)
             if species == "mouse" and split == "train":
                 rows.append(dict(row))
-            predictions.append(
-                {"filepath": str(image_path), "detections": [detection(0.9)]}
-            )
+            sources.append(image_path)
         pd.DataFrame(rows).to_csv(directory / "records.csv", index=False)
-    return root, SpeciesNetStub(predictions)
+    return root, stub_for(sources)
 
 
 @pytest.mark.parametrize(
@@ -820,10 +1082,7 @@ def test_detector_output_loads_through_real_ultralytics_dataset(
     monkeypatch.setattr(data_utils, "check_font", lambda font: None)
     root, model = ultralytics_input
     output = tmp_path / "detector"
-    creator = YoloDetectorDatasetCreatorFromSpeciesnet(
-        root, output, class_names=["shrew", "mouse"], model=model
-    )
-    creator.create()
+    make_creator(root, output, class_names=["shrew", "mouse"], model=model).create()
 
     data = data_utils.check_det_dataset(output / "data.yaml", autodownload=False)
     dataset = YOLODataset(
@@ -867,10 +1126,13 @@ def test_classifier_output_loads_through_real_ultralytics_dataset(
 
     root, model = ultralytics_input
     output = tmp_path / "classifier"
-    creator = YoloClassifierDatasetCreatorFromSpeciesnet(
-        root, output, class_names=["shrew", "mouse"], model=model
-    )
-    creator.create()
+    make_creator(
+        root,
+        output,
+        layout=ClassifierLayout(),
+        class_names=["shrew", "mouse"],
+        model=model,
+    ).create()
 
     data = check_cls_dataset(output, split=split)
     dataset = ClassificationDataset(
@@ -895,79 +1157,111 @@ def test_classifier_output_loads_through_real_ultralytics_dataset(
     assert sorted(labels) == ([0, 0, 1] if split == "train" else [0, 1])
 
 
-def _configured_creator(config_dir, creator_type, paths, **parameters):
-    """Build one creator through a dataset-creation configuration file."""
+# --- configuration ------------------------------------------------------------------
+
+
+def write_plan(
+    config_dir, datasets, *, layout="detector", batch_size=32, **detector_parameters
+):
+    """Write a dataset-creation configuration and return its path."""
     config_path = config_dir / "creator.yaml"
     config_path.write_text(
         yaml.safe_dump(
             {
-                "creator": {"name": creator_type.__name__, "parameters": parameters},
-                "datasets": [paths],
+                "detector": {
+                    "name": "SpeciesNetDetector",
+                    "parameters": detector_parameters,
+                },
+                "layout": layout,
+                "class_names": ["shrew", "mouse"],
+                "batch_size": batch_size,
+                "datasets": datasets,
             }
         )
     )
-    (creator,) = DatasetCreationPlan.from_yaml(config_path).creators()
-    return creator
+    return config_path
 
 
-@SHARED_BASE
 def test_configured_creators_keep_class_order_and_load_no_model(
-    creator_type, creator_input, tmp_path, monkeypatch
+    creator_input, tmp_path, monkeypatch
 ):
-    """Preparing a configured creator reads records in class order and loads no model."""
-    constructor = Mock(
-        side_effect=AssertionError("Config loading must not load weights")
+    """Preparing configured creators reads records in class order and loads no model."""
+    monkeypatch.setattr(
+        yolo_dataset_creation, "SpeciesNet", Mock(side_effect=AssertionError("load"))
     )
-    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
     output = tmp_path / "stage8_yolo_dataset"
-    creator = _configured_creator(
+    config_path = write_plan(
         tmp_path,
-        creator_type,
-        {"path_to_image_data": str(creator_input), "dataset_output_path": str(output)},
-        class_names=["shrew", "mouse"],
+        [
+            {
+                "path_to_image_data": str(creator_input),
+                "dataset_output_path": str(output),
+            }
+        ],
+        batch_size=7,
         model_name="custom-speciesnet",
     )
 
-    assert type(creator) is creator_type
-    assert creator.classes == {0: "shrew", 1: "mouse"}
+    (creator,) = DatasetCreationPlan.from_yaml(config_path).creators()
+
+    # Both layouts are created through a configuration in the script tests.
+    assert creator.batch_size == 7
+    assert creator.class_names == ["shrew", "mouse"]
     assert list(creator.records_by_species) == ["shrew", "mouse"]
-    constructor.assert_not_called()
     assert not output.exists()
 
 
-@SHARED_BASE
 def test_configured_paths_resolve_against_the_working_directory(
-    creator_type, creator_input, tmp_path, monkeypatch
+    creator_input, tmp_path, monkeypatch
 ):
     """Relative paths follow the working directory, not the YAML file's directory."""
     monkeypatch.chdir(tmp_path)
     config_dir = tmp_path / "configs"
     config_dir.mkdir()
-
-    creator = _configured_creator(
+    config_path = write_plan(
         config_dir,
-        creator_type,
-        {"path_to_image_data": "input", "dataset_output_path": "stage8_yolo_dataset"},
+        [{"path_to_image_data": "input", "dataset_output_path": "stage8_yolo_dataset"}],
     )
+
+    (creator,) = DatasetCreationPlan.from_yaml(config_path).creators()
 
     assert creator.path_to_image_data == creator_input
     assert creator.dataset_output_path == tmp_path / "stage8_yolo_dataset"
 
 
-@SHARED_BASE
-def test_configuration_cannot_inject_a_detector_instance(
-    creator_type, creator_input, tmp_path
-):
-    """A YAML value cannot stand in for an injected detector instance."""
-    paths = {
-        "path_to_image_data": str(creator_input),
-        "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
-    }
+def test_configuration_cannot_inject_a_detector_instance(creator_input, tmp_path):
+    """A YAML value cannot stand in for an injected detector model."""
+    config_path = write_plan(
+        tmp_path,
+        [{"path_to_image_data": str(creator_input), "dataset_output_path": "out"}],
+        model="speciesnet",
+    )
+
     with pytest.raises(ValueError, match="model"):
-        _configured_creator(tmp_path, creator_type, paths, model="speciesnet")
+        DatasetCreationPlan.from_yaml(config_path)
 
 
-@SHARED_BASE
+def test_one_detector_is_shared_by_every_configured_dataset(
+    creator_input, images, tmp_path, monkeypatch
+):
+    """Weights load once per plan, not once per dataset."""
+    constructor = Mock(return_value=stub_for(images))
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
+    outputs = [tmp_path / "first", tmp_path / "second"]
+    config_path = write_plan(
+        tmp_path,
+        [
+            {"path_to_image_data": str(creator_input), "dataset_output_path": str(path)}
+            for path in outputs
+        ],
+    )
+
+    assert DatasetCreationPlan.from_yaml(config_path).create() == outputs
+
+    constructor.assert_called_once()
+    assert all((output / "metadata.json").is_file() for output in outputs)
+
+
 @pytest.mark.parametrize(
     "confidence, labels, iou, indices",
     [
@@ -978,35 +1272,31 @@ def test_configuration_cannot_inject_a_detector_instance(
     ],
 )
 def test_configured_filtering_controls_created_dataset(
-    creator_type, creator_input, images, tmp_path, confidence, labels, iou, indices
+    creator_input, images, tmp_path, monkeypatch, confidence, labels, iou, indices
 ):
     """YAML filtering settings control retained boxes and actual dataset outputs."""
+    model = stub_for(
+        images,
+        detection(0.9, label="human"),
+        detection(0.7, label="human"),
+        detection(0.95, label="animal"),
+    )
+    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", lambda *a, **k: model)
     output = tmp_path / "configured_output"
-    creator = _configured_creator(
+    config_path = write_plan(
         tmp_path,
-        creator_type,
-        {"path_to_image_data": str(creator_input), "dataset_output_path": str(output)},
+        [
+            {
+                "path_to_image_data": str(creator_input),
+                "dataset_output_path": str(output),
+            }
+        ],
         confidence_threshold=confidence,
         allowed_classes=labels,
         iou_threshold=iou,
     )
-    creator.initialize_speciesnet(
-        model=SpeciesNetStub(
-            [
-                {
-                    "filepath": str(path),
-                    "detections": [
-                        detection(0.9, label="human"),
-                        detection(0.7, label="human"),
-                        detection(0.95, label="animal"),
-                    ],
-                }
-                for path in images
-            ]
-        )
-    )
 
-    creator.create()
+    DatasetCreationPlan.from_yaml(config_path).create()
 
     records = json.loads((output / "metadata.json").read_text())["records"]
     assert records
@@ -1015,315 +1305,3 @@ def test_configured_filtering_controls_created_dataset(
         assert record["status"] == ("written" if indices else "skipped")
         for item in record["outputs"]:
             assert (output / item["image_path"]).is_file()
-
-
-def configured_mixin(*, model=None, model_name=None):
-    """Explicitly initialize the mixin without involving dataset creators."""
-    mixin = _SpeciesNetDatasetMixin()
-    mixin.initialize_speciesnet(model=model, model_name=model_name)
-    return mixin
-
-
-def infer(paths, predictions, *, threshold=0.5):
-    """Exercise the public interface with an external model substitute."""
-    return configured_mixin(model=SpeciesNetStub(predictions)).infer_batch(
-        paths,
-        batch_size=2,
-        confidence_threshold=threshold,
-        allowed_classes=("animal",),
-        iou_threshold=0.45,
-    )
-
-
-def test_batch_results_preserve_full_paths_and_extract_independent_crops(images):
-    """Same-named source images retain distinct metadata and correct crop pixels."""
-    predictions = [
-        {"filepath": str(path), "detections": [detection(0.9)]} for path in images
-    ]
-
-    result = infer(images, predictions)
-
-    assert set(result) == {str(path) for path in images}
-    for path, color in zip(images, [(255, 0, 0), (0, 0, 255)], strict=True):
-        records = result[str(path)]["detections"]
-        assert len(records) == 1
-        record = records[0]
-        assert record["bbox"] == [0.25, 0.2, 0.5, 0.6]
-        assert record["confidence"] == 0.9
-        assert record["label"] == "animal"
-        assert record["detection_index"] == 0
-        assert isinstance(record["crop"], Image.Image)
-        assert record["crop"].size == (10, 6)
-        assert all(
-            record["crop"].getpixel((x, y)) == color
-            for x in range(10)
-            for y in range(6)
-        )
-
-
-def test_confidence_boundary_and_allowed_labels_are_respected(images):
-    """The confidence boundary is inclusive and non-animal boxes are excluded."""
-    predictions = [
-        {
-            "filepath": str(images[0]),
-            "detections": [
-                detection(0.49),
-                detection(0.5),
-                detection(0.99, label="human"),
-            ],
-        }
-    ]
-
-    result = infer(images[:1], predictions)
-
-    records = result[str(images[0])]["detections"]
-    assert len(records) == 1
-    assert records[0]["confidence"] == 0.5
-    assert records[0]["detection_index"] == 1
-
-
-def test_nms_keeps_strongest_overlap_and_separate_detection(images):
-    """Overlapping boxes are suppressed without losing separate animals."""
-    predictions = [
-        {
-            "filepath": str(images[0]),
-            "detections": [
-                detection(0.7),
-                detection(0.95),
-                detection(0.8, bbox=(0.0, 0.0, 0.1, 0.1)),
-            ],
-        }
-    ]
-
-    result = infer(images[:1], predictions)
-
-    records = result[str(images[0])]["detections"]
-    assert {record["detection_index"] for record in records} == {1, 2}
-    assert sorted(record["confidence"] for record in records) == [0.8, 0.95]
-
-
-@pytest.mark.parametrize("detections", [[], [detection(0.1)]])
-def test_images_without_accepted_detections_remain_in_results(images, detections):
-    """An empty result is explicit rather than silently dropping its source image."""
-    predictions = [{"filepath": str(images[0]), "detections": detections}]
-
-    result = infer(images[:1], predictions)
-
-    assert result == {str(images[0]): {"detections": []}}
-
-
-@given(
-    confidence=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
-    threshold=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
-)
-def test_confidence_filter_matches_inclusive_threshold(confidence, threshold):
-    """Every valid confidence/threshold pair obeys the same acceptance rule."""
-    # Each generated example owns its files; no function-scoped fixture state leaks
-    # between Hypothesis examples.
-    with TemporaryDirectory() as directory:
-        path = (Path(directory) / "source.png").resolve()
-        Image.new("RGB", (20, 10), "red").save(path)
-        predictions = [{"filepath": str(path), "detections": [detection(confidence)]}]
-
-        result = infer([path], predictions, threshold=threshold)
-
-        assert len(result[str(path)]["detections"]) == int(confidence >= threshold)
-
-
-@pytest.mark.parametrize("model_name", [None, "custom-model"])
-def test_model_is_loaded_lazily_once_and_reused(monkeypatch, images, model_name):
-    """Successive batches reuse one detector loaded with the configured identifier."""
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images]
-    )
-    constructor = Mock(return_value=model)
-    # Patch the external SDK symbols where the library imports them.
-    monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
-    monkeypatch.setattr(yolo_dataset_creation, "DEFAULT_MODEL", "test-default")
-
-    mixin = configured_mixin(model_name=model_name)
-    constructor.assert_not_called()
-    assert mixin.speciesnet_model is None
-    assert mixin.infer_batch([]) == {}
-    constructor.assert_not_called()
-
-    for path in images:
-        result = mixin.infer_batch([path])
-        assert result[str(path)]["detections"][0]["confidence"] == 0.9
-        assert mixin.speciesnet_model is model
-
-    constructor.assert_called_once_with(
-        "test-default" if model_name is None else model_name,
-        components="detector",
-    )
-
-
-def test_empty_batch_returns_empty_mapping_without_loading_model():
-    """An empty batch needs neither an SDK installation nor an inference call."""
-    assert configured_mixin().infer_batch([]) == {}
-
-
-def test_inference_requires_explicit_initialization(images):
-    """Missing lifecycle setup is reported explicitly instead of silently configured."""
-    with pytest.raises(RuntimeError, match="initialize_speciesnet"):
-        _SpeciesNetDatasetMixin().infer_batch(images)
-
-
-def test_initialization_rejects_conflicting_model_settings():
-    """A supplied model and a model identifier cannot silently override each other."""
-    with pytest.raises(ValueError):
-        configured_mixin(model=SpeciesNetStub([]), model_name="other-model")
-
-
-def test_missing_model_result_is_not_silently_dropped(images):
-    """A missing prediction is an inference failure, not a negative detection."""
-    with pytest.raises(ValueError, match="prediction"):
-        infer(images, [])
-
-
-def test_source_images_are_processed_in_bounded_batches(images):
-    """A size-one model can process multiple inputs through the batch interface."""
-    model = SpeciesNetStub(
-        [{"filepath": str(path), "detections": [detection(0.9)]} for path in images],
-        max_batch_size=1,
-    )
-
-    result = configured_mixin(model=model).infer_batch(images, batch_size=1)
-
-    assert set(result) == {str(path) for path in images}
-    assert all(len(metadata["detections"]) == 1 for metadata in result.values())
-
-
-@pytest.mark.parametrize("fail", [False, True])
-def test_external_detector_cutoff_is_restored_after_inference(images, fail):
-    """The caller's detector setting survives successful and failed inference."""
-    model = SpeciesNetStub(
-        [{"filepath": str(images[0]), "detections": [detection(0.9)]}],
-        fail=fail,
-    )
-    previous_threshold = SpeciesNetDetectorStub.DETECTION_THRESHOLD
-    mixin = configured_mixin(model=model)
-
-    if fail:
-        with pytest.raises(RuntimeError, match="Model failed"):
-            mixin.infer_batch(images[:1])
-    else:
-        mixin.infer_batch(images[:1])
-
-    assert SpeciesNetDetectorStub.DETECTION_THRESHOLD == previous_threshold
-
-
-@pytest.mark.speciesnet_integration
-def test_real_speciesnet_api_returns_detection_metadata_and_crops(tmp_path):
-    """Infer real boxes/crops on a bundled photograph, without an SDK substitute.
-
-    Run with RUN_SPECIESNET_INTEGRATION=1. SPECIESNET_MODEL may point to a local
-    weights directory to avoid downloads; otherwise the SDK uses its default
-    model and may download weights into its normal cache.
-    """
-    if os.environ.get("RUN_SPECIESNET_INTEGRATION") != "1":
-        pytest.skip("Set RUN_SPECIESNET_INTEGRATION=1 to run real model inference")
-
-    from ultralytics.utils import ASSETS
-
-    # This installed sample has people and a bus, so use those detector labels
-    # rather than asserting animal detection on an artificial test image.
-    paths = [tmp_path / "first.jpg", tmp_path / "second.jpg"]
-    for path in paths:
-        shutil.copy2(ASSETS / "bus.jpg", path)
-
-    mixin = configured_mixin(model_name=os.environ.get("SPECIESNET_MODEL"))
-    result = mixin.infer_batch(
-        paths,
-        batch_size=2,
-        confidence_threshold=0.5,
-        allowed_classes=("human", "vehicle"),
-        iou_threshold=0.45,
-    )
-
-    assert set(result) == {str(path) for path in paths}
-    for path in paths:
-        records = result[str(path)]["detections"]
-        assert records, "Real inference must produce at least one accepted box"
-        with Image.open(path) as source:
-            source = source.convert("RGB")
-            for record in records:
-                assert 0.5 <= record["confidence"] <= 1.0
-                assert record["label"] in {"human", "vehicle"}
-                assert len(record["bbox"]) == 4
-                assert record["detection_index"] >= 0
-                crop = record["crop"]
-                assert crop.mode == "RGB"
-                assert 0 < crop.width <= source.width
-                assert 0 < crop.height <= source.height
-                x, y, width, height = record["bbox"]
-                expected = source.crop(
-                    (
-                        x * source.width,
-                        y * source.height,
-                        (x + width) * source.width,
-                        (y + height) * source.height,
-                    )
-                )
-                assert crop.size == expected.size
-                assert crop.tobytes() == expected.tobytes()
-
-
-@SHARED_BASE
-def test_yolo_creators_read_shared_root_paths_after_bundle_move(bundle, creator_type):
-    """Creators find originals without consulting the old location or the cwd."""
-    dataset_root, records_by_species = bundle
-    for records in records_by_species.values():
-        records["dataset_split"] = ["train", "validation", "test"] * 2
-    write_stage_records(dataset_root / "stage7_sampled", records_by_species)
-    moved_root = move_bundle(dataset_root)
-
-    creator = creator_type(moved_root / "stage7_sampled", moved_root / "stage8_yolo")
-
-    for species, original in records_by_species.items():
-        resolved = creator.records_by_species[species]["image_path"]
-        assert [Path(path).resolve() for path in resolved] == [
-            moved_root / path for path in original["image_path"]
-        ]
-        stored = pd.read_csv(moved_root / "stage7_sampled" / species / "records.csv")
-        assert stored["image_path"].tolist() == original["image_path"].tolist()
-    assert not (moved_root / "stage8_yolo").exists()
-
-
-def test_yolo_detector_symlinks_survive_bundle_move(bundle):
-    """Every generated detector split links relatively to the original stage."""
-    dataset_root, records_by_species = bundle
-    predictions = []
-    for records in records_by_species.values():
-        records["dataset_split"] = ["train", "validation", "test"] * 2
-        records["image_path"] = records["image_path"].map(
-            lambda path: str(dataset_root / path)
-        )
-        predictions.extend(
-            {"filepath": path, "detections": [detection(0.9)]}
-            for path in records["image_path"]
-        )
-    write_stage_records(dataset_root / "stage7_sampled", records_by_species)
-    creator = YoloDetectorDatasetCreatorFromSpeciesnet(
-        dataset_root / "stage7_sampled",
-        dataset_root / "stage8_detector",
-        model=SpeciesNetStub(predictions),
-    )
-
-    output = creator.create()
-
-    links = list((output / "images").glob("*/*"))
-    assert len(links) == 12
-    expected_targets = {}
-    for link in links:
-        assert link.is_symlink()
-        assert not link.readlink().is_absolute()
-        expected_targets[link.relative_to(dataset_root)] = link.resolve().relative_to(
-            dataset_root
-        )
-    moved_root = move_bundle(dataset_root)
-    for relative_link, relative_source in expected_targets.items():
-        link = moved_root / relative_link
-        source = moved_root / relative_source
-        assert link.resolve(strict=True) == source
-        assert link.read_bytes() == source.read_bytes()

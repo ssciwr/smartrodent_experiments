@@ -3,11 +3,13 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
+import numpy as np
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from ultralytics.utils.metrics import DetMetrics
 
-from smartrodent import training
+from smartrodent import yolo_training as training
 
 
 class FakeYolo:
@@ -156,30 +158,94 @@ def test_mlflow_uses_configured_uri_and_operation_experiments(
     assert ultralytics_settings.update.call_count == 2
 
 
-def test_detector_collects_per_class_metrics(fake_yolo):
+def _validated_detection_metrics() -> DetMetrics:
+    """Real Ultralytics metrics: rodent found perfectly, snake missed, empty unseen."""
+    metrics = DetMetrics(names={0: "empty", 1: "rodent", 2: "snake"})
+    for image, true_positives, confidences, classes in [
+        ("a.jpg", [[True] * 10, [True] * 5 + [False] * 5], [0.9, 0.8], [1, 1]),
+        ("b.jpg", [[False] * 10], [0.3], [2]),
+    ]:
+        metrics.update_stats(
+            {
+                "tp": np.array(true_positives),
+                "conf": np.array(confidences),
+                "pred_cls": np.array(classes),
+                "target_cls": np.array(classes),
+                "target_img": np.unique(classes),
+                "im_name": image,
+            }
+        )
+    metrics.process(plot=False)
+    return metrics
+
+
+def test_detector_collects_per_class_metrics_from_ultralytics(fake_yolo):
+    """Per-class values come from Ultralytics; unvalidated classes are explicit None."""
     trainer = training.YoloDetectionTrainer("dataset")
-    box = SimpleNamespace(
-        ap_class_index=[1],
-        p=[0.75],
-        r=[0.5],
-        f1=[0.6],
-        ap50=[0.8],
-        ap=[0.7],
-    )
+    metrics = _validated_detection_metrics()
     callback_trainer = SimpleNamespace(
         epoch=0,
         epochs=2,
-        metrics={"metrics/mAP50(B)": 0.8, "metrics/mAP50-95(B)": 0.7},
-        validator=SimpleNamespace(
-            metrics=SimpleNamespace(box=box, names={0: "empty", 1: "rodent"})
-        ),
+        metrics=metrics.results_dict,
+        validator=SimpleNamespace(metrics=metrics),
     )
 
     trainer.collect_metrics(callback_trainer)
+    # Ultralytics' final best-model evaluation reuses the event after the last epoch.
+    trainer.collect_metrics(SimpleNamespace(**{**vars(callback_trainer), "epoch": 2}))
 
-    assert trainer.history[1]["classes"]["empty"]["f1"] is None
-    assert trainer.history[1]["classes"]["rodent"]["f1"] == pytest.approx(0.6)
-    assert trainer.history[1]["macro_f1"] == pytest.approx(0.6)
+    assert list(trainer.history) == [1]
+    history = trainer.history[1]
+    assert history["classes"] == {
+        "empty": {
+            "class_index": 0,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "ap50": None,
+            "ap50_95": None,
+        },
+        "rodent": {
+            "class_index": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": pytest.approx(1.0),
+            "ap50": pytest.approx(0.995),
+            "ap50_95": pytest.approx(0.745),
+        },
+        "snake": {
+            "class_index": 2,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "ap50": 0.0,
+            "ap50_95": 0.0,
+        },
+    }
+    assert history["map50"] == history["iou_ap50"] == pytest.approx(0.4975)
+    assert history["map50_95"] == history["iou_map50_95"] == pytest.approx(0.3725)
+    assert history["macro_f1"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda config: config.pop("tune_experiment_name"),
+        lambda config: config.update(registered_model_name="detector"),
+        lambda config: config.update(tracking_uri=" "),
+    ],
+    ids=["missing", "unexpected", "blank"],
+)
+def test_detector_rejects_invalid_mlflow_configuration(fake_yolo, change):
+    mlflow_config = {
+        "tracking_uri": "sqlite:///mlflow.db",
+        "train_experiment_name": "detector-training",
+        "tune_experiment_name": "detector-tuning",
+    }
+    change(mlflow_config)
+
+    with pytest.raises(ValueError):
+        training.YoloDetectionTrainer("dataset", mlflow_config=mlflow_config)
 
 
 def test_detector_loads_config_exports_and_formats_history(tmp_path, fake_yolo):

@@ -282,10 +282,15 @@ def test_configuration_round_trips_without_resolving_the_selected_source_early(
     pipeline_document, tmp_path
 ):
     """Parsing does not require a checkpoint that will only exist after SupCon training."""
+    # The saved copy must describe the run exactly, including integer keys, which
+    # JSON-style serializers would turn into strings. Stage settings are only
+    # validated when the stages are prepared, so this entry is not checked here.
+    pipeline_document["supcon"]["integer_keyed"] = {0: "mouse", 1: "rat"}
     before = deepcopy(pipeline_document)
     config = _configuration(pipeline_document)
     assert pipeline_document == before
     serialized = config.to_dict()
+    assert serialized["supcon"]["integer_keyed"] == {0: "mouse", 1: "rat"}
     assert serialized["classifier"]["initialization"]["encoder"] == {
         "source": "selected_supcon"
     }

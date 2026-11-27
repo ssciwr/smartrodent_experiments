@@ -1,3 +1,5 @@
+import logging
+import runpy
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -6,6 +8,7 @@ import pytest
 import requests
 import yaml
 from bundle_test_support import move_bundle, write_stage_records
+from http_test_support import DROP
 
 from smartrodent.inaturalist import InaturalistDataset
 
@@ -22,7 +25,6 @@ def inat_config(tmp_path):
                 "first_year": 2020,
                 "last_year": 2022,
                 "quality_grade": "needs_id",
-                "seed": 7,
                 "max_img_num": 5,
                 "max_observations": 8,
                 "allowed_licenses": ["cc-by-nc", "cc0"],
@@ -225,7 +227,7 @@ def test_file_not_found_outside_cache_read_propagates(dataset, monkeypatch, phas
 
 @pytest.mark.parametrize("cached", [False, True])
 def test_inaturalist_resumes_images_without_redownloading_existing_files(
-    tmp_path, monkeypatch, cached
+    tmp_path, monkeypatch, http_server, cached
 ):
     """Real image processing accepts photo rows and skips existing files."""
     dataset = InaturalistDataset(
@@ -236,7 +238,7 @@ def test_inaturalist_resumes_images_without_redownloading_existing_files(
             "id": [123, 123],
             "photo_index": [0, 1],
             "photo.url": [
-                f"https://example.test/{index}/square.jpg" for index in range(2)
+                http_server.url(f"/{index}/square.jpg") for index in range(2)
             ],
             "photo.license_code": ["cc-by-nc", "cc-by-nc"],
         }
@@ -250,15 +252,13 @@ def test_inaturalist_resumes_images_without_redownloading_existing_files(
         records.to_csv(species_path / "records.csv", index=False)
     retrieve = Mock(return_value=records)
     monkeypatch.setattr(dataset, "_get_species_records", retrieve)
-    response = Mock(content=b"new image")
-    get = Mock(return_value=response)
-    monkeypatch.setattr("smartrodent.inaturalist.requests.get", get)
+    http_server.serve("/1/large.jpg", (200, b"new image"))
 
     dataset.download()
 
     assert existing_path.read_bytes() == b"existing image"
     assert (images_path / "123_1.jpg").read_bytes() == b"new image"
-    get.assert_called_once_with("https://example.test/1/large.jpg", timeout=30)
+    assert http_server.requested == ["/1/large.jpg"]
     if cached:
         retrieve.assert_not_called()
     else:
@@ -398,9 +398,7 @@ def test_inaturalist_no_observations_can_cross_phase_boundary(tmp_path, monkeypa
         ratelimit_path=tmp_path / "api_ratelimit.db",
     )
     observations = Mock(return_value={"results": []})
-    image_request = Mock()
     monkeypatch.setattr("smartrodent.inaturalist.get_observations_v2", observations)
-    monkeypatch.setattr("smartrodent.inaturalist.requests.get", image_request)
 
     dataset.retrieve_records()
 
@@ -418,8 +416,7 @@ def test_inaturalist_no_observations_can_cross_phase_boundary(tmp_path, monkeypa
     dataset.download_images()
 
     observations.assert_called_once()
-    image_request.assert_not_called()
-    assert (species_path / "imgs").is_dir()
+    assert not any((species_path / "imgs").iterdir())
 
 
 def _photo_observation(observation_id, licenses, year=2022):
@@ -582,55 +579,65 @@ def test_download_removes_response_cache_but_retains_rate_accounting(
     assert unrelated.read_bytes() == b"unrelated"
 
 
-def test_photo_retry_budget_resets_after_each_successful_image(tmp_path, monkeypatch):
-    """One transient failure on each photo stays within the per-photo budget."""
-    dataset = InaturalistDataset(
-        output_path=tmp_path / "dataset",
-        species=["Mus musculus"],
-        years=[2022],
-        max_retries=1,
-        cache_file=tmp_path / "api_requests.db",
-        ratelimit_path=tmp_path / "api_ratelimit.db",
-    )
-    records = pd.DataFrame(
+def _photo_rows(http_server, count):
+    """Photo rows whose thumbnail URLs point at the local server."""
+    return pd.DataFrame(
         {
-            "id": [123, 456],
-            "photo_index": [0, 0],
+            "id": [100 + index for index in range(count)],
+            "photo_index": [0] * count,
             "photo.url": [
-                "https://example.test/first-square.jpg",
-                "https://example.test/second-square.jpg",
+                http_server.url(f"/{100 + index}/square.jpg") for index in range(count)
             ],
         }
     )
-    success_response = Mock(content=b"image")
-    request = Mock(
-        side_effect=[
-            requests.HTTPError("first transient"),
-            success_response,
-            requests.HTTPError("second transient"),
-            success_response,
-        ]
-    )
-    sleep = Mock()
-    images_path = tmp_path / "imgs"
-    images_path.mkdir()
-    monkeypatch.setattr("smartrodent.inaturalist.requests.get", request)
-    monkeypatch.setattr("smartrodent.inaturalist.time.sleep", sleep)
 
-    count, returned = dataset._download_species_images(records, images_path)
+
+def test_each_photo_retries_transient_failures_within_its_own_budget(
+    tmp_path, http_server
+):
+    """One transient failure per photo fits a budget of one retry for each photo."""
+    dataset = InaturalistDataset(
+        tmp_path / "dataset",
+        ["Mus musculus"],
+        years=[2022],
+        max_retries=1,
+        backoff_factor=0,
+    )
+    http_server.serve("/100/large.jpg", (503, b""), (200, b"first"))
+    http_server.serve("/101/large.jpg", DROP, (200, b"second"))
+
+    count, returned = dataset._download_species_images(
+        _photo_rows(http_server, 2), tmp_path
+    )
 
     assert count == 2
-    assert request.call_count == 4
-    assert sleep.call_count == 2
+    assert (tmp_path / "100_0.jpg").read_bytes() == b"first"
+    assert (tmp_path / "101_0.jpg").read_bytes() == b"second"
+    assert len(http_server.requested) == 4
     assert returned["image_path"].notna().all()
 
 
-def test_permanent_api_failure_stops_after_max_retries(tmp_path, monkeypatch):
-    """Permanent record API errors stop after the configured retry budget."""
+def test_persistent_photo_failure_raises_after_the_retry_budget(tmp_path, http_server):
+    dataset = InaturalistDataset(
+        tmp_path / "dataset",
+        ["Mus musculus"],
+        years=[2022],
+        max_retries=1,
+        backoff_factor=0,
+    )
+    http_server.serve("/100/large.jpg", (503, b""))
+
+    with pytest.raises(requests.HTTPError):
+        dataset._download_species_images(_photo_rows(http_server, 1), tmp_path)
+
+    assert http_server.requested == ["/100/large.jpg", "/100/large.jpg"]
+    assert not (tmp_path / "100_0.jpg").exists()
+
+
+def test_record_request_errors_are_left_to_the_api_session(tmp_path, monkeypatch):
+    """The pyinaturalist session already retries; failures are not retried again."""
     request = Mock(side_effect=requests.HTTPError("permanent failure"))
-    sleep = Mock(side_effect=[None, None, AssertionError("retry loop was unbounded")])
     monkeypatch.setattr("smartrodent.inaturalist.get_observations_v2", request)
-    monkeypatch.setattr("smartrodent.inaturalist.time.sleep", sleep)
     dataset = InaturalistDataset(
         output_path=tmp_path / "dataset",
         species=["Mus musculus"],
@@ -638,47 +645,16 @@ def test_permanent_api_failure_stops_after_max_retries(tmp_path, monkeypatch):
         max_observations=1,
         cache_file=tmp_path / "api_requests.db",
         ratelimit_path=tmp_path / "api_ratelimit.db",
-        max_retries=2,
     )
 
     with pytest.raises(requests.HTTPError, match="permanent failure"):
         dataset.retrieve_records()
 
-    assert request.call_count == 3
-    assert sleep.call_count == 2
-
-
-def test_permanent_photo_failure_stops_after_max_retries(tmp_path, monkeypatch):
-    """Permanent image errors also stop after the configured retry budget."""
-    dataset = InaturalistDataset(
-        output_path=tmp_path / "dataset",
-        species=["Mus musculus"],
-        years=[2022],
-        max_retries=1,
-        cache_file=tmp_path / "api_requests.db",
-        ratelimit_path=tmp_path / "api_ratelimit.db",
-    )
-    records = pd.DataFrame(
-        {
-            "id": [123],
-            "photo_index": [0],
-            "photo.url": ["https://example.test/square.jpg"],
-        }
-    )
-    request = Mock(side_effect=requests.HTTPError("permanent photo failure"))
-    sleep = Mock(side_effect=[None, AssertionError("retry loop was unbounded")])
-    monkeypatch.setattr("smartrodent.inaturalist.requests.get", request)
-    monkeypatch.setattr("smartrodent.inaturalist.time.sleep", sleep)
-
-    with pytest.raises(requests.HTTPError, match="permanent photo failure"):
-        dataset._download_species_images(records, tmp_path / "imgs")
-
-    assert request.call_count == 2
-    sleep.assert_called_once_with(20)
+    request.assert_called_once()
 
 
 def test_photo_rows_are_annotated_in_place_without_license_filtering(
-    tmp_path, monkeypatch
+    tmp_path, http_server
 ):
     """Image downloading handles only valid row data, not license policy."""
     dataset = InaturalistDataset(tmp_path, ["Sorex minutus"], years=[2022])
@@ -686,7 +662,7 @@ def test_photo_rows_are_annotated_in_place_without_license_filtering(
         {
             "id": [None, 123, 123, 123, 123, 123],
             "photo_index": [0, 0, 1, 2, 3, 4],
-            "photo.url": ["https://example.test/square.jpg"] * 5 + [None],
+            "photo.url": [http_server.url("/square.jpg")] * 5 + [None],
             "photo.license_code": ["cc-by-nc"] * 4 + ["cc-by", "cc-by-nc"],
         },
         index=[10, 20, 30, 40, 50, 60],
@@ -694,14 +670,13 @@ def test_photo_rows_are_annotated_in_place_without_license_filtering(
     images = tmp_path / "images"
     images.mkdir()
     (images / "123_0.jpg").write_bytes(b"existing")
-    get = Mock(return_value=Mock(content=b"new"))
-    monkeypatch.setattr("smartrodent.inaturalist.requests.get", get)
+    http_server.serve("/large.jpg", (200, b"new"))
 
     count, returned = dataset._download_species_images(records, images)
 
     assert returned is records
     assert count == 4
-    assert get.call_count == 3
+    assert len(http_server.requested) == 3
     assert pd.isna(records.at[10, "image_path"])
     for row, index in [(20, 0), (30, 1), (40, 2), (50, 3)]:
         assert records.at[row, "image_path"] == str(images / f"123_{index}.jpg")
@@ -754,27 +729,68 @@ def test_missing_photo_columns_fail_explicitly(tmp_path):
         dataset._download_species_images(pd.DataFrame({"id": [123]}), tmp_path)
 
 
-@pytest.mark.parametrize("error", [requests.HTTPError, requests.ConnectionError])
-def test_failed_photo_is_retried_before_advancing(tmp_path, monkeypatch, error):
-    """A transient image failure retries the same row before advancing."""
-    dataset = InaturalistDataset(tmp_path, ["Sorex minutus"], years=[2022])
-    records = pd.DataFrame(
-        {
-            "id": [123],
-            "photo_index": [0],
-            "photo.url": ["https://example.test/square.jpg"],
-            "photo.license_code": ["cc-by-nc"],
-        }
+def test_downloader_logs_through_the_package_logger_without_own_handlers(
+    tmp_path, caplog
+):
+    """Handlers belong to the entry point; repeated construction must not stack them."""
+    datasets = [
+        InaturalistDataset(
+            tmp_path / f"dataset_{index}", ["Mus musculus"], years=[2022]
+        )
+        for index in range(2)
+    ]
+
+    with caplog.at_level(logging.INFO):
+        datasets[1].logger.info("probe message")
+
+    assert caplog.messages.count("probe message") == 1
+    assert all(dataset.logger.handlers == [] for dataset in datasets)
+
+
+def test_download_script_logs_to_the_dataset_log_file(tmp_path, monkeypatch):
+    """The entry point keeps the per-dataset log file that the class used to create.
+
+    The script attaches its handlers to the ``smartrodent`` package logger. It cannot
+    rely on ``logging.basicConfig``, which does nothing once the root logger already
+    has handlers (as under pytest).
+    """
+    output_root = tmp_path / "downloaded"
+    config_path = tmp_path / "download.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "inaturalist": {
+                        "output_path": str(output_root),
+                        "species": ["Mus musculus"],
+                        "years": [2024],
+                    }
+                }
+            }
+        )
     )
-    get = Mock(side_effect=[error("temporary"), Mock(content=b"image")])
-    monkeypatch.setattr("smartrodent.inaturalist.requests.get", get)
-    monkeypatch.setattr("smartrodent.inaturalist.time.sleep", Mock())
 
-    count, returned = dataset._download_species_images(records, tmp_path)
+    def download(dataset):
+        dataset.logger.info("probe message")
 
-    assert count == 1
-    assert returned.at[0, "image_path"] == str(tmp_path / "123_0.jpg")
-    assert get.call_count == 2
+    monkeypatch.setattr(InaturalistDataset, "download", download)
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "download_inaturalist_data.py"
+    )
+    monkeypatch.setattr("sys.argv", [str(script), str(config_path)])
+    package_logger = logging.getLogger("smartrodent")
+    handlers, level = list(package_logger.handlers), package_logger.level
+    propagate = package_logger.propagate
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    finally:
+        for handler in set(package_logger.handlers) - set(handlers):
+            handler.close()
+            package_logger.removeHandler(handler)
+        package_logger.setLevel(level)
+        package_logger.propagate = propagate
+
+    assert "probe message" in (output_root / "inaturalist_dataset.log").read_text()
 
 
 def test_inaturalist_writes_shared_root_relative_paths_and_can_resume_after_move(

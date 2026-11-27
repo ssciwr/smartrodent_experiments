@@ -18,6 +18,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 pytest_plugins = [
     "bundle_test_support",
+    "http_test_support",
     "study_test_support",
     "training_test_support",
 ]

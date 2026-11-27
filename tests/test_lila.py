@@ -5,7 +5,6 @@ import json
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -16,8 +15,6 @@ from hypothesis import strategies as st
 
 from smartrodent.lila import LilaDataset
 
-INDEX_URL = "https://lila.test/index.csv"
-TAXONOMY_URL = "https://lila.test/taxonomy.csv"
 JPEG = b"\xff\xd8\xff fake jpeg"
 TAXONOMY = {
     "ship rat": {
@@ -36,20 +33,28 @@ TAXONOMY = {
 
 
 class FakeLila:
-    """Fake LILA index, taxonomy, metadata zips and image bucket; unknown URLs 404."""
+    """Fake LILA index, taxonomy, metadata zips and image bucket; unknown paths 404.
 
-    def __init__(self):
+    It answers a real local HTTP server, so downloads go through the retrying
+    session. ``errors`` maps a path to a status, or to a list of statuses used one
+    per request before the file is served.
+    """
+
+    def __init__(self, base_url):
+        self.base_url = base_url
+        self.index_url = f"{base_url}/lila/index.csv"
+        self.taxonomy_url = f"{base_url}/lila/taxonomy.csv"
         self.files, self.errors, self.requested = {}, {}, []
         self.index, self.taxonomy = [], []
 
     def add(self, name, short, metadata, json_names=None):
-        metadata_url = f"https://lila.test/{short}.json.zip"
+        metadata_path = f"/lila/{short}.json.zip"
         self.index.append(
             {
                 "name": name,
                 "short_name": short,
-                "image_base_url_gcp": f"https://bucket.test/{short}",
-                "metadata_url_gcp": metadata_url,
+                "image_base_url_gcp": f"{self.base_url}/bucket/{short}",
+                "metadata_url_gcp": self.base_url + metadata_path,
             }
         )
         self.taxonomy += [
@@ -59,21 +64,28 @@ class FakeLila:
         with zipfile.ZipFile(archive, "w") as zipped:
             for json_name in json_names or [f"{short}.json"]:
                 zipped.writestr(json_name, json.dumps(metadata))
-        self.files[metadata_url] = archive.getvalue()
+        self.files[metadata_path] = archive.getvalue()
         for image in metadata["images"]:
-            self.files[f"https://bucket.test/{short}/{image['file_name']}"] = JPEG
-        self.files[INDEX_URL] = pd.DataFrame(self.index).to_csv(index=False).encode()
-        self.files[TAXONOMY_URL] = (
+            self.files[f"/bucket/{short}/{image['file_name']}"] = JPEG
+        self.files["/lila/index.csv"] = (
+            pd.DataFrame(self.index).to_csv(index=False).encode()
+        )
+        self.files["/lila/taxonomy.csv"] = (
             pd.DataFrame(self.taxonomy).to_csv(index=False).encode()
         )
 
-    def get(self, url, **kwargs):
-        self.requested.append(url)
-        response = requests.Response()
-        response.url = url
-        response.status_code = self.errors.get(url, 200 if url in self.files else 404)
-        response._content = self.files.get(url, b"")
-        return response
+    def respond(self, path):
+        """Answer one request for ``path`` with its scripted error or its file."""
+        self.requested.append(path)
+        error = self.errors.get(path)
+        if isinstance(error, list) and error:
+            return error.pop(0), b""
+        elif isinstance(error, int):
+            return error, b""
+        elif path in self.files:
+            return 200, self.files[path]
+        else:
+            return 404, b""
 
 
 def alpha_metadata():
@@ -106,15 +118,17 @@ def alpha_metadata():
     }
 
 
-def make(root, datasets, classes, max_img_num=2500):
+def make(lila, root, datasets, classes, max_img_num=2500):
     return LilaDataset(
         root / "lila",
         datasets,
         classes,
         ["cdla"],
-        INDEX_URL,
-        TAXONOMY_URL,
+        lila.index_url,
+        lila.taxonomy_url,
         max_img_num=max_img_num,
+        max_retries=2,
+        backoff_factor=0,
     )
 
 
@@ -123,9 +137,9 @@ def records(dataset, class_name):
 
 
 @pytest.fixture
-def lila(monkeypatch):
-    server = FakeLila()
-    monkeypatch.setattr("smartrodent.lila.requests.get", server.get)
+def lila(http_server):
+    server = FakeLila(http_server.base_url)
+    http_server.respond = server.respond
     return server
 
 
@@ -133,6 +147,7 @@ def lila(monkeypatch):
 def alpha(tmp_path, lila):
     lila.add("Alpha Traps", "alpha", alpha_metadata())
     return make(
+        lila,
         tmp_path,
         {"Alpha Traps": "cdla"},
         ["Rattus rattus", "Rattus", "Felis catus", "empty"],
@@ -158,7 +173,7 @@ def test_genus_class_collects_species_labels_when_species_is_not_configured(
     tmp_path, lila
 ):
     lila.add("Alpha Traps", "alpha", alpha_metadata())
-    dataset = make(tmp_path, {"Alpha Traps": "cdla"}, ["Rattus", "Mus musculus"])
+    dataset = make(lila, tmp_path, {"Alpha Traps": "cdla"}, ["Rattus", "Mus musculus"])
 
     dataset.retrieve_records()
 
@@ -173,6 +188,7 @@ def test_disallowed_license_and_empty_datasets(tmp_path, lila):
         "Gamma Traps", "gamma", {"categories": [], "images": [], "annotations": []}
     )
     dataset = make(
+        lila,
         tmp_path,
         {"Alpha Traps": "cdla", "Beta Traps": "secret", "Gamma Traps": "cdla"},
         ["Rattus rattus"],
@@ -181,7 +197,7 @@ def test_disallowed_license_and_empty_datasets(tmp_path, lila):
     dataset.retrieve_records()
 
     assert set(records(dataset, "Rattus rattus")["dataset"]) == {"Alpha Traps"}
-    assert "https://lila.test/beta.json.zip" not in lila.requested
+    assert "/lila/beta.json.zip" not in lila.requested
 
 
 def test_reruns_keep_existing_records_and_use_the_cache(alpha, lila):
@@ -201,7 +217,7 @@ def test_reruns_keep_existing_records_and_use_the_cache(alpha, lila):
 
 
 def test_download_drops_withheld_images_and_reuses_existing_ones(alpha, lila):
-    del lila.files["https://bucket.test/alpha/cam1/a2.jpg"]  # withheld by LILA
+    del lila.files["/bucket/alpha/cam1/a2.jpg"]  # withheld by LILA
 
     alpha.download()
 
@@ -220,17 +236,33 @@ def test_failures_raise(tmp_path, alpha, lila):
     with pytest.raises(FileNotFoundError):
         alpha.download_images()
     alpha.retrieve_records()
-    lila.errors["https://bucket.test/alpha/cam1/a3.jpg"] = 500
+    lila.errors["/bucket/alpha/cam1/a3.jpg"] = 500
     with pytest.raises(requests.HTTPError):
         alpha.download_images()
     with pytest.raises(KeyError):
-        make(tmp_path / "x", {"Unknown Traps": "cdla"}, ["Rattus"]).retrieve_records()
+        make(
+            lila, tmp_path / "x", {"Unknown Traps": "cdla"}, ["Rattus"]
+        ).retrieve_records()
+
+
+def test_transient_server_errors_are_retried(alpha, lila):
+    """A busy bucket or index does not abort a download that would succeed on retry."""
+    lila.errors["/lila/index.csv"] = [503]
+    lila.errors["/bucket/alpha/cam1/a3.jpg"] = [503, 502]
+
+    alpha.download()
+
+    assert lila.requested.count("/lila/index.csv") == 2
+    assert lila.requested.count("/bucket/alpha/cam1/a3.jpg") == 3
+    assert records(alpha, "Rattus")["image_path"].tolist() == [
+        "lila/Rattus/imgs/alpha_cam1__a3.jpg"
+    ]
 
 
 def test_metadata_zip_must_hold_one_json(tmp_path, lila):
     lila.add("Alpha Traps", "alpha", alpha_metadata(), json_names=["a.json", "b.json"])
     with pytest.raises(ValueError):
-        make(tmp_path, {"Alpha Traps": "cdla"}, ["Rattus"]).retrieve_records()
+        make(lila, tmp_path, {"Alpha Traps": "cdla"}, ["Rattus"]).retrieve_records()
 
 
 def test_from_config_reads_lila_section_and_copies_config(tmp_path):
@@ -241,8 +273,8 @@ def test_from_config_reads_lila_section_and_copies_config(tmp_path):
                 "datasets": {"Alpha Traps": "cdla"},
                 "classes": ["Rattus"],
                 "allowed_licenses": ["cdla"],
-                "index_url": INDEX_URL,
-                "taxonomy_url": TAXONOMY_URL,
+                "index_url": "https://lila.test/index.csv",
+                "taxonomy_url": "https://lila.test/taxonomy.csv",
                 "max_img_num": 7,
             }
         }
@@ -275,16 +307,15 @@ def sequences(sizes):
     st.integers(1, 20),
 )
 def test_cap_applies_per_class_and_dataset_with_whole_sequences(
-    alpha_sizes, beta_sizes, cap
+    module_http_server, alpha_sizes, beta_sizes, cap
 ):
-    server = FakeLila()
+    server = FakeLila(module_http_server.base_url)
+    module_http_server.respond = server.respond
     server.add("Alpha Traps", "alpha", sequences(alpha_sizes))
     server.add("Beta Traps", "beta", sequences(beta_sizes))
-    with (
-        TemporaryDirectory() as directory,
-        patch("smartrodent.lila.requests.get", server.get),
-    ):
+    with TemporaryDirectory() as directory:
         dataset = make(
+            server,
             Path(directory),
             {"Alpha Traps": "cdla", "Beta Traps": "cdla"},
             ["Rattus rattus"],

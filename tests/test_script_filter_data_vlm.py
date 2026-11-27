@@ -1,15 +1,12 @@
 """Entry-point behavior of scripts/filter_data_vlm.py."""
 
-from pathlib import Path
-
 import pandas as pd
 import pytest
 from bundle_test_support import write_stage_config, write_stage_records
+from vlm_test_support import ANSWER_SCHEMA, ScriptedBackend, answer
 
-from scripts import (
-    filter_data_vlm,
-)
-from smartrodent.filter import VLMFilter
+from scripts import filter_data_vlm
+from smartrodent.vlm_filter import VLMFilter
 
 
 @pytest.mark.parametrize("absolute_input", [False, True])
@@ -33,46 +30,41 @@ def test_filter_reads_from_shared_root_and_preserves_paths_for_all_species(
         species: (input_root / species / "records.csv").read_bytes()
         for species in records_by_species
     }
-    backend = VLMFilter(
-        prompt="animal?",
+    backend = ScriptedBackend(lambda path: answer("kept", review=True))
+    vlm_filter = VLMFilter(
+        prompt="animal? {answer_schema}",
         system_prompt="",
-        labels=["kept", "rejected"],
+        answer_schema=ANSWER_SCHEMA,
         taskname="animal",
+        backend=backend,
     )
-    seen_images = []
-
-    def classify(image_paths):
-        results = []
-        for path in image_paths:
-            assert Path(path).read_bytes()
-            seen_images.append(Path(path).resolve())
-            results.append({"label": "kept", "parse_error": False})
-        return results
-
-    monkeypatch.setattr(backend, "_classify_paths", classify)
-    monkeypatch.setattr(VLMFilter, "from_config", lambda _path: backend)
+    monkeypatch.setattr(VLMFilter, "from_config", lambda _path: vlm_filter)
     config = write_stage_config(
         tmp_path / "filter.yaml",
         {
             "paths": {"input_root": str(input_root), "output_root": str(output_root)},
             "species": ["Mus musculus"],
-            "taskname": "animal",
-            "labels": ["kept", "rejected"],
+            "filter": {},
         },
     )
 
     filter_data_vlm.main(config)
 
-    assert seen_images == [
+    assert backend.image_paths == [
         dataset_root / path for path in records_by_species["Mus musculus"]["image_path"]
     ]
     for species, original in records_by_species.items():
         actual = pd.read_csv(output_root / species / "records.csv")
         assert actual["image_path"].tolist() == original["image_path"].tolist()
         assert (input_root / species / "records.csv").read_bytes() == snapshots[species]
-    assert pd.read_csv(output_root / "Mus musculus" / "records.csv")[
-        "kept_animal"
-    ].all()
-    assert not pd.read_csv(output_root / "Sorex araneus" / "records.csv")[
-        "kept_animal"
-    ].any()
+    filtered = pd.read_csv(output_root / "Mus musculus" / "records.csv")
+    assert filtered["kept_animal"].all()
+    assert filtered["vlm_animal_needs_human_review"].all()
+    # Bypassed species are not filtered: no label applies and no answer exists.
+    bypassed = pd.read_csv(output_root / "Sorex araneus" / "records.csv")
+    assert not bypassed[["kept_animal", "rejected_animal"]].any(axis=None)
+    assert (
+        bypassed[["vlm_animal_needs_human_review", "vlm_animal_evidence"]]
+        .isna()
+        .all(axis=None)
+    )
