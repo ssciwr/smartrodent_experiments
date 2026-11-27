@@ -61,7 +61,7 @@ When implementing features, work like this:
 
 - use the test driven development paradigm
 - after the user gives you the requirements, use the following process when tasked with implementation:
-    1) plan: the planner subagent writes the plan including the test list (one line per behaviour, Hypothesis candidates marked). Ask the human to approve plan and test list in one stop.
+    1) plan: Write a plan for implementation including the test list and -functionality (one line per behaviour, Hypothesis candidates marked). Ask the human to approve plan and test list in one stop.
     2) tests: an implementation subagent writes the approved test list and confirms it is red for the right reason (missing code, not test bugs).
     3) implementation: an implementation subagent writes the minimal code that turns the tests green: only what the plan and tests require, no speculative helpers or compatibility shims.
     4) review: the reviewer subagent reviews tests and implementation together, at most 2 rounds. Blockers and should-fix findings are fixed and re-reviewed; nits are fixed by the implementation subagent without another round.
