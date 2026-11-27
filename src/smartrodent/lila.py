@@ -19,7 +19,7 @@ from pydantic import Field, validate_call
 from tqdm import tqdm
 
 from smartrodent.base import DatasetLoader
-from smartrodent.config_utils import load_section
+from smartrodent.config_loading import load_section
 from smartrodent.training_validation import Nonblank, NonnegativeInt, PathSetting, Seed
 
 

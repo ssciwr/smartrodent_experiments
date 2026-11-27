@@ -10,7 +10,7 @@ import optuna
 import pytest
 import yaml
 
-from smartrodent import config_utils
+from smartrodent import config_loading
 
 
 @pytest.fixture(autouse=True)
@@ -66,4 +66,22 @@ def load_tagged_yaml(text: str):
     Returns:
         The loaded document.
     """
-    return yaml.load(text, Loader=config_utils.get_loader())
+    return config_loading.parse_yaml(text)
+
+
+def grid(**changes) -> dict:
+    """Return a `tuning:` section that runs every combination of its categoricals once.
+
+    Args:
+        **changes: Keys overriding the grid defaults.
+
+    Returns:
+        The `tuning:` mapping; n_trials is an upper bound the exhaustive sampler never reaches.
+    """
+    return tuning(
+        **{
+            "n_trials": 20,
+            "sampler": {"name": "BruteForceSampler", "parameters": {"seed": 0}},
+            **changes,
+        }
+    )

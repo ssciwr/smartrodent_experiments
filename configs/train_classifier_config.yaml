@@ -1,6 +1,9 @@
 # python scripts/train_classifier.py configs/train_classifier_config.yaml
-# Sweepable values: scalar | !sweep {values: [...]}.
-# !coupled-sweep pairs values with another sweep identified by its full dotted path.
+# One run, or with a `tuning:` section an Optuna study over the tagged values:
+#   !suggest-float {low, high, step?, log?} | !suggest-int {low, high, step?, log?}
+#   | !suggest-categorical {choices: [...]} (any YAML values).
+# !coupled {target, values} follows a !suggest-categorical choice identified by its full
+# dotted path. A grid is !suggest-categorical values with sampler BruteForceSampler.
 output_directory: runs/classifier_xl_srilanka  # Directory path.
 train_dataset: datasets/stage8_yolo_classifier_srilanka/train  # Class-folder split path.
 validation_dataset: datasets/stage8_yolo_classifier_srilanka/val  # Split path | null.
@@ -39,12 +42,12 @@ initialization:
     # Local checkpoint path; format selected by source.
     checkpoint: /home/hmack/projects/smartrodent_experiments/runs/two_stage_xl_srilanka/supcon/run_001/best.pt
   head:
-    replace: !sweep  # linear (final Linear layer) | full (entire Classify block)
-      values: [linear, full]
-    source: !sweep  # random (fresh weights) | yolo_checkpoint (donor weights)
-      values: [random, yolo_checkpoint]
-    checkpoint: !coupled-sweep  # null (random) | native YOLO classifier checkpoint path
-      target: initialization.head.source  # Full dotted path of the paired sweep.
+    replace: !suggest-categorical  # linear (final Linear layer) | full (entire Classify block)
+      choices: [linear, full]
+    source: !suggest-categorical  # random (fresh weights) | yolo_checkpoint (donor weights)
+      choices: [random, yolo_checkpoint]
+    checkpoint: !coupled  # null (random) | native YOLO classifier checkpoint path
+      target: initialization.head.source  # Full dotted path of the paired choice.
       values:
         - null
         - runs/classify/training/classification/xl_speciesnames_srilanka/full_data_classifier_xl_640/weights/best.pt
@@ -52,7 +55,7 @@ initialization:
 # Layer count N (freezes layers 0..N-1) | list of unique layer indices | 0 / [] (train all).
 # YOLO26-cls has 11 layers: 0-9 encoder, 10 = Classify head. Index 10 is only valid with
 # replace=linear and freezes the head's conv, so only Linear trains (linear probe).
-freeze: !coupled-sweep  # Linear probe (11) | frozen encoder with trainable full head (10).
+freeze: !coupled  # Linear probe (11) | frozen encoder with trainable full head (10).
   target: initialization.head.replace
   values: [11, 10]
 encoder_batchnorm: eval  # Frozen layers' BN: eval (fixed) | adapt (update); omit when nothing is frozen.
@@ -117,3 +120,13 @@ mlflow:  # Tracking settings | null (disabled).
   model_artifact_name: species-classifier-xl  # Nonempty logged-model name.
   champion_alias: champion  # Nonempty registered-model alias.
   # dataset_revision: <immutable-data-revision>  # Optional nonempty revision string | null.
+
+tuning:  # Optuna study over the tagged values | omit for one run.
+  study_name: classifier-head-grid-xl  # Optuna study name; the resume key in persistent storage.
+  storage: sqlite:///optuna.db  # Optuna storage URL | null (in-memory, not resumable).
+  n_trials: 4  # Integer >0; upper bound, the grid sampler stops after every combination.
+  sampler:  # Class name in optuna.samplers and its constructor parameters.
+    name: BruteForceSampler  # Tries every head combination once, then stops the study.
+    parameters: {seed: 42}
+  pruner: null  # Class name in optuna.pruners with parameters | null (never prune).
+  load_if_exists: false  # true resumes a stored study of the same name.

@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from smartrodent.supcon_training import run_training
+from smartrodent.supcon_training import SupConExperiment, TrainingConfiguration
 from smartrodent.training_studies import SupConStudy, is_study_configuration
 
 
@@ -17,7 +17,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run a study for configurations with a tuning section, else the configured runs."""
+    """Run a study for configurations with a tuning section, else the single run."""
     config = _parse_args().config
     if is_study_configuration(config):
         result = SupConStudy.from_yaml(config).run()
@@ -25,8 +25,8 @@ def main() -> None:
             print("Final checkpoint:", trial.last_checkpoint)
         print("Selected checkpoint:", result.selected.best_checkpoint)
     else:
-        for final_checkpoint in run_training(config):
-            print("Final checkpoint:", final_checkpoint)
+        experiment = SupConExperiment(TrainingConfiguration.from_yaml(config))
+        print("Final checkpoint:", experiment.run())
 
 
 if __name__ == "__main__":

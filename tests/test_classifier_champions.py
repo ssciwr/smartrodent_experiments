@@ -1,4 +1,4 @@
-"""Validation champions across classifier sweeps and successive MLflow invocations.
+"""Validation champions across classifier studies and successive MLflow invocations.
 
 The comparison rules of ``ClassifierChampionRegistry`` are tested directly against
 an isolated real SQLite registry. The trial tests below retain real tiny CPU
@@ -17,7 +17,8 @@ import pytest
 import yaml
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
-from training_test_support import invoke_entrypoint, selection_summary
+from study_test_support import grid
+from training_test_support import classifier_summary, invoke_entrypoint
 
 from smartrodent.classifier_champions import ClassifierChampionRegistry
 from smartrodent.experiment_results import ExperimentResult
@@ -218,21 +219,20 @@ def test_unregistered_validated_results_cannot_be_promoted(registry, tmp_path):
 def classifier_trial(
     request,
     classifier_configuration,
-    sweep_pipeline_document,
+    classifier_input_pipeline_document,
     tracking_store,
     tmp_path,
     monkeypatch,
     controlled_scores,
 ):
-    """Configure two real CE runs whose first run/second epoch wins the sweep."""
+    """Configure a real two-trial CE study whose lr=0.001 trial wins at its second epoch."""
     entrypoint = request.param
     if entrypoint == "standalone":
         document = classifier_configuration.to_dict()
         stage = document
     elif entrypoint == "two_stage":
-        document = deepcopy(sweep_pipeline_document)
-        # One SupCon candidate is sufficient here; separate orchestration tests
-        # verify that multiple SupCon candidates are not multiplied by CE sweeps.
+        document = deepcopy(classifier_input_pipeline_document)
+        # One SupCon run is sufficient here; orchestration tests cover SupCon studies.
         document["supcon"].update(epochs=1, optimizer={"lr": 0.001})
         stage = document["classifier"]
     else:
@@ -251,9 +251,11 @@ def classifier_trial(
         },
         train_kwargs={
             **stage["train_kwargs"],
-            "lr0": {"type": "sweep", "values": [0.001, 0.002]},
+            "lr0": {"type": "suggest-categorical", "choices": [0.001, 0.002]},
         },
     )
+    study = grid(study_name="classifier")
+    document["tuning"] = study if entrypoint == "standalone" else {"classifier": study}
     observed = controlled_scores
     observed.document, observed.stage, observed.entrypoint = document, stage, entrypoint
     observed.score_sets = {0.001: [0.2, 0.9, 0.3], 0.002: [0.1, 0.8, 0.4]}
@@ -272,7 +274,12 @@ def classifier_trial(
             entrypoint, document, tmp_path / "trial.yaml", monkeypatch
         )
 
-    observed.run = run
+    def single_run():
+        """Train one classifier without a study: a fixed learning rate, no tuning section."""
+        stage["train_kwargs"]["lr0"] = 0.001
+        document.pop("tuning")
+
+    observed.run, observed.single_run = run, single_run
     monkeypatch.setattr(MlflowClient, "set_registered_model_alias", set_alias)
     return observed
 
@@ -341,25 +348,24 @@ def _versions(store):
     return by_run
 
 
-def test_register_all_classifiers_and_promote_only_the_sweep_winner_after_completion(
+def test_register_all_classifiers_and_promote_only_the_study_winner_after_completion(
     classifier_trial, tracking_store
 ):
-    """Register every candidate and promote the sweep winner's version after completion.
+    """Register every candidate and promote the study winner's version after completion.
 
-    Winner selection by run order and metric direction is tested in
-    test_classifier_sweeps.py and by the comparison tests above; this checks the
-    registration and promotion wiring with the second run winning a "min" metric.
+    Winner selection by metric direction is tested in test_hyperparameter_search.py and
+    by the comparison tests above; this checks the registration and promotion wiring
+    with the lr=0.002 trial winning a "min" metric.
     """
     trial = classifier_trial
-    mode, winner = "min", 1
-    trial.stage["tracked_mode"] = mode
+    trial.stage["tracked_mode"] = "min"
     trial.score_sets = {0.001: [0.9, 0.2, 0.4], 0.002: [0.8, 0.1, 0.5]}
     result = trial.run()
-    summary = selection_summary(trial.document)
+    summary = classifier_summary(trial.document, trial.entrypoint)
     candidates = summary["classifier_results"]
     selected = summary["selected_classifier"]
     assert len(candidates) == 2
-    assert selected["best_checkpoint"] == candidates[winner]["best_checkpoint"]
+    assert selected in candidates
     assert selected["best_epoch"] == 2
     assert selected["best_value"] == 0.1
     versions = _versions(tracking_store)
@@ -371,17 +377,19 @@ def test_register_all_classifiers_and_promote_only_the_sweep_winner_after_comple
     assert _champion(tracking_store).version == winning_version.version
     assert trial.promotions == [(str(winning_version.version), 6)]
     # The champion's comparison tags are proven usable by the next-invocation test.
+    parents = set()
     for candidate in candidates:
         version = versions[candidate["mlflow_run_id"]]
         run = tracking_store.client.get_run(candidate["mlflow_run_id"])
         assert run.info.status == "FINISHED"
-        if trial.entrypoint == "two_stage":
-            assert run.data.tags["mlflow.parentRunId"] == result.mlflow_run_id
-        elif trial.entrypoint == "standalone":
-            assert "mlflow.parentRunId" not in run.data.tags
+        parents.add(run.data.tags["mlflow.parentRunId"])
         checkpoint = Path(candidate["best_checkpoint"])
         card = yaml.safe_load(checkpoint.with_suffix(".model_card.yaml").read_text())
         assert str(card["model"]["registry_version"]) == str(version.version)
+    # Every trial is a child of one run: the study's own, or the pipeline's.
+    assert len(parents) == 1
+    if trial.entrypoint == "two_stage":
+        assert parents == {result.mlflow_run_id}
     assert mlflow.active_run() is None
 
 
@@ -404,7 +412,7 @@ def test_champion_metadata_supports_comparison_on_the_next_real_invocation(
         trial.document["mlflow"].pop("dataset_revision")
     trial.run()
     first = _champion(tracking_store)
-    first_summary = selection_summary(trial.document)
+    first_summary = classifier_summary(trial.document, trial.entrypoint)
     assert first_summary["selected_classifier"]["best_value"] == 0.9
     trial.document["output_directory"] += "-next"
     data = (
@@ -414,7 +422,9 @@ def test_champion_metadata_supports_comparison_on_the_next_real_invocation(
     trial.score_sets = {0.001: [0.2, 0.9, 0.3], 0.002: [0.1, 0.8, 0.4]}
     trial.promotions.clear()
     trial.run()
-    selected = selection_summary(trial.document)["selected_classifier"]
+    selected = classifier_summary(trial.document, trial.entrypoint)[
+        "selected_classifier"
+    ]
     assert selected["best_value"] == 0.9
     assert _champion(tracking_store).version == first.version
     assert trial.promotions == []
@@ -439,7 +449,7 @@ def test_incompatible_champion_stops_the_run_without_promotion(
     assert mlflow.active_run() is None
 
 
-# Sweep failure handling is shared by both entry points; the two-stage pipeline
+# Study failure handling is shared by both entry points; the two-stage pipeline
 # additionally owns a parent run, so one failure mode is checked there too.
 @pytest.mark.parametrize(
     "classifier_trial,failure",
@@ -451,7 +461,7 @@ def test_incompatible_champion_stops_the_run_without_promotion(
     ],
     indirect=["classifier_trial"],
 )
-def test_later_failure_never_promotes_a_partial_sweep(
+def test_later_failure_never_promotes_a_partial_study(
     classifier_trial, tracking_store, tmp_path, monkeypatch, failure
 ):
     """A completed first candidate is not enough to supersede the historical champion."""
@@ -494,30 +504,28 @@ def test_later_failure_never_promotes_a_partial_sweep(
         trial.run()
     assert _champion(tracking_store).version == previous.version
     assert trial.promotions == []
-    summary_path = Path(trial.document["output_directory"]) / "selection.yaml"
-    if summary_path.exists():
-        assert (
-            yaml.safe_load(summary_path.read_text()).get("selected_classifier") is None
-        )
+    if trial.entrypoint == "two_stage":
+        summary_path = Path(trial.document["output_directory"]) / "selection.yaml"
+        assert yaml.safe_load(summary_path.read_text())["selected_classifier"] is None
     assert mlflow.active_run() is None
 
 
 def test_single_classifier_invocation_also_compares_against_the_historical_champion(
     classifier_trial, tracking_store, tmp_path
 ):
-    """Cross-invocation champion protection must not apply only to multi-run sweeps."""
+    """Cross-invocation champion protection must not apply only to studies."""
     trial = classifier_trial
-    trial.stage["train_kwargs"]["lr0"] = 0.001
+    trial.single_run()
     previous = _seed_champion(trial, tracking_store, tmp_path, value=0.95)
     result = trial.run()
-    summary = selection_summary(trial.document)
-    assert len(summary["classifier_results"]) == 1
-    assert summary["selected_classifier"]["best_value"] == 0.9
+    versions = _versions(tracking_store)
+    assert len(versions) == 2
+    (new,) = [version for version in versions.values() if version.run_id]
+    assert new.tags["best_value"] == "0.9"
     assert _champion(tracking_store).version == previous.version
-    assert len(_versions(tracking_store)) == 2
     assert trial.promotions == []
     if trial.entrypoint == "two_stage":
-        assert result.classifier_result == result.selected_classifier
+        assert result.classifier_results == (result.selected_classifier,)
 
 
 @pytest.mark.parametrize("classifier_trial", ["standalone"], indirect=True)
@@ -526,6 +534,7 @@ def test_training_only_classifiers_register_without_selecting_or_replacing_a_cha
 ):
     """Validation requirements apply to promotion, not to the ability to train/register models."""
     trial = classifier_trial
+    trial.single_run()
     previous = _seed_champion(trial, tracking_store, tmp_path)
     trial.document.update(
         validation_dataset=None,
@@ -534,29 +543,23 @@ def test_training_only_classifiers_register_without_selecting_or_replacing_a_cha
         tracked_mode="min",
     )
     trial.run()
-    summary = selection_summary(trial.document)
-    assert len(summary["classifier_results"]) == 2
-    assert summary["selected_classifier"] is None
     versions = _versions(tracking_store)
-    assert len(versions) == 3
-    for result in summary["classifier_results"]:
-        assert (
-            versions[result["mlflow_run_id"]].tags["validation_status"]
-            == "not_validated"
-        )
+    assert len(versions) == 2
+    (new,) = [version for version in versions.values() if version.run_id]
+    assert new.tags["validation_status"] == "not_validated"
     assert _champion(tracking_store).version == previous.version
     assert trial.promotions == []
 
 
 @pytest.mark.parametrize("classifier_trial", ["standalone"], indirect=True)
-def test_tracking_without_registration_still_reports_the_current_sweep_winner(
+def test_tracking_without_registration_still_reports_the_current_study_winner(
     classifier_trial, tracking_store
 ):
     """Champion selection is local functionality, not dependent on a model registry."""
     trial = classifier_trial
     trial.document["mlflow"].pop("registered_model_name")
     trial.run()
-    summary = selection_summary(trial.document)
+    summary = classifier_summary(trial.document, trial.entrypoint)
     assert len(summary["classifier_results"]) == 2
     assert summary["selected_classifier"]["best_value"] == 0.9
     assert tracking_store.client.search_registered_models() == []

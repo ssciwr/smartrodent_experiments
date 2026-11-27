@@ -53,7 +53,7 @@ def test_ranking_accepts_a_single_validated_result():
     mode=st.sampled_from(["min", "max"]),
 )
 def test_ranking_respects_direction_and_keeps_first_exact_tie(values, mode):
-    """Sweep order deterministically breaks ties, including negative-valued metrics."""
+    """Result order deterministically breaks ties, including negative-valued metrics."""
     results = [
         _result(index, value, tracked_mode=mode) for index, value in enumerate(values)
     ]
@@ -62,14 +62,14 @@ def test_ranking_respects_direction_and_keeps_first_exact_tie(values, mode):
     assert select_best_experiment(results) is results[expected_index]
 
 
-def test_empty_sweep_cannot_produce_a_winner():
+def test_no_results_cannot_produce_a_winner():
     """Missing results fail explicitly rather than silently selecting a path."""
     with pytest.raises(ValueError, match="empty|at least one"):
         select_best_experiment([])
 
 
 def test_training_only_result_is_not_eligible_for_automatic_ranking():
-    """No-validation training is valid standalone but cannot win a pipeline sweep."""
+    """No-validation training is valid standalone but cannot win a ranking."""
     result = _result(0, 0.1, validation_dataset=None)
     with pytest.raises(ValueError, match="validation"):
         select_best_experiment([result])

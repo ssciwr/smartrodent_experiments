@@ -2,28 +2,45 @@
 
 import json
 import os
+import re
+import sys
 from abc import abstractmethod
 from collections.abc import Sequence
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Self
+from typing import Annotated, Any, TypedDict
 
 import pandas as pd
 import torch
 import yaml
 from PIL import Image
-from pydantic import validate_call
+from pydantic import ConfigDict, Field, validate_call, with_config
+from pydantic.dataclasses import dataclass
 from speciesnet import DEFAULT_MODEL, SpeciesNet
 from tqdm import tqdm
 from ultralytics.utils.metrics import box_iou
 
 from .base import YoloDatasetCreatorBase
-from .config_utils import load_section
-from .training_validation import ClassNames, Count, Nonblank, PathSetting, Probability
-from .utils import path_component
+from .components import ComponentSpec
+from .config_loading import load_section
+from .training_validation import (
+    ClassNames,
+    Count,
+    MappingInput,
+    Nonblank,
+    PathSetting,
+    Probability,
+    parse_settings,
+)
 
 type DetectorLabels = tuple[Nonblank, ...]
+
+
+def _path_component(value: str) -> str:
+    """Return a readable value that is safe to use as a directory or file name."""
+    value = re.sub(r"[^A-Za-z0-9._ -]+", "_", value).strip(" ._")
+    return value or "unknown"
 
 
 class _SpeciesNetDatasetMixin:
@@ -289,34 +306,6 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         super().__init__(path_to_image_data, dataset_output_path, class_names)
         self.metadata_records: list[dict] = []
 
-    @classmethod
-    def from_config(cls, config_path: str | Path) -> Self:
-        """Build a creator from its class-named mapping under ``data``.
-
-        Args:
-            config_path: YAML configuration with a ``data`` mapping keyed by this
-                creator's class name. Source/output paths are relative to the
-                working directory, not the configuration file's directory.
-                Required settings are ``path_to_image_data`` and
-                ``dataset_output_path``. Optional settings are ``class_names``,
-                ``model_name``, ``batch_size``, ``confidence_threshold``,
-                ``allowed_classes``, and ``iou_threshold``; omitted values retain the
-                constructor defaults.
-
-        Returns:
-            A creator of the requested type, with source records loaded and model
-            weights still unloaded.
-
-        Raises:
-            FileNotFoundError: The configuration or required source files are missing.
-            ValueError: The section is missing, settings are invalid or unsupported,
-                or class selection, metadata, or model configuration is invalid.
-        """
-        settings = load_section(config_path, "data", cls.__name__)
-        if "model" in settings:
-            raise ValueError("model is a Python-only setting; configure model_name")
-        return cls(**settings)
-
     def create(self) -> Path:
         """Infer source records and write the configured YOLO dataset.
 
@@ -411,7 +400,7 @@ class _SpeciesNetDatasetCreatorBase(_SpeciesNetDatasetMixin, YoloDatasetCreatorB
         # preserves intentional oversampling. Limit the readable stem so long
         # source filenames still fit normal filesystem component-length limits.
         identity = sha256(json.dumps([species, image_path]).encode()).hexdigest()
-        readable_stem = path_component(Path(image_path).stem)[:80]
+        readable_stem = _path_component(Path(image_path).stem)[:80]
         return f"{readable_stem}_{identity}_row{source_row:08d}"
 
     def _write_dataset_metadata(self) -> None:
@@ -522,3 +511,64 @@ class YoloClassifierDatasetCreatorFromSpeciesnet(_SpeciesNetDatasetCreatorBase):
     def _training_paths(self) -> dict[str, str]:
         """Return the classifier split directories used by Ultralytics."""
         return {split: split for split in ["train", "val", "test"]}
+
+
+@with_config(ConfigDict(extra="forbid"))
+class _DatasetPaths(TypedDict):
+    """Input records and output root of one dataset."""
+
+    path_to_image_data: PathSetting
+    dataset_output_path: PathSetting
+
+
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
+class DatasetCreationPlan:
+    """Datasets created with one shared creator configuration.
+
+    Args:
+        creator: Creator class (in this module, or ``module:attr``) and the
+            parameters shared by every dataset; the paths belong to ``datasets``.
+        datasets: Input and output directories of each dataset, in creation order.
+    """
+
+    creator: MappingInput[ComponentSpec]
+    datasets: Annotated[tuple[MappingInput[_DatasetPaths], ...], Field(min_length=1)]
+
+    def __post_init__(self):
+        """An injected detector instance is Python-only; YAML names it by ``model_name``."""
+        if "model" in self.creator.parameters:
+            raise ValueError("model is a Python-only setting; configure model_name")
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "DatasetCreationPlan":
+        """Read a dataset-creation configuration.
+
+        Args:
+            path: YAML file; paths inside are relative to the working directory.
+
+        Returns:
+            The validated plan; no records are read yet.
+        """
+        return parse_settings(cls, load_section(path))
+
+    def creators(self) -> list[YoloDatasetCreatorBase]:
+        """Build one creator per dataset; each reads and checks its records, nothing else.
+
+        Returns:
+            Creators in ``datasets`` order, with model weights still unloaded.
+        """
+        return [
+            self.creator.build(sys.modules[__name__], YoloDatasetCreatorBase, **paths)
+            for paths in self.datasets
+        ]
+
+    def create(self) -> list[Path]:
+        """Create every dataset after preparing all creators.
+
+        Every creator reads and checks its records first, so an invalid later
+        dataset is reported before the first one is written.
+
+        Returns:
+            Root directory of each created dataset.
+        """
+        return [creator.create() for creator in self.creators()]

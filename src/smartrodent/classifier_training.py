@@ -22,6 +22,7 @@ from ultralytics.models.yolo.classify.val import ClassificationValidator
 from ultralytics.nn.tasks import ClassificationModel
 from ultralytics.utils.torch_utils import strip_optimizer
 
+from smartrodent import config_loading
 from smartrodent.classifier_champions import ClassifierChampionRegistry
 from smartrodent.classifier_model import YoloClassifierBuilder
 from smartrodent.datasets import ImageDataset
@@ -35,6 +36,7 @@ from smartrodent.experiment_support import (
 )
 from smartrodent.model_card import load_training_template, write_training_card
 from smartrodent.onnx_export import OnnxExporter
+from smartrodent.search_space import reject_search_tags
 from smartrodent.training_validation import (
     ClassifierTrainingSettings,
     ClassNames,
@@ -127,10 +129,7 @@ class ClassifierConfiguration:
         validate_output_paths(
             [self.output_directory],
             (self.train_dataset, self.validation_dataset),
-            [
-                self.model_card_template,
-                *(node.get("checkpoint") for node in self.initialization.values()),
-            ],
+            self.input_files(),
             native_directories=[self.output_directory],
         )
 
@@ -229,6 +228,25 @@ class ClassifierConfiguration:
         ):
             raise ValueError("Validation objectives require validation_dataset")
 
+    def input_files(self, *, include_encoder: bool = True) -> tuple:
+        """Return the template and checkpoint files the run reads; unset ones are None.
+
+        Args:
+            include_encoder: Include the encoder checkpoint. A pipeline excludes it:
+                there the encoder is an output of its SupCon stage.
+
+        Returns:
+            The input file paths.
+        """
+        files = (
+            self.model_card_template,
+            self.initialization["head"].get("checkpoint"),
+        )
+        if include_encoder:
+            return (*files, self.initialization["encoder"]["checkpoint"])
+        else:
+            return files
+
     def native_freeze(self, layer_count: int) -> list[int | str]:
         """Translate ``freeze`` into Ultralytics' freeze list for a concrete network.
 
@@ -326,15 +344,21 @@ class ClassifierConfiguration:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ClassifierConfiguration":
-        """Read a concrete YAML configuration.
+        """Read the configuration of one classifier run.
 
         Args:
-            path: Configuration filename; use the sweep loader for custom tags.
+            path: Configuration filename.
 
         Returns:
             Settings for one experiment.
+
+        Raises:
+            ValueError: The settings are invalid or contain search tags, which need a
+                study (``training_studies.ClassifierStudy``).
         """
-        return cls.from_mapping(yaml.safe_load(Path(path).read_text(encoding="utf-8")))
+        document = config_loading.load_yaml(path)
+        reject_search_tags(document)
+        return cls.from_mapping(document)
 
     def to_dict(self) -> dict:
         """Return an independent YAML-compatible configuration dictionary."""
@@ -577,7 +601,7 @@ class ClassifierExperiment:
     Args:
         configuration: Validated classifier settings.
         encoder_provenance: Optional encoder-selection metadata from orchestration.
-        head_cache: Optional sweep-owned read-only head checkpoint cache.
+        head_cache: Optional read-only head checkpoint cache shared by a study.
     """
 
     def __init__(
@@ -660,7 +684,7 @@ class ClassifierExperiment:
 
         Args:
             parent_run_id: Explicit active pipeline parent for a child run.
-            defer_promotion: Leave final alias comparison to the sweep owner.
+            defer_promotion: Leave the final alias comparison to the owning study.
             epoch_callback: Optional observer called as ``(epoch, tracked_value)``
                 after each native epoch is validated and saved. Exceptions it raises
                 stop training and propagate unchanged, before any publication.

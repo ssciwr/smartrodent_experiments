@@ -87,6 +87,8 @@ stages:
     deps:
       - scripts/create_yolo_dataset.py
       - src/smartrodent/yolo_dataset_creation.py
+      - src/smartrodent/components.py
+      - src/smartrodent/config_loading.py
       - configs/create_yolo_detector_dataset.yaml
       - datasets/stage7_filtered_data_sampled_oversampled
     outs:
@@ -97,6 +99,8 @@ stages:
     deps:
       - scripts/create_yolo_dataset.py
       - src/smartrodent/yolo_dataset_creation.py
+      - src/smartrodent/components.py
+      - src/smartrodent/config_loading.py
       - configs/create_yolo_classifier_dataset.yaml
       - datasets/stage7_filtered_data_sampled_oversampled
     outs:

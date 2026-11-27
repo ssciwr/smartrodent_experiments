@@ -43,7 +43,7 @@ class MlflowConfiguration:
 
     Args:
         tracking_uri: MLflow tracking server or local database URI.
-        experiment_name: Experiment receiving all expanded sweep runs.
+        experiment_name: Experiment receiving all runs, including study trials.
         registered_model_name: Optional registry name for each run's best model.
         model_artifact_name: Name of the logged MLflow PyTorch model.
         champion_alias: Alias assigned to the best validated registered version.
@@ -173,7 +173,7 @@ class ModelPublication:
             write_card: Callback receiving version and model identity metadata;
                 returns the completed YAML and Markdown card paths.
             promote: Assign the alias immediately for validated models. Classifier
-                sweeps disable this until every candidate has published successfully.
+                studies disable this until every trial has published successfully.
 
         Returns:
             The created registry version. Remote publication is not transactional;

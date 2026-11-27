@@ -1,4 +1,4 @@
-"""Contracts for unified SupCon-sweep → selected encoder → CE orchestration."""
+"""Contracts for SupCon stage → selected encoder → CE stage orchestration."""
 
 import hashlib
 from copy import deepcopy
@@ -12,6 +12,7 @@ import yaml
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from mlflow.exceptions import MlflowException
+from study_test_support import grid
 from training_test_support import (
     assert_registered_classifier,
     download_artifact,
@@ -31,6 +32,17 @@ from smartrodent.two_stage_training import (
 def _configuration(document):
     """Parse the complete pipeline before constructing an experiment."""
     return TwoStageConfiguration.from_mapping(document)
+
+
+def _experiment(document):
+    """Parse and prepare the pipeline: everything that runs before the first stage trains."""
+    return TwoStageExperiment(_configuration(document))
+
+
+def _learning_rate(result):
+    """Read the learning rate a real SupCon run saved with its configuration."""
+    saved = yaml.safe_load((result.output_directory / "config.yaml").read_text())
+    return saved["optimizer"]["lr"]
 
 
 @pytest.mark.parametrize(
@@ -53,7 +65,7 @@ def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
     assert recorded_stages.events == ["supcon", "supcon", "supcon", "classifier"]
     root = Path(document["output_directory"])
     assert [item.output_directory for item in result.supcon_results] == [
-        root / "supcon" / f"run_{index:03d}" for index in (1, 2, 3)
+        root / "supcon" / f"trial_{index:04d}" for index in range(3)
     ]
     selected = result.selected_supcon
     assert selected == result.supcon_results[winner]
@@ -82,20 +94,21 @@ def test_pipeline_uses_configured_objective_and_passes_winning_best_not_last(
 def test_single_supcon_candidate_still_uses_the_same_handoff_contract(
     pipeline_document, recorded_stages
 ):
-    """A non-sweep pipeline remains valid, with stable isolation from the CE outputs."""
+    """A single SupCon run writes to the stage directory, isolated from the CE outputs."""
     pipeline_document["supcon"]["optimizer"]["lr"] = 0.001
+    pipeline_document.pop("tuning")
     result = TwoStageExperiment(_configuration(pipeline_document)).run()
     assert len(result.supcon_results) == 1
     assert result.selected_supcon == result.supcon_results[0]
     assert (
         result.selected_supcon.output_directory
-        == Path(pipeline_document["output_directory"]) / "supcon" / "run_001"
+        == Path(pipeline_document["output_directory"]) / "supcon"
     )
     assert recorded_stages.events == ["supcon", "classifier"]
 
 
 @pytest.mark.parametrize("fail_at", [0, 2])  # first and last candidate
-def test_failed_supcon_candidate_stops_without_selecting_a_partial_sweep(
+def test_failed_supcon_candidate_stops_without_selecting_a_partial_study(
     pipeline_document, recorded_stages, fail_at
 ):
     """Propagate failure, preserve completed artifacts, and never start CE or remaining candidates."""
@@ -109,7 +122,7 @@ def test_failed_supcon_candidate_stops_without_selecting_a_partial_sweep(
     for index in range(fail_at):
         assert (
             torch.load(
-                root / "supcon" / f"run_{index + 1:03d}" / "best.pt", weights_only=True
+                root / "supcon" / f"trial_{index:04d}" / "best.pt", weights_only=True
             )["candidate"]
             == index
         )
@@ -128,8 +141,12 @@ def test_non_yolo_head_is_rejected_before_any_supcon_candidate(
     pipeline_document["classifier"]["initialization"]["head"] = {
         "replace": "full",
         "source": "yolo_checkpoint",
-        "checkpoint": {"type": "sweep", "values": [str(valid), str(unsupported)]},
+        "checkpoint": {
+            "type": "suggest-categorical",
+            "choices": [str(valid), str(unsupported)],
+        },
     }
+    pipeline_document["tuning"]["classifier"] = grid(study_name="ce")
     with pytest.raises(NotImplementedError, match="YOLO|support"):
         TwoStageExperiment(_configuration(pipeline_document)).run()
     assert recorded_stages.events == []
@@ -168,8 +185,8 @@ def test_classifier_freeze_is_checked_against_every_supcon_architecture(
     )
     shallow = pipeline_document["supcon"]["model_name"]
     pipeline_document["supcon"]["model_name"] = {
-        "type": "sweep",
-        "values": [str(deeper), shallow],
+        "type": "suggest-categorical",
+        "choices": [str(deeper), shallow],
     }
     # Count 3 freezes the deeper network's conv layers and head conv; the shallow one has 2 layers.
     pipeline_document["classifier"]["freeze"] = 3
@@ -192,7 +209,11 @@ def test_each_stage_section_exports_every_run_it_configures(
     )
     pipeline_document["supcon"]["onnx_export"] = {}
     pipeline_document["classifier"]["onnx_export"] = {}
-    pipeline_document["classifier"]["seed"] = {"type": "sweep", "values": [29, 31]}
+    pipeline_document["classifier"]["seed"] = {
+        "type": "suggest-categorical",
+        "choices": [29, 31],
+    }
+    pipeline_document["tuning"]["classifier"] = grid(study_name="ce")
     result = TwoStageExperiment(_configuration(pipeline_document)).run()
     runs = [*result.supcon_results, *result.classifier_results]
     assert len(result.supcon_results) == 3 and len(result.classifier_results) == 2
@@ -224,14 +245,13 @@ def test_classifier_failure_is_not_reported_as_a_completed_pipeline(
     assert recorded_stages.events == ["supcon", "supcon", "supcon", "classifier"]
     assert all(result.best_checkpoint.is_file() for result in recorded_stages.results)
     summary_path = Path(pipeline_document["output_directory"]) / "selection.yaml"
-    if summary_path.exists():
-        assert yaml.safe_load(summary_path.read_text()).get("classifier_result") is None
+    assert yaml.safe_load(summary_path.read_text())["selected_classifier"] is None
 
 
 def test_stale_artifacts_are_not_ranked_or_pruned(pipeline_document, recorded_stages):
     """Rank only current structured results; unrelated prior run files remain untouched."""
     root = Path(pipeline_document["output_directory"])
-    stale = root / "supcon" / "run_999" / "best.pt"
+    stale = root / "supcon" / "trial_0999" / "best.pt"
     stale.parent.mkdir(parents=True)
     stale.write_bytes(b"old checkpoint, intentionally not loadable")
     result = TwoStageExperiment(_configuration(pipeline_document)).run()
@@ -276,63 +296,37 @@ def test_configuration_round_trips_without_resolving_the_selected_source_early(
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
-def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
-    pipeline_document, recorded_stages, tmp_path
-):
-    """Keep full-root target paths and sweep-product order from the existing loader."""
-    document = deepcopy(pipeline_document)
-    document["supcon"]["optimizer"]["lr"] = "SWEEP_LR"
-    document["supcon"]["output_features"] = "COUPLED_FEATURES"
-    path = tmp_path / "sweep.yaml"
-    text = (
-        yaml.safe_dump(document)
-        .replace("lr: SWEEP_LR", "lr: !sweep\n      values: [0.001, 0.002, 0.003]")
-        .replace(
-            "output_features: COUPLED_FEATURES",
-            "output_features: !coupled-sweep\n    target: supcon.optimizer.lr\n    values: [4, 8, 12]",
-        )
-    )
-    path.write_text(text)
-    config = TwoStageConfiguration.from_yaml(path)
-    TwoStageExperiment(config).run()
-    assert [
-        (run.optimizer["lr"], run.output_features) for run in recorded_stages.supcon
-    ] == [
-        (0.001, 4),
-        (0.002, 8),
-        (0.003, 12),
-    ]
-    assert len(recorded_stages.classifier) == 1
-
-
 @pytest.mark.parametrize(
     "path,value,message",
     [
         (("data", "class_names"), ["mouse", "mouse"], "class_names"),
         (
             ("supcon", "optimizer", "lr"),
-            {"type": "sweep", "values": [0.001, 0]},
+            {"type": "suggest-categorical", "choices": [0.001, 0]},
             "optimizer",
         ),
         (
             ("supcon", "optimizer", "lr"),
-            {"type": "sweep", "values": []},
-            "empty|candidate|sweep",
+            {"type": "suggest-categorical", "choices": []},
+            "choices",
         ),
         (
             ("supcon", "temperature"),
-            {"type": "sweep", "values": [0.05, 0.2]},
+            {"type": "suggest-categorical", "choices": [0.05, 0.2]},
             "temperature",
         ),
         (
             ("supcon", "tracked_mode"),
-            {"type": "sweep", "values": ["min", "max"]},
-            "mode|direction",
+            {"type": "suggest-categorical", "choices": ["min", "max"]},
+            "tracked_mode",
         ),
         (
             ("supcon", "tracked_metric"),
-            {"type": "sweep", "values": ["balanced_accuracy", "supcon_loss_mean"]},
-            "metric",
+            {
+                "type": "suggest-categorical",
+                "choices": ["balanced_accuracy", "supcon_loss_mean"],
+            },
+            "tracked_metric",
         ),
         (
             ("classifier", "initialization", "encoder"),
@@ -346,6 +340,8 @@ def test_supcon_yaml_sweeps_preserve_existing_coupled_tag_semantics(
             "encoder|checkpoint",
         ),
         (("classifier", "train_kwargs", "resume"), True, "resume"),
+        # Ultralytics rejects a wrongly typed native option with a TypeError
+        (("classifier", "train_kwargs", "momentum"), "fast", "momentum"),
         (
             ("supcon", "scheduler"),
             {"name": "ReduceLROnPlateau", "parameters": {"mode": "min"}},
@@ -377,7 +373,7 @@ def test_pipeline_output_must_stay_outside_both_shared_splits(
         Path(pipeline_document["data"][split]) / "pipeline"
     )
     with pytest.raises(ValueError, match="outside|output_directory"):
-        _configuration(pipeline_document)
+        _experiment(pipeline_document)
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
@@ -398,7 +394,7 @@ def test_unknown_or_conflicting_ownership_is_rejected_not_silently_ignored(
     target = pipeline_document if section is None else pipeline_document[section]
     target[key] = value
     with pytest.raises(ValueError, match=key):
-        _configuration(pipeline_document)
+        _experiment(pipeline_document)
     assert not Path(pipeline_document["output_directory"]).exists()
 
 
@@ -410,21 +406,32 @@ def test_pipeline_tracking_settings_are_owned_by_the_root(pipeline_document, sec
         "experiment_name": "pipeline",
     }
     with pytest.raises(ValueError, match="mlflow|tracking"):
-        _configuration(pipeline_document)
+        _experiment(pipeline_document)
 
 
 @pytest.mark.parametrize(
-    "source,relative",
+    "source,relative,classifier_study",
     [
-        ("model", "config.yaml"),
-        ("model", "supcon/run_001/best.pt"),
-        ("head", "classifier/weights/best.pt"),
+        ("model", "config.yaml", False),
+        ("model", "supcon/trial_0000/best.pt", False),
+        ("head", "selection.yaml", False),
+        # the classifier validates against this future encoder path; a donor is no encoder
+        ("head", "supcon/trial_0000/best.pt", False),
+        ("head", "classifier/weights/best.pt", False),
+        # classifier study directories are named after the encoder SupCon selects later
+        ("head", "classifier/0123456789ab/trial_0001/weights/best.pt", True),
     ],
 )
 def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
-    pipeline_document, recorded_stages, source, relative
+    pipeline_document, recorded_stages, source, relative, classifier_study
 ):
     """Pipeline root/child publications must retain the standalone source-safety contract."""
+    if classifier_study:
+        pipeline_document["classifier"]["train_kwargs"]["lr0"] = {
+            "type": "suggest-categorical",
+            "choices": [0.002, 0.004],
+        }
+        pipeline_document["tuning"]["classifier"] = grid(study_name="ce")
     path = Path(pipeline_document["output_directory"]) / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"source bytes must remain unchanged")
@@ -438,8 +445,8 @@ def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
         }
     # Require the collision guard itself, not an unrelated attempt to load these
     # intentionally opaque bytes as model weights or architecture YAML.
-    with pytest.raises(ValueError, match="collision|collid"):
-        _configuration(pipeline_document)
+    with pytest.raises(ValueError, match="collid|inside"):
+        _experiment(pipeline_document)
     assert recorded_stages.events == []
     assert path.read_bytes() == b"source bytes must remain unchanged"
 
@@ -450,17 +457,19 @@ def test_generated_pipeline_artifacts_cannot_overwrite_model_or_head_inputs(
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 @given(
-    rates=st.lists(st.sampled_from([0.001, 0.002, 0.003]), min_size=1, max_size=4),
+    rates=st.lists(
+        st.sampled_from([0.001, 0.002, 0.003]), min_size=1, max_size=3, unique=True
+    ),
     mode=st.sampled_from(["min", "max"]),
     batchnorm=st.sampled_from(["eval", "adapt"]),
     freeze=st.one_of(st.integers(0, 2), st.lists(st.integers(0, 1), unique=True)),
 )
-def test_configuration_round_trip_preserves_sweep_order_and_classifier_policy(
+def test_configuration_round_trip_preserves_choice_order_and_classifier_policy(
     pipeline_document, rates, mode, batchnorm, freeze
 ):
-    """Repeated candidates, scoring direction, BN and freeze policy survive serialization."""
+    """Ordered choices, scoring direction, BN and freeze policy survive serialization."""
     document = deepcopy(pipeline_document)
-    document["supcon"]["optimizer"]["lr"]["values"] = rates
+    document["supcon"]["optimizer"]["lr"]["choices"] = rates
     document["supcon"]["tracked_mode"] = mode
     # The BatchNorm policy only exists when some layer is frozen.
     batchnorm = batchnorm if freeze not in (0, []) else None
@@ -468,7 +477,7 @@ def test_configuration_round_trip_preserves_sweep_order_and_classifier_policy(
     document["classifier"]["freeze"] = freeze
     config = _configuration(document)
     saved = config.to_dict()
-    assert saved["supcon"]["optimizer"]["lr"]["values"] == rates
+    assert saved["supcon"]["optimizer"]["lr"]["choices"] == rates
     assert saved["supcon"]["tracked_mode"] == mode
     assert saved["classifier"]["encoder_batchnorm"] == batchnorm
     assert saved["classifier"]["freeze"] == freeze
@@ -481,7 +490,7 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
 ):
     """Run real optimizers and source conversion; script only SupCon's validation scores."""
     document = pipeline_document
-    document["supcon"]["optimizer"]["lr"]["values"] = [0.001, 0.002]
+    document["supcon"]["optimizer"]["lr"]["choices"] = [0.001, 0.002]
     document["supcon"]["tracked_mode"] = mode
     # Linear probe on the 2-layer network: encoder and head conv frozen, only Linear trains.
     document["classifier"]["freeze"] = 2
@@ -525,7 +534,7 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
         == 3
     )
     classifier = YOLO(
-        str(result.classifier_result.last_checkpoint), task="classify"
+        str(result.selected_classifier.last_checkpoint), task="classify"
     ).model
     assert classifier.names == {
         index: name for name, index in source_state["label_names"].items()
@@ -544,12 +553,12 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
                 tensor.float(), expected.float(), rtol=0.001, atol=0.0001
             )
     restored = YOLO(
-        str(result.classifier_result.best_checkpoint), task="classify"
+        str(result.selected_classifier.best_checkpoint), task="classify"
     ).model.eval()
     with torch.inference_mode():
         output = restored(torch.rand(2, 3, 32, 32))
         assert output[0].shape == (2, 2)
-    assert result.classifier_result.best_checkpoint.with_suffix(
+    assert result.selected_classifier.best_checkpoint.with_suffix(
         ".model_card.yaml"
     ).is_file()
     assert all(
@@ -558,26 +567,19 @@ def test_real_cpu_stages_select_best_epoch_then_train_a_portable_ce_classifier(
     )
 
 
-# every shared key takes the same ownership check; the tracking section and one data key
-@pytest.mark.parametrize("key", ["mlflow", "train_dataset"])
-def test_whole_supcon_mapping_sweeps_cannot_bypass_shared_ownership(
-    pipeline_document, recorded_stages, key
+def test_a_search_tag_cannot_replace_a_whole_stage_section(
+    pipeline_document, recorded_stages
 ):
-    """Validate restrictions inside expanded mappings, including later candidates."""
+    """A searched stage section could carry shared settings past the ownership checks."""
     valid = deepcopy(pipeline_document["supcon"])
     valid["optimizer"]["lr"] = 0.001
-    invalid = deepcopy(valid)
-    overrides = {
-        "mlflow": {"tracking_uri": "sqlite:///unused.db", "experiment_name": "bypass"},
-        "train_dataset": "other-training",
-        "validation_dataset": "other-validation",
-        "class_names": ["other"],
-        "output_directory": "other-output",
+    invalid = {**deepcopy(valid), "train_dataset": "other-training"}
+    pipeline_document["supcon"] = {
+        "type": "suggest-categorical",
+        "choices": [valid, invalid],
     }
-    invalid[key] = overrides[key]
-    pipeline_document["supcon"] = {"type": "sweep", "values": [valid, invalid]}
-    with pytest.raises(ValueError, match=key):
-        _configuration(pipeline_document)
+    with pytest.raises(ValueError, match="cannot"):
+        _experiment(pipeline_document)
     assert recorded_stages.events == []
     assert not Path(pipeline_document["output_directory"]).exists()
 
@@ -589,8 +591,8 @@ def test_failed_rerun_invalidates_previous_success_without_pruning_artifacts(
     """A new failed invocation cannot retain an older completed-classifier summary."""
     first = TwoStageExperiment(_configuration(pipeline_document)).run()
     summary_path = first.output_directory / "selection.yaml"
-    assert yaml.safe_load(summary_path.read_text())["classifier_result"] is not None
-    classifier_bytes = first.classifier_result.best_checkpoint.read_bytes()
+    assert yaml.safe_load(summary_path.read_text())["selected_classifier"] is not None
+    classifier_bytes = first.selected_classifier.best_checkpoint.read_bytes()
     recorded_stages.supcon.clear()
     recorded_stages.classifier.clear()
     recorded_stages.results.clear()
@@ -602,17 +604,17 @@ def test_failed_rerun_invalidates_previous_success_without_pruning_artifacts(
     assert recorded_stages.events == ["supcon"] * (fail_at + 1)
     assert not recorded_stages.classifier
     summary = yaml.safe_load(summary_path.read_text())
-    assert summary.get("classifier_result") is None
-    assert summary.get("selected_supcon") is None
-    assert not summary.get("supcon_results")
-    assert first.classifier_result.best_checkpoint.read_bytes() == classifier_bytes
+    assert summary["selected_classifier"] is None
+    assert summary["selected_supcon"] is None
+    assert not summary["supcon_results"]
+    assert first.selected_classifier.best_checkpoint.read_bytes() == classifier_bytes
 
 
 @pytest.fixture
 def tracking_document(pipeline_document):
     """Use two three-epoch candidates plus CE, with distinct stage objectives/directions."""
     document = deepcopy(pipeline_document)
-    document["supcon"]["optimizer"]["lr"]["values"] = [0.001, 0.002]
+    document["supcon"]["optimizer"]["lr"]["choices"] = [0.001, 0.002]
     document["classifier"].update(
         epochs=3,
         tracked_metric="balanced_accuracy",
@@ -683,14 +685,15 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
     config, result = _run_tracking_document(
         tracking_document, tracking_store, register=register
     )
-    assert result.selected_supcon == result.supcon_results[1]
-    assert result.selected_supcon.best_epoch == result.classifier_result.best_epoch == 2
+    assert _learning_rate(result.selected_supcon) == 0.002
+    assert result.selected_supcon.best_epoch == 2
+    assert result.selected_classifier.best_epoch == 2
     assert result.selected_supcon.best_value == (0.1 if mode == "min" else 0.9)
 
     # One parent run with one finished child per candidate and for CE.
     child_ids = [
         item.mlflow_run_id
-        for item in (*result.supcon_results, result.classifier_result)
+        for item in (*result.supcon_results, result.selected_classifier)
     ]
     runs = tracking_store.client.search_runs([tracking_store.experiment_id])
     assert {run.info.run_id for run in runs} == {result.mlflow_run_id, *child_ids}
@@ -706,10 +709,10 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
 
     # The classifier and its card name the selected encoder and the selected epoch.
     provenance = _expected_encoder_provenance(result)
-    model = YOLO(str(result.classifier_result.best_checkpoint), task="classify").model
+    model = YOLO(str(result.selected_classifier.best_checkpoint), task="classify").model
     assert provenance.items() <= model.provenance.items()
     card = yaml.safe_load(
-        result.classifier_result.best_checkpoint.with_suffix(
+        result.selected_classifier.best_checkpoint.with_suffix(
             ".model_card.yaml"
         ).read_text()
     )
@@ -723,7 +726,7 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
     assert (
         card["provenance"]["checkpoint_sha256"]
         == hashlib.sha256(
-            result.classifier_result.best_checkpoint.read_bytes()
+            result.selected_classifier.best_checkpoint.read_bytes()
         ).hexdigest()
     )
     for filename in ("config.yaml", "selection.yaml"):
@@ -739,7 +742,9 @@ def test_real_pipeline_tracks_one_parent_and_stage_children_with_selected_proven
     )
 
     if register:
-        version = assert_registered_classifier(tracking_store, result.classifier_result)
+        version = assert_registered_classifier(
+            tracking_store, result.selected_classifier
+        )
         assert version.tags["encoder_run_id"] == result.selected_supcon.mlflow_run_id
         assert (
             tracking_store.client.get_model_version_by_alias(
@@ -766,19 +771,19 @@ def test_untracked_pipeline_keeps_selected_provenance_without_touching_callers_t
         assert result.mlflow_run_id is None
         assert all(
             item.mlflow_run_id is None
-            for item in (*result.supcon_results, result.classifier_result)
+            for item in (*result.supcon_results, result.selected_classifier)
         )
         provenance = _expected_encoder_provenance(result)
         for checkpoint in (
-            result.classifier_result.best_checkpoint,
-            result.classifier_result.last_checkpoint,
+            result.selected_classifier.best_checkpoint,
+            result.selected_classifier.last_checkpoint,
         ):
             assert (
                 provenance.items()
                 <= YOLO(str(checkpoint), task="classify").model.provenance.items()
             )
         card = yaml.safe_load(
-            result.classifier_result.best_checkpoint.with_suffix(
+            result.selected_classifier.best_checkpoint.with_suffix(
                 ".model_card.yaml"
             ).read_text()
         )
@@ -854,7 +859,7 @@ def test_pipeline_failure_closes_owned_runs_and_preserves_the_existing_champion(
     )
     summary = Path(tracking_document["output_directory"]) / "selection.yaml"
     if summary.exists():
-        assert yaml.safe_load(summary.read_text()).get("classifier_result") is None
+        assert yaml.safe_load(summary.read_text())["selected_classifier"] is None
     assert mlflow.active_run() is None
 
 

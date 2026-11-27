@@ -10,7 +10,7 @@ import pandas as pd
 from pydantic import AfterValidator, Field, ImportString, ValidationError, validate_call
 
 from .base import Configurable
-from .config_utils import load_section
+from .config_loading import load_section
 from .training_validation import (
     ColumnNames,
     FiniteNumber,

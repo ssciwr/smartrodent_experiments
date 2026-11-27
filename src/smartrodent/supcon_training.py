@@ -23,7 +23,7 @@ from pytorch_metric_learning.samplers import MPerClassSampler
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from smartrodent import config_utils
+from smartrodent import config_loading
 from smartrodent.datasets import (
     ImageDataset,
     MultiViewImageDataset,
@@ -46,6 +46,7 @@ from smartrodent.model_card import (
     write_training_card,
 )
 from smartrodent.onnx_export import OnnxExporter
+from smartrodent.search_space import reject_search_tags
 from smartrodent.supcon_model import YoloSupConModel
 from smartrodent.training_validation import (
     ClassNames,
@@ -157,7 +158,7 @@ class TrainingConfiguration:
         validate_output_paths(
             [self.output_directory],
             (self.train_dataset, self.validation_dataset),
-            (self.model_name, self.model_card_template),
+            self.input_files(),
         )
         if self.validation_dataset is None:
             if (
@@ -182,6 +183,10 @@ class TrainingConfiguration:
                 )
         validate_stopping(self, self.tracked_mode)
 
+    def input_files(self) -> tuple:
+        """Return the model and template files the run reads, which outputs must not touch."""
+        return (self.model_name, self.model_card_template)
+
     @property
     def batch_size(self) -> int:
         """Return the number of source images per batch, before doubling views."""
@@ -201,7 +206,7 @@ class TrainingConfiguration:
 
     @property
     def tracked_metric_definition(self) -> dict:
-        """Return the effective scoring definition used for sweep comparability.
+        """Return the effective scoring definition that makes runs comparable.
 
         Returns:
             The native loss/statistic definition or the configured scorer and options.
@@ -232,8 +237,8 @@ class TrainingConfiguration:
         return parse_settings(cls, values)
 
     @classmethod
-    def from_yaml(cls, path: Path) -> "TrainingConfiguration":
-        """Read YAML that expands to exactly one training configuration.
+    def from_yaml(cls, path: str | Path) -> "TrainingConfiguration":
+        """Read the configuration of one training run.
 
         Args:
             path: Training configuration file.
@@ -242,15 +247,12 @@ class TrainingConfiguration:
             Validated experiment settings.
 
         Raises:
-            ValueError: The document expands to more than one run.
+            ValueError: The settings are invalid or contain search tags, which need a
+                study (``training_studies.SupConStudy``).
         """
-        run_mappings = _load_run_mappings(path)
-        if len(run_mappings) != 1:
-            raise ValueError(
-                "TrainingConfiguration.from_yaml requires exactly one run; "
-                "use load_training_configurations for sweep configurations"
-            )
-        return cls.from_mapping(run_mappings[0])
+        document = config_loading.load_yaml(path)
+        reject_search_tags(document)
+        return cls.from_mapping(document)
 
     def to_dict(self) -> dict:
         """Return plain, checkpoint-safe settings suitable for YAML output."""
@@ -875,59 +877,3 @@ class SupConExperiment:
                 **(provenance or {}),
             },
         )
-
-
-def _load_run_mappings(config_path: Path) -> list[dict]:
-    """Load custom YAML tags and expand them into concrete run mappings."""
-    configuration = config_utils.load_yaml(config_path)
-    if not isinstance(configuration, Mapping):
-        raise ValueError("Training configuration must be a YAML mapping")
-    return config_utils.ConfigHandler(dict(configuration)).run_configs
-
-
-def load_training_configurations(config_path: Path) -> list[TrainingConfiguration]:
-    """Load, expand, and validate every configured training run.
-
-    Sweep runs receive stable subdirectories so that checkpoints and histories
-    from later runs cannot overwrite earlier results.
-
-    Args:
-        config_path: YAML configuration with optional custom sweep tags.
-
-    Returns:
-        Concrete, validated training configurations in sweep-product order.
-    """
-    run_mappings = _load_run_mappings(config_path)
-    multiple_runs = len(run_mappings) > 1
-    configurations = []
-    for run_number, run_mapping in enumerate(run_mappings, start=1):
-        values = dict(run_mapping)
-        if multiple_runs:
-            output_directory = Path(values["output_directory"])
-            values["output_directory"] = output_directory / f"run_{run_number:03d}"
-        configurations.append(TrainingConfiguration.from_mapping(values))
-    if len({config.temperature for config in configurations}) > 1:
-        raise ValueError("SupCon temperature must remain fixed within a sweep")
-    return configurations
-
-
-def run_training(config_path: Path) -> list[Path]:
-    """Train every experiment expanded from a YAML configuration.
-
-    Args:
-        config_path: YAML configuration; data paths are relative to the current directory.
-
-    Returns:
-        Final checkpoint path for each expanded run.
-    """
-    experiments = [
-        SupConExperiment(config) for config in load_training_configurations(config_path)
-    ]
-    checkpoints = []
-    for run_number, experiment in enumerate(experiments, start=1):
-        print(
-            f"Starting run {run_number}/{len(experiments)} in "
-            f"{experiment.configuration.output_directory}"
-        )
-        checkpoints.append(experiment.run())
-    return checkpoints

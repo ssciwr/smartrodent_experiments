@@ -1,4 +1,4 @@
-"""Run a SupCon sweep, select its best encoder, and train a CE classifier sweep."""
+"""Run the SupCon stage, select its best encoder, and train the classifier stage on it."""
 
 import argparse
 from pathlib import Path

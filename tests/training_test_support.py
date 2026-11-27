@@ -20,6 +20,7 @@ from mlflow import MlflowClient
 from mlflow.tracking._model_registry import utils as registry_utils
 from PIL import Image
 from pytorch_metric_learning.losses import SupConLoss
+from study_test_support import grid
 from ultralytics import YOLO
 from ultralytics.models.yolo.classify.val import ClassificationValidator
 
@@ -286,14 +287,17 @@ def scripted_validation(monkeypatch):
     counts = {}
 
     def supcon_validate(self, model, loader, criterion):
-        """Make candidate two/epoch two win the configured metric, not SupCon loss."""
+        """Make lr=0.002 at epoch two win the configured metric, not SupCon loss.
+
+        The second candidate to run fails when a SupCon failure is requested.
+        """
         config = self.configuration
         index = int(config.optimizer["lr"] == 0.002)
         key = str(config.output_directory)
         epoch = counts.get(key, 0)
         counts[key] = epoch + 1
         observed.supcon.append((key, epoch + 1))
-        if observed.failure == "supcon" and index == 1:
+        if observed.failure == "supcon" and len(counts) == 2:
             raise RuntimeError("deliberate SupCon validation failure")
         values = [[0.3, 0.8, 0.5], [0.2, 0.9, 0.6]]
         if config.effective_tracked_mode == "min":
@@ -440,7 +444,9 @@ def pipeline_document(tmp_path):
             "model_name": str(architecture),
             "epochs": 3,
             "transforms": deepcopy(transforms),
-            "optimizer": {"lr": {"type": "sweep", "values": [0.001, 0.002, 0.003]}},
+            "optimizer": {
+                "lr": {"type": "suggest-categorical", "choices": [0.001, 0.002, 0.003]}
+            },
             "classes_per_batch": 2,
             "samples_per_class": 2,
             "samples_per_epoch": 8,
@@ -483,6 +489,7 @@ def pipeline_document(tmp_path):
             "tracked_metric": "ce_loss_mean",
             "tracked_mode": "min",
         },
+        "tuning": {"supcon": grid(study_name="supcon")},
     }
 
 
@@ -500,7 +507,7 @@ def recorded_stages(monkeypatch):
         overrides={},
     )
 
-    def run_supcon(self):
+    def run_supcon(self, *, parent_run_id=None, epoch_callback=None):
         """Publish distinguishable best/last bytes and report original configured scores."""
         config = self.configuration
         index = len(observed.supcon)
@@ -527,7 +534,9 @@ def recorded_stages(monkeypatch):
         observed.results.append(result)
         return result
 
-    def run_classifier(self):
+    def run_classifier(
+        self, *, parent_run_id=None, defer_promotion=False, epoch_callback=None
+    ):
         """Record the actual handoff configuration without requiring fake SupCon weights to load."""
         config = self.configuration
         observed.classifier.append(config)
@@ -580,15 +589,14 @@ def serialized_result(result):
     }
 
 
-def invoke_entrypoint(entrypoint, document, config_path, monkeypatch, *, text=None):
-    """Exercise the real entry point without requiring a new sweep-specific API.
+def invoke_entrypoint(entrypoint, document, config_path, monkeypatch):
+    """Exercise the real entry point, a standalone script or the two-stage pipeline.
 
     Args:
         entrypoint: ``"standalone"`` (train_classifier script) or ``"two_stage"``.
         document: Configuration mapping written to ``config_path``.
         config_path: Where the configuration file is written.
         monkeypatch: Pytest monkeypatch, used to set ``sys.argv``.
-        text: Raw YAML written instead of ``document`` when given.
 
     Returns:
         Whatever the entry point returns.
@@ -596,7 +604,7 @@ def invoke_entrypoint(entrypoint, document, config_path, monkeypatch, *, text=No
     Raises:
         AssertionError: For an unknown ``entrypoint``.
     """
-    config_path.write_text(yaml.safe_dump(document) if text is None else text)
+    config_path.write_text(yaml.safe_dump(document))
     if entrypoint == "standalone":
         monkeypatch.setattr(sys, "argv", ["train_classifier.py", str(config_path)])
         return train_classifier.main()
@@ -607,22 +615,42 @@ def invoke_entrypoint(entrypoint, document, config_path, monkeypatch, *, text=No
         raise AssertionError(f"Unknown test entry point: {entrypoint}")
 
 
-def selection_summary(document):
-    """Read the public, portable report rather than inspecting sweep internals.
+def classifier_summary(document, entrypoint):
+    """Read the classifier candidates and winner from the entry point's portable report.
 
     Args:
         document: Configuration mapping whose ``output_directory`` holds the report.
+        entrypoint: ``"standalone"`` (a study's ``study.yaml``) or ``"two_stage"``
+            (the pipeline's ``selection.yaml``).
 
     Returns:
-        The parsed ``selection.yaml``.
+        ``classifier_results`` (completed candidates in order) and ``selected_classifier``.
+
+    Raises:
+        AssertionError: For an unknown ``entrypoint``.
     """
-    return yaml.safe_load(
-        (Path(document["output_directory"]) / "selection.yaml").read_text()
-    )
+    root = Path(document["output_directory"])
+    if entrypoint == "two_stage":
+        summary = yaml.safe_load((root / "selection.yaml").read_text())
+        return {
+            "classifier_results": summary["classifier_results"],
+            "selected_classifier": summary["selected_classifier"],
+        }
+    elif entrypoint == "standalone":
+        report = yaml.safe_load((root / "study.yaml").read_text())
+        selected = report["selected_trial"]
+        return {
+            "classifier_results": [
+                trial["result"] for trial in report["trials"] if trial["result"]
+            ],
+            "selected_classifier": selected["result"] if selected else None,
+        }
+    else:
+        raise AssertionError(f"Unknown test entry point: {entrypoint}")
 
 
 @pytest.fixture
-def sweep_pipeline_document(classifier_configuration, tmp_path):
+def classifier_input_pipeline_document(classifier_configuration, tmp_path):
     """Share the classifier fixture's inputs rather than creating colliding image directories."""
     stage = classifier_configuration.to_dict()
     data = {
@@ -634,7 +662,7 @@ def sweep_pipeline_document(classifier_configuration, tmp_path):
     stage["initialization"]["encoder"] = {"source": "selected_supcon"}
     # The pipeline's tiny network (0=Conv, 1=Classify) is shallower than the fixture's.
     stage["freeze"] = 1
-    architecture = tmp_path / "sweep-model.yaml"
+    architecture = tmp_path / "pipeline-model.yaml"
     architecture.write_text(
         yaml.safe_dump(
             {
@@ -651,7 +679,9 @@ def sweep_pipeline_document(classifier_configuration, tmp_path):
             "model_name": str(architecture),
             "epochs": 3,
             "transforms": deepcopy(stage["transforms"]),
-            "optimizer": {"lr": {"type": "sweep", "values": [0.001, 0.002, 0.003]}},
+            "optimizer": {
+                "lr": {"type": "suggest-categorical", "choices": [0.001, 0.002, 0.003]}
+            },
             "classes_per_batch": 2,
             "samples_per_class": 2,
             "samples_per_epoch": 8,
@@ -668,6 +698,7 @@ def sweep_pipeline_document(classifier_configuration, tmp_path):
             },
         },
         "classifier": stage,
+        "tuning": {"supcon": grid(study_name="supcon")},
     }
 
 

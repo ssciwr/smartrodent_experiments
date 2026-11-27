@@ -16,7 +16,7 @@ import optuna
 import pytest
 import torch
 import yaml
-from study_test_support import STUDY_NAME, study_report, tuning
+from study_test_support import STUDY_NAME, grid, study_report, tuning
 
 from smartrodent.classifier_training import ClassifierExperiment
 from smartrodent.experiment_results import ExperimentResult
@@ -200,25 +200,22 @@ def test_supcon_script_runs_a_study_when_the_configuration_has_a_tuning_section(
     )
 
 
-def test_supcon_script_keeps_grid_sweeps_for_configurations_without_tuning(
-    supcon_document, recorded_trials, tmp_path, monkeypatch
+@pytest.mark.parametrize("stage", ["supcon", "classifier"])
+def test_single_run_scripts_reject_search_tags_without_a_tuning_section(
+    supcon_document, classifier_document, recorded_trials, tmp_path, monkeypatch, stage
 ):
-    """Configurations without a tuning section keep their existing sweep behavior."""
-    from scripts import train_supcon
+    """Without a tuning section a configuration is one run, so a search tag is a mistake."""
+    from scripts import train_classifier, train_supcon
 
-    supcon_document.pop("tuning")
-    path = _write(
-        tmp_path / "supcon.yaml",
-        supcon_document,
-        {"__LR__": "!sweep {values: [0.001, 0.002]}"},
-    )
-    monkeypatch.setattr(sys, "argv", ["train_supcon.py", str(path)])
-    train_supcon.main()
-    assert [call.configuration.optimizer["lr"] for call in recorded_trials.supcon] == [
-        0.001,
-        0.002,
-    ]
-    assert not (Path(supcon_document["output_directory"]) / "study.yaml").exists()
+    document = supcon_document if stage == "supcon" else classifier_document
+    document.pop("tuning")
+    tags = {"__LR__": LR_TAG} if stage == "supcon" else CLASSIFIER_TAGS
+    path = _write(tmp_path / f"{stage}.yaml", document, tags)
+    script = train_supcon if stage == "supcon" else train_classifier
+    monkeypatch.setattr(sys, "argv", [f"train_{stage}.py", str(path)])
+    with pytest.raises(ValueError, match="tuning"):
+        script.main()
+    assert recorded_trials.events == []
 
 
 @pytest.mark.parametrize(
@@ -240,7 +237,7 @@ def test_supcon_script_keeps_grid_sweeps_for_configurations_without_tuning(
 def test_supcon_study_rejects_searching_comparability_settings(
     supcon_document, recorded_trials, tmp_path, key, placeholder_at, tag
 ):
-    """Fixed objective, data, outputs and temperature keep trials comparable (as in sweeps)."""
+    """Fixed objective, data, outputs and temperature keep trials comparable."""
     node = supcon_document
     for part in placeholder_at[:-1]:
         node = node[part]
@@ -291,10 +288,7 @@ def test_supcon_invalid_sampled_combinations_fail_only_their_trial(
         samples_per_class="__M__",
         samples_per_epoch="__E__",
         optimizer={"lr": 0.001},
-        tuning=tuning(
-            n_trials=10,
-            sampler={"name": "BruteForceSampler", "parameters": {"seed": 0}},
-        ),
+        tuning=grid(),
     )
     path = _write(
         tmp_path / "supcon.yaml",
@@ -322,7 +316,7 @@ def test_supcon_invalid_sampled_combinations_fail_only_their_trial(
 def test_supcon_study_requires_validation_data_for_ranking(
     supcon_document, recorded_trials, tmp_path
 ):
-    """Like sweep selection, a study cannot rank training-only runs."""
+    """A study cannot rank training-only runs."""
     # A valid training-only configuration, so only the study-specific rule can reject it.
     supcon_document.update(
         validation_dataset=None,
@@ -442,7 +436,7 @@ def classifier_document(classifier_configuration):
 CLASSIFIER_TAGS = {
     "__LR0__": LR_TAG,
     "__HEAD__": "!suggest-categorical {choices: [linear, full]}",
-    "__BN__": "!coupled-sweep {target: initialization.head.replace, values: [eval, adapt]}",
+    "__BN__": "!coupled {target: initialization.head.replace, values: [eval, adapt]}",
 }
 
 
@@ -542,12 +536,30 @@ def test_classifier_study_prevalidates_coupled_values_with_their_choice(
     """A coupled value is checked together with the categorical choice it belongs to."""
     tags = {
         **CLASSIFIER_TAGS,
-        "__BN__": "!coupled-sweep {target: initialization.head.replace, values: [eval, bogus]}",
+        "__BN__": "!coupled {target: initialization.head.replace, values: [eval, bogus]}",
     }
     path = _write(tmp_path / "classifier.yaml", classifier_document, tags)
     with pytest.raises(ValueError, match="encoder_batchnorm"):
         ClassifierStudy.from_yaml(path).run()
     assert recorded_trials.events == []
+
+
+@pytest.mark.parametrize("relative", ["trial_0001/weights/best.pt", "study.yaml"])
+def test_study_trials_cannot_overwrite_any_candidate_input(
+    classifier_document, classifier_assets, recorded_trials, tmp_path, relative
+):
+    """Trials and the report are written inside the study directory; no input may live there."""
+    donor = Path(classifier_document["output_directory"]) / relative
+    donor.parent.mkdir(parents=True, exist_ok=True)
+    donor.write_bytes(classifier_assets.ultralytics.read_bytes())
+    classifier_document["initialization"]["head"].update(
+        source="yolo_checkpoint", checkpoint=str(donor)
+    )
+    path = _write(tmp_path / "classifier.yaml", classifier_document, CLASSIFIER_TAGS)
+    with pytest.raises(ValueError, match="collid|inside"):
+        ClassifierStudy.from_yaml(path).run()
+    assert recorded_trials.events == []
+    assert donor.read_bytes() == classifier_assets.ultralytics.read_bytes()
 
 
 def test_real_classifier_pruning_stops_native_training_of_weak_trials(
@@ -631,7 +643,9 @@ def test_tracked_classifier_study_nests_trials_and_promotes_only_the_winner(
     }
     assert parent.data.metrics["best_validation_balanced_accuracy"] == 0.9
     versions = store.client.search_model_versions(f"name='{store.registry_name}'")
-    assert len(versions) == 2  # decision 3: every completed trial registers for now
+    assert (
+        len(versions) == 2
+    )  # every completed trial registers; only the winner is champion
     champion = store.client.get_model_version_by_alias(
         store.registry_name, store.configuration["champion_alias"]
     )
@@ -640,21 +654,27 @@ def test_tracked_classifier_study_nests_trials_and_promotes_only_the_winner(
 
 
 # --------------------------------------------------------------------------------------
-# Two-stage pipeline: each stage is a grid sweep or a study
+# Two-stage pipeline: each stage is a single run or a study
 # --------------------------------------------------------------------------------------
 
 
 def _pipeline(document, tags, tmp_path, *, studies):
-    """Write and load a tagged two-stage configuration with per-stage study settings."""
+    """Write and load a tagged two-stage configuration with per-stage study settings.
+
+    ``studies=None`` leaves the tuning section out of the document entirely.
+    """
     document = deepcopy(document)
-    document["tuning"] = studies
+    if studies is None:
+        document.pop("tuning", None)
+    else:
+        document["tuning"] = studies
     path = _write(tmp_path / "pipeline.yaml", document, tags)
     return TwoStageConfiguration.from_yaml(path)
 
 
 @pytest.fixture
 def study_pipeline(pipeline_document):
-    """Placeholders for one tag per stage; sweeps stay unless a test removes them."""
+    """Placeholders for one tag per stage; each test supplies the stage studies."""
     document = deepcopy(pipeline_document)
     document["supcon"]["optimizer"]["lr"] = "__LR__"
     document["classifier"]["train_kwargs"]["lr0"] = "__LR0__"
@@ -669,15 +689,18 @@ def study_pipeline(pipeline_document):
     return document
 
 
-def test_supcon_study_selects_the_encoder_for_a_classifier_grid_sweep(
+def test_supcon_study_selects_the_encoder_for_a_classifier_grid(
     study_pipeline, recorded_trials, tmp_path
 ):
-    """The SupCon stage runs as a study; its winner feeds every classifier sweep run."""
+    """The SupCon stage runs as a study; its winner feeds every classifier grid trial."""
     config = _pipeline(
         study_pipeline,
-        {"__LR__": LR_TAG, "__LR0__": "!sweep {values: [0.001, 0.004]}"},
+        {
+            "__LR__": LR_TAG,
+            "__LR0__": "!suggest-categorical {choices: [0.001, 0.004]}",
+        },
         tmp_path,
-        studies={"supcon": tuning()},
+        studies={"supcon": tuning(), "classifier": grid(study_name="ce")},
     )
     result = TwoStageExperiment(config).run()
     root = Path(study_pipeline["output_directory"])
@@ -704,15 +727,21 @@ def test_supcon_study_selects_the_encoder_for_a_classifier_grid_sweep(
     )
 
 
-def test_classifier_study_runs_on_the_encoder_selected_by_a_supcon_sweep(
+def test_classifier_study_runs_on_the_encoder_selected_by_a_supcon_grid(
     study_pipeline, recorded_trials, tmp_path
 ):
     """The classifier stage runs as a study, every trial on the one selected encoder."""
     config = _pipeline(
         study_pipeline,
-        {"__LR__": "!sweep {values: [0.001, 0.002]}", "__LR0__": LR_TAG},
+        {
+            "__LR__": "!suggest-categorical {choices: [0.001, 0.002]}",
+            "__LR0__": LR_TAG,
+        },
         tmp_path,
-        studies={"classifier": tuning(n_trials=4)},
+        studies={
+            "supcon": grid(study_name="sc"),
+            "classifier": tuning(n_trials=4),
+        },
     )
     result = TwoStageExperiment(config).run()
     root = Path(study_pipeline["output_directory"])
@@ -737,26 +766,10 @@ def test_classifier_study_runs_on_the_encoder_selected_by_a_supcon_sweep(
     )
 
 
-def test_both_stages_can_run_as_studies(study_pipeline, recorded_trials, tmp_path):
-    """Stages are tuned sequentially and independently: SupCon first, then the classifier."""
-    config = _pipeline(
-        study_pipeline,
-        {"__LR__": LR_TAG, "__LR0__": LR_TAG},
-        tmp_path,
-        studies={
-            "supcon": tuning(n_trials=2),
-            "classifier": tuning(n_trials=3, study_name="ce"),
-        },
-    )
-    result = TwoStageExperiment(config).run()
-    assert recorded_trials.events == ["supcon"] * 2 + ["classifier"] * 3
-    assert len(result.supcon_results) == 2 and len(result.classifier_results) == 3
-
-
 def test_tracked_pipeline_studies_parent_every_trial_to_the_pipeline_run(
     study_pipeline, recorded_trials, tracking_store, tmp_path
 ):
-    """Trials of both stages are children of the one pipeline run, like sweep candidates."""
+    """Trials of both stages are children of the one pipeline run."""
     study_pipeline["mlflow"] = deepcopy(tracking_store.configuration)
     config = _pipeline(
         study_pipeline,
@@ -771,39 +784,6 @@ def test_tracked_pipeline_studies_parent_every_trial_to_the_pipeline_run(
     calls = [*recorded_trials.supcon, *recorded_trials.classifier]
     assert result.mlflow_run_id is not None
     assert [call.parent_run_id for call in calls] == [result.mlflow_run_id] * 4
-
-
-def test_classifier_freeze_is_checked_against_every_supcon_model_choice(
-    study_pipeline, recorded_trials, tmp_path
-):
-    """The winning encoder is unknown before the SupCon study, so freeze must fit every choice."""
-    deeper = tmp_path / "deeper-cls.yaml"
-    deeper.write_text(
-        yaml.safe_dump(
-            {
-                "nc": 2,
-                "backbone": [[-1, 1, "Conv", [8, 3, 2]], [-1, 1, "Conv", [8, 3, 1]]],
-                "head": [[-1, 1, "Classify", [2]]],
-            }
-        )
-    )
-    shallow = study_pipeline["supcon"]["model_name"]
-    study_pipeline["supcon"]["model_name"] = "__MODEL__"
-    study_pipeline["classifier"]["freeze"] = 3  # fits only the deeper network
-    with pytest.raises(ValueError, match="freeze"):
-        config = _pipeline(
-            study_pipeline,
-            {
-                "__LR__": LR_TAG,
-                "__LR0__": "0.004",
-                "__MODEL__": f"!suggest-categorical {{choices: [{deeper}, {shallow}]}}",
-            },
-            tmp_path,
-            studies={"supcon": tuning()},
-        )
-        TwoStageExperiment(config).run()
-    assert recorded_trials.events == []
-    assert not Path(study_pipeline["output_directory"]).exists()
 
 
 @pytest.mark.parametrize(
@@ -821,6 +801,8 @@ def test_classifier_freeze_is_checked_against_every_supcon_model_choice(
             {"supcon": tuning(), "classifier": tuning()},
             "empty",
         ),
+        # search tags without any tuning section
+        ({"__LR__": LR_TAG, "__LR0__": "0.004"}, None, "tuning"),
         # a search bound the classifier stage can never use
         (
             {"__LR__": "0.001", "__LR0__": "!suggest-float {low: -1.0, high: 0.01}"},
@@ -912,10 +894,7 @@ def test_real_classifier_freeze_combinations_that_do_not_fit_fail_only_their_tri
             "balanced_accuracy": {"function": "balanced_accuracy_score"}
         },
         freeze="__F__",
-        tuning=tuning(
-            n_trials=10,
-            sampler={"name": "BruteForceSampler", "parameters": {"seed": 0}},
-        ),
+        tuning=grid(),
     )
     document["initialization"]["head"]["replace"] = "__HEAD__"
     path = _write(
@@ -942,7 +921,7 @@ def test_real_classifier_freeze_combinations_that_do_not_fit_fail_only_their_tri
     assert len(result.results) == 3
 
 
-def test_pipeline_study_parameters_use_full_document_paths_like_sweeps(
+def test_pipeline_study_parameters_use_full_document_paths(
     study_pipeline, recorded_trials, tmp_path
 ):
     """Coupled targets and parameter names keep the pipeline's full paths in study mode."""
@@ -954,7 +933,7 @@ def test_pipeline_study_parameters_use_full_document_paths_like_sweeps(
             "__LR__": "0.001",
             "__LR0__": LR_TAG,
             "__HEAD__": "!suggest-categorical {choices: [linear, full]}",
-            "__BN__": "!coupled-sweep {target: classifier.initialization.head.replace, values: [eval, adapt]}",
+            "__BN__": "!coupled {target: classifier.initialization.head.replace, values: [eval, adapt]}",
         },
         tmp_path,
         studies={"classifier": tuning()},
@@ -988,7 +967,7 @@ def test_pipeline_study_parameters_use_full_document_paths_like_sweeps(
 def test_a_pipeline_tuning_section_must_name_a_stage(
     study_pipeline, recorded_trials, tmp_path, studies
 ):
-    """An empty tuning section is a mistake, not a silent grid sweep."""
+    """An empty tuning section is a mistake, not a silent request for single runs."""
     with pytest.raises(ValueError, match="tuning"):
         _pipeline(
             study_pipeline,
@@ -1073,21 +1052,25 @@ def test_pipeline_classifier_studies_are_kept_per_selected_encoder(
     root = Path(study_pipeline["output_directory"])
     storage = f"sqlite:///{tmp_path / 'optuna.db'}"
     studies = {
+        "supcon": grid(study_name="sc"),
         "classifier": tuning(
             study_name="ce", n_trials=2, storage=storage, load_if_exists=True
-        )
+        ),
     }
 
     def run(supcon_rates):
         config = _pipeline(
             study_pipeline,
-            {"__LR__": f"!sweep {{values: {supcon_rates}}}", "__LR0__": LR_TAG},
+            {
+                "__LR__": f"!suggest-categorical {{choices: {supcon_rates}}}",
+                "__LR0__": LR_TAG,
+            },
             tmp_path,
             studies=studies,
         )
         return TwoStageExperiment(config).run()
 
-    first = run([0.001, 0.004])  # run_001 wins: the score peaks at lr=1e-3
+    first = run([0.001, 0.004])  # lr=1e-3 wins: the score peaks there
     first_root = _encoder_study_root(root, first.selected_supcon.best_checkpoint)
     second = run([0.001, 0.004])  # same winner, same bytes: resumes
     assert (
@@ -1095,7 +1078,9 @@ def test_pipeline_classifier_studies_are_kept_per_selected_encoder(
     )
     assert [t["number"] for t in study_report(first_root)["trials"]] == [0, 1, 2, 3]
     assert len(second.classifier_results) == 4
-    third = run([0.004, 0.001])  # run_002 wins: a different encoder
+    # Reordered choices: the same seeded grid order now trains lr=1e-3 in the other
+    # trial directory, so the winner is a different encoder file.
+    third = run([0.004, 0.001])
     third_root = _encoder_study_root(root, third.selected_supcon.best_checkpoint)
     assert third_root != first_root
     assert [t["number"] for t in study_report(third_root)["trials"]] == [0, 1]

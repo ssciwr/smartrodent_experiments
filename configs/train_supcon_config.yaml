@@ -1,6 +1,9 @@
 # python scripts/train_supcon.py configs/train_supcon_config.yaml
-# Sweepable values: scalar | !sweep {values: [...]}.
-# !coupled-sweep pairs values with another sweep identified by its full dotted path.
+# One run, or with a `tuning:` section an Optuna study over the tagged values:
+#   !suggest-float {low, high, step?, log?} | !suggest-int {low, high, step?, log?}
+#   | !suggest-categorical {choices: [...]} (any YAML values).
+# !coupled {target, values} follows a !suggest-categorical choice identified by its full
+# dotted path. A grid is !suggest-categorical values with sampler BruteForceSampler.
 train_dataset: datasets/stage8_yolo_classifier_srilanka/train  # Class-folder split path.
 validation_dataset: datasets/stage8_yolo_classifier_srilanka/val  # Split path | null.
 output_directory: runs/supcon_standalone_xl_srilanka_lr-00001  # Directory path.

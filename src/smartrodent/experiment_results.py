@@ -52,7 +52,7 @@ def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentRes
     """Choose a validated run using its configured tracking metric and direction.
 
     Args:
-        results: Completed results in sweep order, sharing a metric, direction,
+        results: Completed results in run order, sharing a metric, direction,
             and validation split. The caller supplies the intended candidate set;
             this function does not discover runs or load checkpoint files.
 
@@ -64,7 +64,7 @@ def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentRes
             incompatible metrics, directions, or validation splits.
     """
     if not results:
-        raise ValueError("Cannot select a winner from an empty experiment sweep")
+        raise ValueError("Cannot select a winner from an empty set of results")
     reference = results[0]
     for result in results:
         if result.validation_dataset is None:
@@ -74,7 +74,7 @@ def select_best_experiment(results: Sequence[ExperimentResult]) -> ExperimentRes
         if result.tracked_mode != reference.tracked_mode:
             raise ValueError("Experiments must use the same tracked mode")
         # Input aliases identify the same split; preserve original report paths
-        # while matching the canonical identity used during sweep prevalidation.
+        # while matching the canonical identity used during prevalidation.
         if (
             result.validation_dataset.resolve()
             != reference.validation_dataset.resolve()

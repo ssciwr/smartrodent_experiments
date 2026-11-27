@@ -6,8 +6,15 @@ test module depends on another test module. Plugin autouse fixtures (such as
 ``quiet_optuna``) therefore apply to every test.
 """
 
+import os
+
 import pytest
 from PIL import Image
+
+# The suite is CPU-only, as in CI. Torch's optimizer step initializes CUDA whenever a
+# GPU is visible, even for CPU tensors, so hide it for every test and subprocess.
+# An explicit CUDA_VISIBLE_DEVICES (for opt-in GPU markers) takes precedence.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 pytest_plugins = [
     "bundle_test_support",

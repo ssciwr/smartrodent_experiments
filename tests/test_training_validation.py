@@ -1,8 +1,8 @@
-"""Compatibility and consistency contracts for the new training configuration layer.
+"""Shared training settings: schema validation, serialization and input protection.
 
-Legacy YOLO trainers are deliberately outside this refactor. Existing integration
-suites cover training, sweeps, checkpoint safety, and champion publication; these
-checks target schema gaps and the Python/YAML interface that must survive.
+Covers YAML and ``dataclasses.replace`` round trips, read-only mapping inputs,
+pass-through of native optimizer and metric options, ordered class names, and the
+guard that keeps run outputs from overwriting datasets, checkpoints and templates.
 """
 
 from copy import deepcopy

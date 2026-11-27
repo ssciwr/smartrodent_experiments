@@ -12,7 +12,7 @@ from pydantic import AfterValidator, Field, validate_call
 from tqdm.auto import tqdm
 
 from .base import Filterable
-from .config_utils import load_section
+from .config_loading import load_section
 from .training_validation import Count, Flag, Name, Nonblank, Probability, unique
 
 type Labels = Annotated[

@@ -70,7 +70,7 @@ def test_invalid_study_settings_fail_before_any_trial(values):
 SPACE = """
 lr: !suggest-float {low: 0.0, high: 1.0}
 head: !suggest-categorical {choices: [linear, full]}
-freeze: !coupled-sweep
+freeze: !coupled
   target: head
   values: [11, 10]
 """
@@ -193,7 +193,38 @@ def test_study_runs_isolated_trials_and_selects_the_configured_direction(
     }
 
 
-def test_exact_ties_keep_the_earliest_trial_like_grid_sweeps(study_case, tmp_path):
+def test_an_exhaustive_sampler_runs_every_grid_combination_exactly_once(
+    study_case, tmp_path
+):
+    """A grid is categorical choices plus BruteForceSampler; it stops when exhausted."""
+    runner = ScriptedRunner(tmp_path / "val", score=lambda document: 0.5)
+    case = study_case(
+        runner,
+        space=(
+            "freeze: !suggest-categorical {choices: [[0], [0, 1]]}\n"
+            "head: !suggest-categorical {choices: [linear, {kind: full}]}\n"
+        ),
+        n_trials=10,
+        sampler={"name": "BruteForceSampler", "parameters": {"seed": 0}},
+    )
+    case.study.run()
+    combinations = [
+        (call.document["freeze"], call.document["head"]) for call in runner.calls
+    ]
+    assert len(combinations) == 4
+    assert all(
+        (freeze, head) in combinations
+        for freeze in ([0], [0, 1])
+        for head in ("linear", {"kind": "full"})
+    )
+    # The report names the values themselves, not Optuna's choice indices.
+    assert [
+        (trial["params"]["freeze"], trial["params"]["head"])
+        for trial in study_report(case.root)["trials"]
+    ] == combinations
+
+
+def test_exact_ties_keep_the_earliest_trial(study_case, tmp_path):
     """The established first-tie rule also applies to studies."""
     runner = ScriptedRunner(tmp_path / "val", score=lambda document: 0.5)
     result = study_case(runner, n_trials=3).study.run()
@@ -265,7 +296,7 @@ def test_anticipated_trial_failures_are_recorded_and_the_study_continues(
 
 
 def test_a_study_objective_requires_a_validation_split():
-    """Ranking training-only runs is rejected for studies, as for sweep selection."""
+    """Ranking training-only runs is rejected: a study needs validation to rank trials."""
     with pytest.raises(ValueError, match="validation"):
         StudyObjective(
             tracked_metric="supcon_loss_mean",
@@ -328,7 +359,7 @@ def test_results_that_disagree_with_the_study_objective_are_rejected(
 
 
 def test_validation_path_aliases_are_the_same_objective(study_case, tmp_path):
-    """Equivalent paths to the shared split remain comparable, as in grid sweeps."""
+    """Equivalent paths to the shared split remain comparable."""
     (tmp_path / "val").mkdir()
     alias = tmp_path / "val" / ".." / "val"
     runner = ScriptedRunner(
@@ -434,6 +465,8 @@ def test_existing_studies_are_not_resumed_unless_requested(study_case, tmp_path)
         SPACE.replace("[linear, full]", "[linear, full, none]").replace(
             "[11, 10]", "[11, 10, 0]"
         ),
+        # Same number of choices, so the same Optuna index distribution: still a new space.
+        SPACE.replace("[linear, full]", "[linear, partial]"),
         "lr: !suggest-float {low: 0.0, high: 1.0}\n",
     ],
 )

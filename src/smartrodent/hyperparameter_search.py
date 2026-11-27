@@ -4,13 +4,10 @@
 document into an ``ExperimentResult``. ``training_studies`` binds it to the trainers.
 """
 
-import inspect
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass as result_dataclass
-from dataclasses import field
 from pathlib import Path
-from types import ModuleType
 from typing import Any, ClassVar
 
 import optuna
@@ -20,6 +17,7 @@ from optuna.samplers import BaseSampler
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
+from smartrodent.components import ComponentSpec
 from smartrodent.experiment_results import ExperimentResult, select_best_experiment
 from smartrodent.search_space import SearchSpace
 from smartrodent.training_validation import (
@@ -46,45 +44,6 @@ class TrialConfigurationError(ValueError):
 # --------------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
-class StudyComponent:
-    """An Optuna sampler or pruner chosen by class name.
-
-    Args:
-        name: Class name in ``optuna.samplers`` or ``optuna.pruners``.
-        parameters: Keyword arguments for its constructor; empty means its defaults.
-    """
-
-    name: Nonblank
-    parameters: dict[str, Any] = field(default_factory=dict)
-
-    def build(self, module: ModuleType, base: type):
-        """Construct the named class from the given Optuna module.
-
-        Args:
-            module: ``optuna.samplers`` or ``optuna.pruners``.
-            base: Required base class.
-
-        Returns:
-            A new sampler or pruner instance.
-
-        Raises:
-            ValueError: The name is not a concrete subclass of base, or the
-                parameters do not fit its constructor.
-        """
-        factory = getattr(module, self.name, None)
-        if not (
-            isinstance(factory, type) and issubclass(factory, base)
-        ) or inspect.isabstract(factory):
-            raise ValueError(
-                f"'{self.name}' is not a concrete class in {module.__name__}"
-            )
-        try:
-            return factory(**self.parameters)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"Invalid parameters for {self.name}: {error}") from error
-
-
 @dataclass(frozen=True, kw_only=True, config=ConfigDict(extra="forbid"))
 class StudyConfiguration:
     """Settings of a ``tuning:`` section. The direction follows the tracked mode.
@@ -93,8 +52,9 @@ class StudyConfiguration:
         study_name: Optuna study name, also the resume key in persistent storage.
         storage: Optuna storage URL, e.g. ``sqlite:///optuna.db``; null is in-memory.
         n_trials: Trials to run in this invocation (Optuna semantics).
-        sampler: Sampler class name and parameters.
-        pruner: Pruner class name and parameters, or null for no pruning.
+        sampler: Sampler class (in ``optuna.samplers``) and its parameters.
+        pruner: Pruner class (in ``optuna.pruners``) and its parameters, or null for
+            no pruning.
         load_if_exists: Resume an existing study of the same name.
         timeout: Optional wall-clock budget in seconds for this invocation.
     """
@@ -102,8 +62,8 @@ class StudyConfiguration:
     study_name: Nonblank
     storage: Nonblank | None
     n_trials: Count
-    sampler: MappingInput[StudyComponent]
-    pruner: MappingInput[StudyComponent] | None
+    sampler: MappingInput[ComponentSpec]
+    pruner: MappingInput[ComponentSpec] | None
     load_if_exists: Flag = False
     timeout: PositiveNumber | None = None
 
@@ -155,7 +115,7 @@ class StudyObjective:
     validation_dataset: Path | None
 
     def __post_init__(self):
-        """Studies rank trials, which, as for sweep selection, needs validation data."""
+        """Studies rank trials, which needs validation data."""
         if self.validation_dataset is None:
             raise ValueError(
                 "An Optuna study requires a validation_dataset to rank its trials"
@@ -212,11 +172,12 @@ class StudyResult:
         output_directory: Study root containing ``study.yaml`` and trial directories.
         study_name: Optuna study name.
         direction: ``maximize`` or ``minimize``.
-        trials: Report rows for every trial, in trial-number order.
+        trials: Report rows for every trial, in trial-number order, with decoded
+            parameter values.
         results: Completed trial results, in trial-number order.
         selected: Best completed result (earliest on exact ties), or None.
         selected_trial_number: Trial number of ``selected``, or None.
-        best_params: Sampled parameters of ``selected``, or None.
+        best_params: Decoded parameter values of ``selected``, or None.
         registered_champion_version: Registry alias version after promotion, when
             a classifier study registers models; not part of ``study.yaml``.
     """
@@ -274,7 +235,8 @@ class HyperparameterStudy:
 
     Optuna's own ``study.optimize`` loop runs the trials: it honors n_trials and
     timeout, records pruned and failed trials, and lets exhaustive samplers stop
-    the study, which a hand-written ask-and-tell loop would have to replicate.
+    the study, which a hand-written ask-and-tell loop would have to replicate. A
+    grid is a space of categorical parameters searched by ``BruteForceSampler``.
 
     Args:
         space: Parameters to sample.
@@ -494,7 +456,7 @@ class HyperparameterStudy:
                 {
                     "number": trial.number,
                     "state": trial.state.name,
-                    "params": dict(trial.params),
+                    "params": self.space.decode(trial.params),
                     "value": trial.value,
                     "intermediate_values": dict(trial.intermediate_values),
                     "result": result.to_dict() if result is not None else None,
@@ -504,7 +466,7 @@ class HyperparameterStudy:
             if result is not None:
                 completed.append((trial, result))
         results = [result for _, result in completed]
-        # The established sweep rule: configured direction, earliest exact tie.
+        # Configured direction; the earliest trial wins an exact tie.
         selected = select_best_experiment(results) if results else None
         winner = next(
             (trial for trial, result in completed if result is selected), None
@@ -517,7 +479,9 @@ class HyperparameterStudy:
             results=tuple(results),
             selected=selected,
             selected_trial_number=winner.number if winner is not None else None,
-            best_params=dict(winner.params) if winner is not None else None,
+            best_params=self.space.decode(winner.params)
+            if winner is not None
+            else None,
         )
 
     @staticmethod

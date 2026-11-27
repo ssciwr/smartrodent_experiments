@@ -1,5 +1,6 @@
 """YAML search-space tags resolved into named Optuna distributions."""
 
+import json
 from copy import deepcopy
 from decimal import Decimal
 
@@ -15,7 +16,7 @@ from optuna.distributions import (
 )
 from study_test_support import load_tagged_yaml
 
-from smartrodent.search_space import SearchSpace
+from smartrodent.search_space import SearchSpace, reject_search_tags
 
 
 def _space(text: str, **kwargs):
@@ -41,19 +42,13 @@ fixed: 3
         "optimizer.weight_decay": FloatDistribution(0.0, 0.1, step=0.01),
         "classes_per_batch": IntDistribution(4, 12, step=2),
         "epochs": IntDistribution(1, 64, log=True),
-        "head": CategoricalDistribution(["linear", "full", None]),
+        # Optuna sees choice indices; the space maps them back to the values.
+        "head": CategoricalDistribution([0, 1, 2]),
     }
 
 
-def test_block_style_tags_are_equivalent_to_flow_style():
-    """Tags accept ordinary YAML block mappings, as the existing sweep tags do."""
-    flow = _space("lr: !suggest-float {low: 0.1, high: 0.9}\n")
-    block = _space("lr: !suggest-float\n  low: 0.1\n  high: 0.9\n")
-    assert flow.distributions == block.distributions
-
-
 def test_tags_inside_lists_are_named_with_index_paths_and_resolved_in_place():
-    """List elements use the coupled-sweep path syntax and keep their siblings."""
+    """List elements use the dotted index path syntax and keep their siblings."""
     space = _space(
         """
 transforms:
@@ -66,25 +61,25 @@ transforms:
     assert resolved["transforms"]["random_resized_crop"]["scale"] == [0.6, 1.0]
 
 
-def test_coupled_sweep_follows_the_chosen_categorical_index():
-    """Existing !coupled-sweep semantics pair structured values with a categorical choice."""
+def test_coupled_values_follow_the_chosen_categorical_index():
+    """!coupled pairs structured values with a categorical choice."""
     space = _space(
         """
 initialization:
   head:
     replace: !suggest-categorical {choices: [linear, full]}
-freeze: !coupled-sweep
+freeze: !coupled
   target: initialization.head.replace
   values: [11, 10]
-augment: !coupled-sweep
+augment: !coupled
   target: initialization.head.replace
   values: [{p: 0.1}, {p: 0.5}]
 """,
     )
     # Coupled values are not independent Optuna parameters.
     assert set(space.distributions) == {"initialization.head.replace"}
-    linear = space.resolve({"initialization.head.replace": "linear"})
-    full = space.resolve({"initialization.head.replace": "full"})
+    linear = space.resolve({"initialization.head.replace": 0})
+    full = space.resolve({"initialization.head.replace": 1})
     assert (linear["freeze"], linear["augment"]) == (11, {"p": 0.1})
     assert (full["freeze"], full["augment"]) == (10, {"p": 0.5})
     assert full["initialization"]["head"]["replace"] == "full"
@@ -110,8 +105,8 @@ nested: {values: [1, 2]}
 @pytest.mark.parametrize(
     "params,match",
     [
-        ({"head": "linear"}, "lr"),  # missing parameter
-        ({"lr": 0.5, "head": "linear", "other": 1}, "other"),  # unknown parameter
+        ({"head": 0}, "lr"),  # missing parameter
+        ({"lr": 0.5, "head": 0, "other": 1}, "other"),  # unknown parameter
     ],
 )
 def test_resolution_rejects_parameters_that_do_not_match_the_space(params, match):
@@ -127,8 +122,7 @@ head: !suggest-categorical {choices: [linear, full]}
 
 
 # One schema case per tag type, plus our own rules: unique choices, and Optuna's
-# step and structured-choice warnings escalated to errors. Range, step and log
-# consistency is Optuna's to check.
+# step warning escalated to an error. Range, step and log consistency is Optuna's.
 @pytest.mark.parametrize(
     "text",
     [
@@ -137,8 +131,10 @@ head: !suggest-categorical {choices: [linear, full]}
         "lr: !suggest-float 0.1\n",  # scalar instead of mapping
         "n: !suggest-int {low: 0.5, high: 3}\n",  # float bound for an integer
         "c: !suggest-categorical {choices: [a, a]}\n",  # ambiguous duplicate choice
-        "c: !suggest-categorical {choices: [[1, 2], [3]]}\n",  # non-primitive choices
+        "c: !suggest-categorical {choices: [[1, 2], [1, 2]]}\n",  # structured duplicate
+        "c: !suggest-categorical {choices: []}\n",  # nothing to choose
         "c: !suggest-categorical {values: [a, b]}\n",  # wrong key
+        "c: !suggest-categorical {type: x, choices: [a]}\n",  # reserved key
     ],
 )
 def test_invalid_tag_definitions_are_rejected_with_value_errors(text):
@@ -153,23 +149,65 @@ def test_a_document_without_suggest_tags_is_not_a_search_space():
         _space("lr: 0.1\nnested: {a: 1}\n")
 
 
+def test_structured_choices_resolve_to_independent_copies_of_their_values():
+    """Lists, mappings and null are ordinary choices; resolutions never share them."""
+    space = _space(
+        """
+freeze: !suggest-categorical {choices: [[0], [0, 1], null]}
+augment: !suggest-categorical {choices: [{p: 0.1}, {p: 0.5, scale: [1, 2]}]}
+"""
+    )
+    first = space.resolve({"freeze": 1, "augment": 1})
+    assert first == {"freeze": [0, 1], "augment": {"p": 0.5, "scale": [1, 2]}}
+    first["augment"]["scale"].append(3)
+    assert space.resolve({"freeze": 1, "augment": 1})["augment"]["scale"] == [1, 2]
+    assert space.decode({"freeze": 2, "augment": 0}) == {
+        "freeze": None,
+        "augment": {"p": 0.1},
+    }
+
+
 @pytest.mark.parametrize(
     "text",
     [
-        "lr: !suggest-float {low: 0.1, high: 0.9}\nseed: !sweep\n  values: [1, 2]\n",
-        "lr: !suggest-float {low: 0.1, high: 0.9}\nnested:\n  seed: !sweep\n    values: [1, 2]\n",
-        # Mixing is reported before coupling problems: this coupled-sweep targets a !sweep.
+        "!suggest-categorical {choices: [{lr: 0.1}, {lr: 0.2}]}\n",  # whole document
         (
-            "lr: !suggest-float {low: 0.1, high: 0.9}\n"
-            "model: !sweep\n  values: [a, b]\n"
-            "batch: !coupled-sweep\n  target: model\n  values: [1, 2]\n"
-        ),
+            "head: !suggest-categorical\n"
+            "  choices: [linear, {lr: !suggest-float {low: 0.1, high: 0.9}}]\n"
+        ),  # tag inside a choice
+        (
+            "head: !suggest-categorical {choices: [a, b]}\n"
+            "lr: !coupled {target: supcon.head, values: [0.1, !suggest-float {low: 0.1, high: 0.9}]}\n"
+        ),  # tag inside a coupled value
     ],
 )
-def test_grid_sweeps_cannot_be_mixed_into_a_search_space(text):
-    """Decision: a configuration is either a grid sweep or an Optuna study, never both."""
-    with pytest.raises(ValueError, match="!sweep"):
-        SearchSpace.from_document(load_tagged_yaml(text))
+def test_tags_cannot_replace_the_document_or_hide_inside_values(text):
+    """A tag stands for one setting; anything else would bypass the settings' validation."""
+    with pytest.raises(ValueError, match="cannot"):
+        SearchSpace.from_document(load_tagged_yaml(text), prefix="supcon")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "lr: !suggest-float {low: 0.1, high: 0.9}\n",
+        "optimizer:\n  lr: !suggest-float {low: 0.1, high: 0.9}\n",
+        "scale: [!suggest-float {low: 0.5, high: 0.9}, 1.0]\n",
+        "head: !suggest-categorical {choices: [a, b]}\nfreeze: !coupled {target: head, values: [1, 2]}\n",
+    ],
+)
+def test_single_run_documents_reject_search_tags(text):
+    """Tags outside a study fail clearly instead of leaking into a run configuration."""
+    with pytest.raises(ValueError, match="tuning"):
+        reject_search_tags(load_tagged_yaml(text))
+
+
+def test_single_run_documents_without_tags_pass_unchanged():
+    """Ordinary mappings, including ones with a plain ``type`` key, are not tags."""
+    document = {"head": {"type": "linear"}, "values": [1, {"type": "other"}]}
+    snapshot = deepcopy(document)
+    reject_search_tags(document)
+    assert document == snapshot
 
 
 @pytest.mark.parametrize(
@@ -178,21 +216,25 @@ def test_grid_sweeps_cannot_be_mixed_into_a_search_space(text):
         (
             (
                 "lr: !suggest-float {low: 0.1, high: 0.9}\n"
-                "batch: !coupled-sweep\n  target: lr\n  values: [1, 2]\n"
+                "batch: !coupled\n  target: lr\n  values: [1, 2]\n"
             ),
             "categorical",
         ),
         (
             (
                 "head: !suggest-categorical {choices: [a, b]}\n"
-                "batch: !coupled-sweep\n  target: absent.path\n  values: [1, 2]\n"
+                "batch: !coupled\n  target: absent.path\n  values: [1, 2]\n"
             ),
             r"target.*absent\.path|absent\.path.*target",
         ),
         (
+            "head: !suggest-categorical {choices: [a, b]}\nbatch: !coupled {values: [1, 2]}\n",
+            "target",
+        ),
+        (
             (
                 "head: !suggest-categorical {choices: [a, b]}\n"
-                "batch: !coupled-sweep\n  target: head\n  values: [1, 2, 3]\n"
+                "batch: !coupled\n  target: head\n  values: [1, 2, 3]\n"
             ),
             "length",
         ),
@@ -215,7 +257,7 @@ def test_invalid_couplings_are_rejected(text, match):
         (
             (
                 "head: !suggest-categorical {choices: [a, b]}\n"
-                "tracked_metric: !coupled-sweep\n  target: head\n  values: [x, y]\n"
+                "tracked_metric: !coupled\n  target: head\n  values: [x, y]\n"
             ),
             "tracked_metric",
         ),
@@ -261,16 +303,19 @@ def _parameter(draw):
             "step": step,
         }
     elif kind == "categorical":
+        scalars = st.one_of(
+            st.text("abcxyz", min_size=1, max_size=4), st.integers(-9, 9), st.none()
+        )
         choices = draw(
             st.lists(
                 st.one_of(
-                    st.text("abcxyz", min_size=1, max_size=4),
-                    st.integers(-9, 9),
-                    st.none(),
+                    scalars,
+                    st.lists(st.integers(0, 9), max_size=3),
+                    st.dictionaries(st.sampled_from(["p", "q"]), scalars, max_size=2),
                 ),
                 min_size=1,
                 max_size=5,
-                unique=True,
+                unique_by=lambda value: json.dumps(value, sort_keys=True),
             )
         )
         return kind, {"choices": choices}
@@ -302,7 +347,7 @@ def _search_documents(draw):
         if kind == "categorical" and draw(st.booleans()):
             values = list(range(100, 100 + len(spec["choices"])))
             root.append(
-                f"{name}_coupled: !coupled-sweep {{target: {path}, values: {values}}}"
+                f"{name}_coupled: !coupled {{target: {path}, values: {values}}}"
             )
             couplings[f"{name}_coupled"] = (path, values)
     lines = root + (["group:"] + [f"  {line}" for line in nested] if nested else [])
@@ -335,7 +380,11 @@ def _leaves(node):
 )
 @given(case=_search_documents(), seed=st.integers(0, 2**16))
 def test_every_sampled_resolution_is_concrete_and_inside_its_declared_space(case, seed):
-    """Any Optuna sample resolves to a plain document honoring bounds, steps and couplings."""
+    """Any Optuna sample resolves to a plain document honoring bounds, steps and couplings.
+
+    Categorical choices may be structured; the decoded parameter values are exactly the
+    values placed into the document.
+    """
     text, specs, couplings = case
     source = load_tagged_yaml(text)
     space = SearchSpace.from_document(source)
@@ -344,6 +393,7 @@ def test_every_sampled_resolution_is_concrete_and_inside_its_declared_space(case
     for _ in range(3):
         trial = study.ask(space.distributions)
         resolved = space.resolve(trial.params)
+        decoded = space.decode(trial.params)
         study.tell(trial, 0.0)
         assert all(
             leaf is None or isinstance(leaf, (bool, int, float, str))
@@ -353,7 +403,7 @@ def test_every_sampled_resolution_is_concrete_and_inside_its_declared_space(case
         assert resolved["fixed"] == {"keep": 7}
         for path, (kind, spec) in specs.items():
             value = _value_at(resolved, path)
-            assert value == trial.params[path]
+            assert value == decoded[path]
             if kind == "categorical":
                 assert value in spec["choices"]
             else:
@@ -378,7 +428,7 @@ def test_prefixed_spaces_name_parameters_and_couplings_by_full_document_path():
 initialization:
   head:
     replace: !suggest-categorical {choices: [linear, full]}
-freeze: !coupled-sweep
+freeze: !coupled
   target: classifier.initialization.head.replace
   values: [11, 10]
 tracked_metric: accuracy
@@ -388,7 +438,7 @@ tracked_metric: accuracy
         prefix="classifier",
     )
     assert set(space.distributions) == {"classifier.initialization.head.replace"}
-    resolved = space.resolve({"classifier.initialization.head.replace": "full"})
+    resolved = space.resolve({"classifier.initialization.head.replace": 1})
     assert (
         resolved["freeze"] == 10
         and resolved["initialization"]["head"]["replace"] == "full"

@@ -184,7 +184,7 @@ class OnnxExportSettings(TypedDict):
 
 @with_config(ConfigDict(extra="forbid"))
 class SharedData(TypedDict):
-    """Keep pipeline data concrete while stage settings may still contain sweep tags."""
+    """Keep pipeline data concrete while stage settings may still contain search tags."""
 
     train_dataset: Path
     validation_dataset: Path
@@ -232,7 +232,7 @@ def validate_output_paths(
         directories: Per-run output directories, which must not overlap.
         datasets: Input splits that no output directory may be inside.
         sources: Model weights and templates that no artifact may overwrite.
-        roots: Optional sweep/pipeline roots containing configuration and summaries.
+        roots: Optional pipeline roots containing configuration and summaries.
         native_directories: Classifier runs whose native artifacts/weights must be protected.
 
     Raises:

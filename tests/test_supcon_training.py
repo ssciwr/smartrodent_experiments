@@ -239,10 +239,8 @@ def test_scheduler_training_requirements(experiment_configuration):
         )
 
 
-def test_scheduler_configuration_round_trip_and_sweep(
-    experiment_configuration, tmp_path
-):
-    """Expanded scheduler parameters survive YAML, checkpoint, and MLflow serialization."""
+def test_scheduler_configuration_round_trip(experiment_configuration, tmp_path):
+    """Scheduler parameters survive YAML, checkpoint, and MLflow serialization."""
     config = replace(
         experiment_configuration,
         validation_dataset=experiment_configuration.train_dataset,
@@ -261,13 +259,6 @@ def test_scheduler_configuration_round_trip_and_sweep(
     del constant["scheduler"]
     assert TrainingConfiguration.from_mapping(constant).scheduler is None
     assert SchedulerConfiguration.from_mapping(None) is None
-    path.write_text(
-        path.read_text().replace(
-            "\n    factor: 0.5\n", "\n    factor: !sweep\n      values: [0.5, 0.1]\n"
-        )
-    )
-    runs = train_supcon.load_training_configurations(path)
-    assert [run.scheduler.parameters["factor"] for run in runs] == [0.5, 0.1]
 
 
 @pytest.mark.parametrize(
@@ -337,10 +328,8 @@ def isolated_validation_rng():
             np.random.set_state(numpy_state)
 
 
-def test_run_with_result_reports_training_only_best_without_changing_legacy_run(
-    experiment_configuration,
-):
-    """The additive result API describes real snapshots; run() still returns last.pt."""
+def test_training_only_results_describe_the_saved_snapshots(experiment_configuration):
+    """run_with_result describes best.pt and last.pt; run() returns last.pt."""
     from smartrodent import experiment_results
 
     torch.set_num_threads(2)
@@ -360,10 +349,10 @@ def test_run_with_result_reports_training_only_best_without_changing_legacy_run(
     assert result.validation_dataset is None
     assert result.mlflow_run_id is None
 
-    legacy_config = replace(config, output_directory=config.output_directory / "legacy")
-    legacy_path = SupConExperiment(legacy_config).run()
-    assert legacy_path == legacy_config.output_directory / "last.pt"
-    assert torch.load(legacy_path, weights_only=True)["epoch"] == config.epochs
+    plain_config = replace(config, output_directory=config.output_directory / "plain")
+    last_path = SupConExperiment(plain_config).run()
+    assert last_path == plain_config.output_directory / "last.pt"
+    assert torch.load(last_path, weights_only=True)["epoch"] == config.epochs
 
 
 # Each direction and each tracking setting once.
@@ -471,10 +460,8 @@ def test_normal_validation_loader_repeats_batches_without_perturbing_training_rn
             assert torch.all(counts == validation_configuration.samples_per_class)
 
 
-def test_tracking_configuration_round_trip_and_fixed_temperature_sweep(
-    validation_configuration, tmp_path
-):
-    """Other hyperparameters may sweep; the configured metric and temperature remain fixed."""
+def test_tracking_configuration_round_trip(validation_configuration, tmp_path):
+    """The configured metric and its direction survive YAML serialization."""
     config = replace(
         validation_configuration,
         tracked_metric="balanced_accuracy",
@@ -487,31 +474,6 @@ def test_tracking_configuration_round_trip_and_fixed_temperature_sweep(
     path.write_text(yaml.safe_dump(config.to_dict()))
     assert TrainingConfiguration.from_yaml(path) == config
     assert config.mlflow_parameters()["tracked_mode"] == "max"
-    path.write_text(
-        path.read_text().replace(
-            "\n  lr: 0.001\n", "\n  lr: !sweep\n    values: [0.001, 0.002]\n"
-        )
-    )
-    runs = train_supcon.load_training_configurations(path)
-    assert [run.optimizer["lr"] for run in runs] == [0.001, 0.002]
-    assert all(run.temperature == config.temperature for run in runs)
-    assert all(run.tracked_metric == "balanced_accuracy" for run in runs)
-    assert all(run.effective_tracked_mode == "max" for run in runs)
-
-
-def test_temperature_cannot_vary_within_a_supcon_sweep(
-    experiment_configuration, tmp_path
-):
-    """Reject different temperatures before any run rather than adding another scoring pass."""
-    path = tmp_path / "varying-temperature.yaml"
-    path.write_text(
-        yaml.safe_dump(experiment_configuration.to_dict()).replace(
-            "\ntemperature: 0.1\n", "\ntemperature: !sweep\n  values: [0.05, 0.2]\n"
-        )
-    )
-    with pytest.raises(ValueError, match="temperature.*sweep|sweep.*temperature"):
-        train_supcon.load_training_configurations(path)
-    assert not experiment_configuration.output_directory.exists()
 
 
 @pytest.mark.parametrize(

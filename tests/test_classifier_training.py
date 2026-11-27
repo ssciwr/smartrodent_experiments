@@ -937,13 +937,12 @@ def test_native_output_aliases_cannot_redirect_writes_into_input_splits(
     assert not (dataset / "last.pt").exists()
 
 
-# Fixed native names, the sweep summary, and the epoch-dependent names that are only
-# caught by the plot and weights-directory globs; alternating which split is hit.
+# Fixed native names and the epoch-dependent names that are only caught by the plot
+# and weights-directory globs; alternating which split is hit.
 @pytest.mark.parametrize(
     "split,artifact",
     [
         ("train_dataset", "args.yaml"),
-        ("validation_dataset", "selection.yaml"),
         ("train_dataset", "weights/last.pt"),
         ("validation_dataset", "weights/epoch0.pt"),
         ("train_dataset", "train_batch0.jpg"),
@@ -960,12 +959,7 @@ def test_existing_output_hardlinks_cannot_truncate_dataset_images(
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.link(protected, destination)
     with pytest.raises(ValueError, match="hardlink|source|dataset"):
-        if artifact == "selection.yaml":
-            from smartrodent.classifier_sweeps import ClassifierSweepConfiguration
-
-            ClassifierSweepConfiguration.from_mapping(config.to_dict())
-        else:
-            replace(config)
+        replace(config)
     assert protected.read_bytes() == before
     assert destination.samefile(protected)
 

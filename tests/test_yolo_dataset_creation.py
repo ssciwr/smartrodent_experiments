@@ -17,8 +17,8 @@ from PIL import Image
 from speciesnet_test_support import SpeciesNetDetectorStub, SpeciesNetStub, detection
 
 from smartrodent import yolo_dataset_creation
-from smartrodent.base import Configurable
 from smartrodent.yolo_dataset_creation import (
+    DatasetCreationPlan,
     YoloClassifierDatasetCreatorFromSpeciesnet,
     YoloDetectorDatasetCreatorFromSpeciesnet,
     _SpeciesNetDatasetMixin,
@@ -895,113 +895,76 @@ def test_classifier_output_loads_through_real_ultralytics_dataset(
     assert sorted(labels) == ([0, 0, 1] if split == "train" else [0, 1])
 
 
+def _configured_creator(config_dir, creator_type, paths, **parameters):
+    """Build one creator through a dataset-creation configuration file."""
+    config_path = config_dir / "creator.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "creator": {"name": creator_type.__name__, "parameters": parameters},
+                "datasets": [paths],
+            }
+        )
+    )
+    (creator,) = DatasetCreationPlan.from_yaml(config_path).creators()
+    return creator
+
+
 @SHARED_BASE
-def test_from_config_loads_selected_classes_and_lazy_model(
+def test_configured_creators_keep_class_order_and_load_no_model(
     creator_type, creator_input, tmp_path, monkeypatch
 ):
-    """Both configurable creators retain class order and defer model loading."""
+    """Preparing a configured creator reads records in class order and loads no model."""
     constructor = Mock(
         side_effect=AssertionError("Config loading must not load weights")
     )
     monkeypatch.setattr(yolo_dataset_creation, "SpeciesNet", constructor)
     output = tmp_path / "stage8_yolo_dataset"
-    config_path = tmp_path / "creator.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "data": {
-                    creator_type.__name__: {
-                        "path_to_image_data": str(creator_input),
-                        "dataset_output_path": str(output),
-                        "class_names": ["shrew", "mouse"],
-                        "model_name": "custom-speciesnet",
-                        "batch_size": 7,
-                        "confidence_threshold": 0.8,
-                        "allowed_classes": ["human", "vehicle"],
-                        "iou_threshold": 0.2,
-                    }
-                }
-            }
-        )
+    creator = _configured_creator(
+        tmp_path,
+        creator_type,
+        {"path_to_image_data": str(creator_input), "dataset_output_path": str(output)},
+        class_names=["shrew", "mouse"],
+        model_name="custom-speciesnet",
     )
 
-    creator = creator_type.from_config(config_path)
-
     assert type(creator) is creator_type
-    assert isinstance(creator, Configurable)
-    assert creator.class_names == ["shrew", "mouse"]
     assert creator.classes == {0: "shrew", 1: "mouse"}
     assert list(creator.records_by_species) == ["shrew", "mouse"]
-    assert creator.path_to_image_data == creator_input
-    assert creator.dataset_output_path == output
-    assert creator.speciesnet_model is None
-    assert creator.speciesnet_model_name == "custom-speciesnet"
-    assert creator.batch_size == 7
-    assert creator.confidence_threshold == 0.8
-    assert creator.allowed_classes == ("human", "vehicle")
-    assert creator.iou_threshold == 0.2
     constructor.assert_not_called()
     assert not output.exists()
 
 
 @SHARED_BASE
-def test_from_config_resolves_paths_against_the_working_directory(
+def test_configured_paths_resolve_against_the_working_directory(
     creator_type, creator_input, tmp_path, monkeypatch
 ):
     """Relative paths follow the working directory, not the YAML file's directory."""
     monkeypatch.chdir(tmp_path)
     config_dir = tmp_path / "configs"
     config_dir.mkdir()
-    config_path = config_dir / "creator.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "data": {
-                    creator_type.__name__: {
-                        "path_to_image_data": "input",
-                        "dataset_output_path": "stage8_yolo_dataset",
-                    }
-                }
-            }
-        )
-    )
 
-    creator = creator_type.from_config(config_path)
+    creator = _configured_creator(
+        config_dir,
+        creator_type,
+        {"path_to_image_data": "input", "dataset_output_path": "stage8_yolo_dataset"},
+    )
 
     assert creator.path_to_image_data == creator_input
     assert creator.dataset_output_path == tmp_path / "stage8_yolo_dataset"
 
 
 @SHARED_BASE
-def test_from_config_rejects_python_only_model_injection(
+def test_configuration_cannot_inject_a_detector_instance(
     creator_type, creator_input, tmp_path
 ):
     """A YAML value cannot stand in for an injected detector instance."""
-    settings = {
+    paths = {
         "path_to_image_data": str(creator_input),
         "dataset_output_path": str(tmp_path / "stage8_yolo_dataset"),
-        "model": "speciesnet",
     }
-    config_path = tmp_path / "creator.yaml"
-    config_path.write_text(yaml.safe_dump({"data": {creator_type.__name__: settings}}))
-
     with pytest.raises(ValueError, match="model"):
-        creator_type.from_config(config_path)
-
-
-@SHARED_BASE
-def test_from_config_requires_its_own_class_named_section(creator_type, tmp_path):
-    """Creators cannot accidentally consume another creator's configuration."""
-    other_type = (
-        YoloClassifierDatasetCreatorFromSpeciesnet
-        if creator_type is YoloDetectorDatasetCreatorFromSpeciesnet
-        else YoloDetectorDatasetCreatorFromSpeciesnet
-    )
-    config_path = tmp_path / "creator.yaml"
-    config_path.write_text(yaml.safe_dump({"data": {other_type.__name__: {}}}))
-
-    with pytest.raises(ValueError, match=creator_type.__name__):
-        creator_type.from_config(config_path)
+        _configured_creator(tmp_path, creator_type, paths, model="speciesnet")
 
 
 @SHARED_BASE
@@ -1019,23 +982,14 @@ def test_configured_filtering_controls_created_dataset(
 ):
     """YAML filtering settings control retained boxes and actual dataset outputs."""
     output = tmp_path / "configured_output"
-    config_path = tmp_path / "creator.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "data": {
-                    creator_type.__name__: {
-                        "path_to_image_data": str(creator_input),
-                        "dataset_output_path": str(output),
-                        "confidence_threshold": confidence,
-                        "allowed_classes": labels,
-                        "iou_threshold": iou,
-                    }
-                }
-            }
-        )
+    creator = _configured_creator(
+        tmp_path,
+        creator_type,
+        {"path_to_image_data": str(creator_input), "dataset_output_path": str(output)},
+        confidence_threshold=confidence,
+        allowed_classes=labels,
+        iou_threshold=iou,
     )
-    creator = creator_type.from_config(config_path)
     creator.initialize_speciesnet(
         model=SpeciesNetStub(
             [

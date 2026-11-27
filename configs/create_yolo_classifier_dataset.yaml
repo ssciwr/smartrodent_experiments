@@ -1,25 +1,10 @@
 # Run: python scripts/create_yolo_dataset.py configs/create_yolo_classifier_dataset.yaml
 # Reads already-split per-species records.csv files and saves inferred animal crops.
 # Paths are relative to the working directory (normally the project root).
-data:
-  YoloClassifierDatasetCreatorFromSpeciesnet:
-    path_to_image_data: !sweep
-      values:
-        - datasets/stage7_filtered_data_downsampled_50
-        - datasets/stage7_filtered_data_downsampled_100
-        - datasets/stage7_filtered_data_downsampled_250
-        - datasets/stage7_filtered_data_downsampled_500
-        - datasets/stage7_filtered_data_downsampled_1000
-        - datasets/stage7_filtered_data_downsampled_1500
-    dataset_output_path: !coupled-sweep
-      target: data.YoloClassifierDatasetCreatorFromSpeciesnet.path_to_image_data
-      values:
-        - datasets/stage8_yolo_classifier_50
-        - datasets/stage8_yolo_classifier_100
-        - datasets/stage8_yolo_classifier_250
-        - datasets/stage8_yolo_classifier_500
-        - datasets/stage8_yolo_classifier_1000
-        - datasets/stage8_yolo_classifier_1500
+creator:
+  # Creator class in smartrodent.yolo_dataset_creation, or "module:Class".
+  name: YoloClassifierDatasetCreatorFromSpeciesnet
+  parameters:  # Shared by every dataset below.
     # null discovers all species; a list selects directories.
     # Ultralytics classification derives its own alphabetical class-index order.
     class_names: null
@@ -30,3 +15,16 @@ data:
     confidence_threshold: 0.45
     allowed_classes: [animal]
     iou_threshold: 0.45
+datasets:  # One entry per dataset: its input records and output root.
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_50
+    dataset_output_path: datasets/stage8_yolo_classifier_50
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_100
+    dataset_output_path: datasets/stage8_yolo_classifier_100
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_250
+    dataset_output_path: datasets/stage8_yolo_classifier_250
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_500
+    dataset_output_path: datasets/stage8_yolo_classifier_500
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_1000
+    dataset_output_path: datasets/stage8_yolo_classifier_1000
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_1500
+    dataset_output_path: datasets/stage8_yolo_classifier_1500

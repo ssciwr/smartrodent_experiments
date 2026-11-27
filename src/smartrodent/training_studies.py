@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 import mlflow
 
-from smartrodent import config_utils
+from smartrodent import config_loading
 from smartrodent.classifier_champions import ClassifierChampionRegistry
 from smartrodent.classifier_training import (
     ClassifierConfiguration,
@@ -48,7 +48,7 @@ def is_study_configuration(path: str | Path) -> bool:
     Returns:
         True when the document is a mapping with a ``tuning`` key.
     """
-    document = config_utils.load_yaml(path)
+    document = config_loading.load_yaml(path)
     return isinstance(document, Mapping) and "tuning" in document
 
 
@@ -99,6 +99,7 @@ class _StageStudy(ABC):
                 partial(self._configuration, directory=reference_directory)
             )
         )
+        self._reject_inputs_inside_outputs()
         self.objective = self._objective(self.configurations[0])
 
     @classmethod
@@ -111,7 +112,7 @@ class _StageStudy(ABC):
         Returns:
             The prepared study.
         """
-        return cls(config_utils.load_yaml(path))
+        return cls(config_loading.load_yaml(path))
 
     @property
     def reference(self):
@@ -175,8 +176,8 @@ class _StageStudy(ABC):
         parent_run_id: str | None,
     ) -> ExperimentResult:
         """Validate one sampled document and train it."""
-        # TypeError is anticipated, as in classifier sweeps: configuration
-        # constructors report some invalid inputs that way.
+        # TypeError is anticipated: Ultralytics' get_cfg, called while validating a
+        # classifier configuration, reports wrongly typed train_kwargs that way.
         try:
             configuration = self._configuration(document, directory=directory)
         except (ValueError, TypeError) as error:
@@ -193,6 +194,21 @@ class _StageStudy(ABC):
             raise TrialConfigurationError(
                 f"Sampled combination does not fit: {error}"
             ) from error
+
+    def _reject_inputs_inside_outputs(self) -> None:
+        """Keep every candidate's inputs out of the study directory.
+
+        Trials and ``study.yaml`` are written there under names only known at run
+        time, so an input inside it could be overwritten by a later trial.
+        """
+        root = self.output_directory.resolve()
+        for configuration in self.configurations:
+            for source in configuration.input_files():
+                if source is not None and Path(source).resolve().is_relative_to(root):
+                    raise ValueError(
+                        f"Input {source} lies inside the study output directory {root}, "
+                        "where trials write their artifacts"
+                    )
 
     def _finish(self, result: StudyResult) -> StudyResult:
         """Complete stage-specific work after all trials; nothing by default."""
@@ -220,7 +236,7 @@ class SupConStudy(_StageStudy):
         document: SupCon configuration with ``!suggest-*`` tags and a tuning section.
     """
 
-    # Loss values at different temperatures are not comparable (the sweep rule).
+    # Loss values at different temperatures are not comparable.
     protected: ClassVar[tuple[str, ...]] = (*_StageStudy.protected, "temperature")
 
     def _configuration(
@@ -234,7 +250,7 @@ class SupConStudy(_StageStudy):
         return configuration
 
     def _objective(self, configuration: TrainingConfiguration) -> StudyObjective:
-        """Rank by the effective tracked metric, as SupCon sweeps do."""
+        """Rank by the effective tracked metric."""
         return StudyObjective(
             tracked_metric=configuration.effective_tracked_metric,
             tracked_mode=configuration.effective_tracked_mode,
@@ -257,8 +273,8 @@ class SupConStudy(_StageStudy):
 class ClassifierStudy(_StageStudy):
     """Optuna study over a standalone classifier configuration.
 
-    As in classifier sweeps, every completed trial registers its model when a
-    registry is configured; only the study winner is compared for promotion.
+    Every completed trial registers its model when a registry is configured; only
+    the study winner is compared for promotion.
 
     Args:
         document: Classifier configuration with ``!suggest-*`` tags and a tuning section.

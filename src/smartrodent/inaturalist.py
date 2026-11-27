@@ -20,7 +20,7 @@ from pyinaturalist.v2 import get_observations as get_observations_v2
 from tqdm.auto import tqdm
 
 from .base import DatasetLoader
-from .config_utils import load_section
+from .config_loading import load_section
 from .training_validation import (
     Nonblank,
     NonnegativeInt,

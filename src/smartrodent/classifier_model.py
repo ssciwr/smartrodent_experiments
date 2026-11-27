@@ -72,7 +72,7 @@ class YoloClassifierBuilder:
         Args:
             settings: Verified head source/replacement settings.
             labels: Target dataset mapping.
-            cache: Optional sweep-owned checkpoint cache; never global.
+            cache: Optional checkpoint cache owned by a pipeline or study; never global.
 
         Returns:
             Native donor head, or None for random initialization.
