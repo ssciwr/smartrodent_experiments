@@ -1,6 +1,6 @@
 # Part 2b–2e implementation plan
 
-**Status:** Proposed, pending approval of the plan and test list. Implementation and baseline testing have yet to begin.
+**Status** · Plan, config details, and test list approved. 2b+2c and 2d+2e are implemented, reviewed and approved by the human (final: 694 passed, 3 skipped, 98.95% coverage). README and `notebooks/supcon_training.ipynb` are updated; the notebook has not been executed against real data. Approved addition beyond the plan: `StageRunner` requires an explicit `max_epochs` and rejects the trainer settings it owns (`callbacks`, `logger`, `default_root_dir`).
 
 Scope is [Part 2b–2e of the refactoring plan](REFACTORING_PLAN.md#part-2-lightning-custom-encoders-standalone-ultralytics-trainer). Follow the test-first workflow in [AGENTS.md](AGENTS.md#workflow).
 
@@ -16,7 +16,9 @@ Build and review 2b+2c first, then switch the training entry points together in 
 ## Config details for approval
 
 - **Scheduler cadence.** Default to epoch stepping and keep multi-phase schedules in epochs. Allow explicit `interval: step` for a single scheduler so batch-based schedulers such as `OneCycleLR` can work as intended.
-- **Pretrained reinitialization.** Restore matched encoder parameters from the weights that initialized the encoder before fine-tuning. Reject the setting during preflight if those weights are unavailable. For random reinitialization, reset the matched modules and verify that parameters outside the requested prefixes stay intact.
+- **Classifier head.** The encoder is loaded from a checkpoint, and the classifier head is always newly initialized. There is no donor checkpoint and no head copying. `head: linear` adds only a new final Linear layer. `head: full` newly initializes everything after pooling, which for YOLO is the part of the Classify block after its pooling. Custom torch models get the same semantics through the encoder interface. For random reinitialization, reset the matched modules and verify that parameters outside the requested prefixes stay intact.
+- **Config schemas and stages.** `SupConConfiguration` and `ClassifierConfiguration` share one base class for the `optimizer`, `scheduler`, `early_stopping` and `trainer` sections. `Stage` is a frozen dataclass that bundles the configuration class, the task factory and the objective. Two stages are predefined, `SUPCON` and `CLASSIFIER`. Preflight is one function over all candidate encoders, called by the two-stage plan. Study resume keeps today's encoder identity, the SHA-256 of each candidate checkpoint file.
+- **Fixed by existing decisions.** The MLflow metric definitions and comparison tags stay unchanged (D11). A native export request is rejected when the configuration is validated, `StageRunner` writes `best.pt` beside `best.ckpt` through `encoder.to_native`, and MLflow registration logs that file (D14). ONNX files record the opset in `opset_import` and in an explicit `opset` entry in `metadata_props`, alongside the existing metadata keys (D10).
 
 ## Test list for approval
 
@@ -53,4 +55,8 @@ Build and review 2b+2c first, then switch the training entry points together in 
 
 ## Resuming the work
 
-Approve the plan and test list together, including the shared cutover and the two config details. After approval, record the baseline for each group, delegate the red and green steps, and have an independent reviewer check the code and tests using both coverage commands from `AGENTS.md`.
+For each group, record the baseline, delegate the red and green steps, and have an independent reviewer check the code and tests using both coverage commands from `AGENTS.md`.
+
+**2b+2c baseline.** 887 passed, 4 external integration tests deselected. Line coverage was 98.91% and branch coverage was 95.19%. The baseline ran with loopback and multiprocessing access for the existing offline tests.
+
+**2d+2e baseline.** 939 passed, 3 opt-in integration tests skipped (vLLM, SpeciesNet). Line coverage was 98.56% and branch coverage was 94.50% (3809 statements, 928 branches).
