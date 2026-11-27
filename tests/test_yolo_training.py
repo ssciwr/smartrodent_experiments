@@ -61,7 +61,9 @@ def test_detector_trains_with_resolved_yaml_and_callbacks(tmp_path, fake_yolo):
     dataset.mkdir()
     data_yaml = dataset / "data.yaml"
     data_yaml.write_text("names: [rodent]\n")
-    extra_callback = lambda trainer: trainer
+
+    def extra_callback(trainer):
+        return trainer
 
     trainer = training.YoloDetectionTrainer(
         dataset,

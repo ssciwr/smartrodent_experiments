@@ -110,7 +110,7 @@ stages:
     cmd: uv run python scripts/train_yolo_detector.py configs/train_yolo_detector_config.yaml
     deps:
       - scripts/train_yolo_detector.py
-      - src/smartrodent/training.py
+      - src/smartrodent/yolo_training.py
       - configs/train_yolo_detector_config.yaml
       - datasets/stage8_yolo_detector
     outs:

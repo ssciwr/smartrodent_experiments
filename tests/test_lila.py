@@ -90,7 +90,10 @@ class FakeLila:
 
 def alpha_metadata():
     """a1-a2 ship rat (one sequence), a3 rat, a4 cat + ship rat, a5 empty."""
-    image = lambda i, seq, cam: {"id": i, "file_name": f"{cam}/{i}.jpg", "seq_id": seq}
+
+    def image(i, seq, cam):
+        return {"id": i, "file_name": f"{cam}/{i}.jpg", "seq_id": seq}
+
     return {
         "categories": [
             {"id": 1, "name": "ship rat"},
@@ -157,7 +160,9 @@ def alpha(tmp_path, lila):
 def test_most_specific_class_wins_and_multi_class_images_go_to_each(alpha):
     alpha.retrieve_records()
 
-    ids = lambda c: {p.split("/")[1] for p in records(alpha, c)["photo.id"]}
+    def ids(class_name):
+        return {p.split("/")[1] for p in records(alpha, class_name)["photo.id"]}
+
     assert ids("Rattus rattus") == {"a1", "a2", "a4"}
     assert ids("Rattus") == {"a3"}
     assert ids("Felis catus") == {"a4"}

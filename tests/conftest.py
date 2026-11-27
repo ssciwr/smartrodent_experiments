@@ -6,6 +6,7 @@ test module depends on another test module. Plugin autouse fixtures (such as
 ``quiet_optuna``) therefore apply to every test.
 """
 
+import logging
 import os
 
 import pytest
@@ -37,3 +38,16 @@ def images(tmp_path):
         image.save(path)
         paths.append(path)
     return paths
+
+
+@pytest.fixture
+def package_logger():
+    """The ``smartrodent`` logger, restored afterwards for entry points that configure it."""
+    logger = logging.getLogger("smartrodent")
+    handlers, level, propagate = list(logger.handlers), logger.level, logger.propagate
+    yield logger
+    for handler in set(logger.handlers) - set(handlers):
+        handler.close()
+        logger.removeHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = propagate

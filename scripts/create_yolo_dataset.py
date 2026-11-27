@@ -7,10 +7,11 @@ from smartrodent.yolo_dataset_creation import DatasetCreationPlan
 
 
 def main(config_path: Path) -> None:
-    """Create every listed dataset with the configured creator.
+    """Create every listed dataset with the shared detector and layout.
 
     Args:
-        config_path: YAML with a ``creator`` (name and shared parameters) and a
+        config_path: YAML with a ``detector`` (name and parameters), the
+            ``layout``, optional ``class_names`` and ``batch_size``, and a
             ``datasets`` list of input/output directories.
 
     Raises:

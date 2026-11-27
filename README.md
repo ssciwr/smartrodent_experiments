@@ -107,14 +107,14 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | --- | --- |
 | [`inaturalist.py`](src/smartrodent/inaturalist.py) | `InaturalistDataset`: observation selection, licensed image acquisition, metadata, caching, and retries. |
 | [`lila.py`](src/smartrodent/lila.py) | `LilaDataset`: license-aware camera-trap selection using LILA metadata and taxonomy. |
-| [`filter.py`](src/smartrodent/filter.py) | `VLMFilter`, `FilterOllama`, `FilterVLLM`: filter  per-species image records with a text prompt without modifying originals. |
+| [`vlm_filter.py`](src/smartrodent/vlm_filter.py) | `VLMFilter`, `OllamaBackend`, `VllmBackend`: annotate per-species image records with a VLM's schema-constrained answers without modifying originals. |
 | [`dataset_splitting.py`](src/smartrodent/dataset_splitting.py) | `DatasetSplitter` and `TrainingDatasetSampler`: split metadata and sample training rows. |
-| [`yolo_dataset_creation.py`](src/smartrodent/yolo_dataset_creation.py) | SpeciesNet-backed detector/classifier dataset creators; `DatasetCreationPlan` creates a list of datasets with one creator configuration. |
+| [`yolo_dataset_creation.py`](src/smartrodent/yolo_dataset_creation.py) | `YoloDatasetCreator` (split records + `SpeciesNetDetector` + `DetectorLayout`/`ClassifierLayout`); `DatasetCreationPlan` creates a list of datasets with one shared detector and layout. |
 | [`datasets.py`](src/smartrodent/datasets.py) | `ImageDataset`, `MultiViewImageDataset`, `collate_views`: class mappings, image indexing, and two-view batching. |
 | [`config_loading.py`](src/smartrodent/config_loading.py) | YAML loading with the study tags (`load_yaml`, `parse_yaml`) and plain section lookup (`load_section`). |
 | [`components.py`](src/smartrodent/components.py) | `ComponentSpec`: a class or function chosen by name (or `module:attr`) plus its parameters, e.g. Optuna samplers or dataset creators. |
 | [`training_validation.py`](src/smartrodent/training_validation.py) | Shared configuration schemas, parsing, serialization, and output/input path protections. |
-| [`training.py`](src/smartrodent/training.py) | `YoloDetectionTrainer`: wrapper around Ultralytics detector train/tune/export. |
+| [`yolo_training.py`](src/smartrodent/yolo_training.py) | `YoloDetectionTrainer`: wrapper around Ultralytics detector train/tune/export. |
 | [`supcon_model.py`](src/smartrodent/supcon_model.py), [`supcon_training.py`](src/smartrodent/supcon_training.py) | `YoloSupConModel`, `TrainingConfiguration`, `SupConExperiment`. |
 | [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierBuilder`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and native Ultralytics training with configurable layer freezing. |
 | [`search_space.py`](src/smartrodent/search_space.py) | `SearchSpace`: named Optuna distributions declared by `!suggest-float`, `!suggest-int`, and `!suggest-categorical` tags, including `!coupled` values that follow a categorical choice; `reject_search_tags()` for single-run documents. |
@@ -126,7 +126,9 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`classifier_champions.py`](src/smartrodent/classifier_champions.py) | `ClassifierChampionRegistry`: provenance-aware historical comparison and promotion. |
 | [`model_card.py`](src/smartrodent/model_card.py) | Template loading, training-card population, YAML/Markdown rendering and writing. |
 | [`eval.py`](src/smartrodent/eval.py) | `EvaluationImages`, `FeatureExtractor`, `EvaluationFeatures`, `TsneComparison`: fixed-subset representation evaluation. |
-| [`base.py`](src/smartrodent/base.py) | Shared protocols and the record-loading base class of the dataset creators. |
+| [`base.py`](src/smartrodent/base.py) | Shared protocols `Configurable`, `Filterable`, `DatasetLoader`; an implementation missing a method fails when it is created. |
+| [`http_session.py`](src/smartrodent/http_session.py) | `retrying_session`: a `requests` session that retries 429/5xx responses and dropped connections, used by both downloaders. |
+| [`logging_setup.py`](src/smartrodent/logging_setup.py) | `log_to_console_and_file`: the download scripts' console and log-file output; library classes add no handlers. |
 | [`__init__.py`](src/smartrodent/__init__.py) | Convenience exports for filters and Ultralytics trainers. Experiment APIs are imported from their modules. |
 
 Some data-processing scripts also contain workflow-specific pandas/file
@@ -167,23 +169,26 @@ flowchart LR
     subgraph lib["src/smartrodent/"]
         inaturalist
         lila
-        filter
+        vlm_filter
         dataset_splitting
         yolo_dataset_creation
-        training
+        yolo_training
         supcon_training
         classifier_training
         training_studies
         two_stage_training
+        logging_setup
     end
 
     s_inat --> inaturalist
+    s_inat --> logging_setup
     s_lila --> lila
-    s_filter -->|via package root| filter
+    s_lila --> logging_setup
+    s_filter -->|via package root| vlm_filter
     s_split --> dataset_splitting
     s_sample --> dataset_splitting
     s_yolo --> yolo_dataset_creation
-    s_det -->|via package root| training
+    s_det -->|via package root| yolo_training
     s_supcon --> supcon_training
     s_supcon --> training_studies
     s_clf --> classifier_training
@@ -193,17 +198,18 @@ flowchart LR
 
 #### Data acquisition and preparation modules
 
-All data modules implement a protocol from `base` and read their settings
-through `config_loading.load_section`. Settings are validated with types from
-`training_validation`. `yolo_dataset_creation` selects its creator class through
-`components.ComponentSpec`.
+The downloaders, the VLM filter and the splitters implement a protocol from
+`base`; all data modules read their settings through `config_loading.load_section`.
+Settings are validated with types from `training_validation`. `vlm_filter` and
+`yolo_dataset_creation` build their backend and detector through
+`components.ComponentSpec`; both downloaders retry through `http_session`.
 
 ```mermaid
 flowchart TB
     subgraph data["Data acquisition and preparation"]
         inaturalist
         lila
-        filter
+        vlm_filter
         dataset_splitting
         yolo_dataset_creation
     end
@@ -212,22 +218,25 @@ flowchart TB
         base
         config_loading
         components
+        http_session
         training_validation
     end
 
     inaturalist --> base
     inaturalist --> config_loading
+    inaturalist --> http_session
     inaturalist --> training_validation
     lila --> base
     lila --> config_loading
+    lila --> http_session
     lila --> training_validation
-    filter --> base
-    filter --> config_loading
-    filter --> training_validation
+    vlm_filter --> base
+    vlm_filter --> components
+    vlm_filter --> config_loading
+    vlm_filter --> training_validation
     dataset_splitting --> base
     dataset_splitting --> config_loading
     dataset_splitting --> training_validation
-    yolo_dataset_creation --> base
     yolo_dataset_creation --> config_loading
     yolo_dataset_creation --> components
     yolo_dataset_creation --> training_validation
@@ -354,45 +363,48 @@ classDiagram
         <<Protocol>>
         +filter_data(records_by_species)
     }
-    class YoloDatasetCreatorBase {
-        <<abstract>>
-        +create()
-    }
-
     class InaturalistDataset
     class LilaDataset
     class VLMFilter {
         +filter_data(records_by_species)
-        +parse_response(raw)
+        +output_columns
+    }
+    class VLMBackend {
+        <<Protocol>>
+        +generate(image_paths, system_prompt, prompt, schema)
         +close()
     }
-    class FilterOllama {
-        +classify(path)
-    }
-    class FilterVLLM {
-        +classify(path)
-        +build_conversation(image_path)
-    }
+    class OllamaBackend
+    class VllmBackend
     class DatasetSplitter {
         +split(frame)
     }
     class TrainingDatasetSampler {
         +sample(frame)
     }
-    class _SpeciesNetDatasetMixin {
-        <<mixin>>
-        +initialize_speciesnet()
-        +infer_batch(paths)
-    }
-    class _SpeciesNetDatasetCreatorBase {
+    class DatasetCreationPlan {
+        +creators()
         +create()
     }
-    class YoloDetectorDatasetCreatorFromSpeciesnet
-    class YoloClassifierDatasetCreatorFromSpeciesnet
+    class YoloDatasetCreator {
+        +create()
+    }
+    class Detector {
+        <<Protocol>>
+        +detect(image_paths)
+    }
+    class SpeciesNetDetector
+    class DatasetLayout {
+        <<Protocol>>
+        +create_directories(root, class_names)
+        +write(root, species, class_index, row, stem, detections)
+        +training_paths()
+    }
+    class DetectorLayout
+    class ClassifierLayout
 
     Configurable <|-- DatasetLoader
     Configurable <|-- Filterable
-    Configurable <|-- YoloDatasetCreatorBase
     Configurable <|-- DatasetSplitter
     Configurable <|-- TrainingDatasetSampler
 
@@ -400,13 +412,16 @@ classDiagram
     DatasetLoader <|-- LilaDataset
 
     Filterable <|-- VLMFilter
-    VLMFilter <|-- FilterOllama
-    VLMFilter <|-- FilterVLLM
+    VLMFilter o-- VLMBackend
+    VLMBackend <|-- OllamaBackend
+    VLMBackend <|-- VllmBackend
 
-    YoloDatasetCreatorBase <|-- _SpeciesNetDatasetCreatorBase
-    _SpeciesNetDatasetMixin <|-- _SpeciesNetDatasetCreatorBase
-    _SpeciesNetDatasetCreatorBase <|-- YoloDetectorDatasetCreatorFromSpeciesnet
-    _SpeciesNetDatasetCreatorBase <|-- YoloClassifierDatasetCreatorFromSpeciesnet
+    DatasetCreationPlan ..> YoloDatasetCreator : builds
+    YoloDatasetCreator o-- Detector
+    YoloDatasetCreator o-- DatasetLayout
+    Detector <|-- SpeciesNetDetector
+    DatasetLayout <|-- DetectorLayout
+    DatasetLayout <|-- ClassifierLayout
 ```
 
 #### Single-stage experiments: SupCon and CE classifier
@@ -791,12 +806,12 @@ which uses `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
 
 | Family | Main structure/options |
 | --- | --- |
-| iNaturalist | `data.inaturalist`: `output_path`, species, years or year range, observation/license filters, caps, seed, cache/retry settings. |
-| LILA | `data.lila`: output path, index/taxonomy URLs, dataset-to-license mapping, allowed licenses, classes, cap, seed. |
-| VLM filters | `backend: ollama` or `vllm`, `taskname`, labels/columns, input/output roots, prompts, and backend options. |
+| iNaturalist | `data.inaturalist`: `output_path`, species, years or year range, observation/license filters, caps, cache/retry settings. |
+| LILA | `data.lila`: output path, index/taxonomy URLs, dataset-to-license mapping, allowed licenses, classes, cap, seed, `max_retries`/`backoff_factor`. |
+| VLM filters | Input/output `paths`, optional `species`, and a `filter` section: `taskname`, `answer_schema` (its `label` enum defines the labels), prompts that cite it as `{answer_schema}`, column names, and `backend: {name, parameters}` (`OllamaBackend` or `VllmBackend`, whose `engine`/`sampling` pass through to vLLM). |
 | Review materialization/reconciliation | Input/output paths, rejection-column prefix or corrected partition/column lists, accepted image suffixes. |
 | Splitting/sampling/downsampling | Input/output metadata roots, record discovery, split/sampling rules, seeds, or per-class caps. |
-| YOLO dataset creators | `creator: {name, parameters}` (`YoloDetectorDatasetCreatorFromSpeciesnet`, `YoloClassifierDatasetCreatorFromSpeciesnet`, or `module:Class`) and a `datasets` list of `path_to_image_data`/`dataset_output_path` pairs. |
+| YOLO dataset creators | `detector: {name, parameters}` (`SpeciesNetDetector` or `module:Class`), `layout` (`detector` or `classifier`), `class_names`, `batch_size`, and a `datasets` list of `path_to_image_data`/`dataset_output_path` pairs. |
 | Modern standalone training | Top-level data/output, transforms, validation, tracking, and model/initialization settings; SupCon uses AdamW options, CE uses native `train_kwargs`. |
 | Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, optional shared `mlflow`, and optional per-stage `tuning`. |
 | Optuna studies | A standalone SupCon or CE configuration with `!suggest-*` tags plus a top-level `tuning` section; see [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna). |
@@ -921,18 +936,24 @@ model-dependent checks occur when actual models are initialized.
 The iNaturalist downloader reads `data.inaturalist` and stores one species
 folder with `records.csv` and `imgs/`. Choose species, observation years,
 quality grade, allowed licenses, and download caps in its config. Configurations
-are copied into outputs for provenance.
+are copied into outputs for provenance, and the script logs to the console and to
+`inaturalist_dataset.log` in the output folder.
 
 LILA uses dataset-level licenses and a taxonomy mapping to match configured
 Latin taxa or raw labels such as `empty` and `vehicle`. Its image cap is per
 class **and per LILA dataset**. Sequence-aware sampling uses the configured seed;
-metadata is cached under the LILA output. LILA has its own DVC download stage but
+metadata is cached under the LILA output, and the script logs to
+`lila_dataset.log` there. LILA has its own DVC download stage but
 is not automatically merged into the iNaturalist filtering branch.
 
 The animal, flying-bird, and snake VLM filters annotate metadata in sequence.
 The thermal-filter config is an additional direct-script workflow, not a stage
 in the current DVC graph. Backend selection, prompts, model names, batching, and
-input/output paths come from each filter config.
+input/output paths come from each filter config. The answer schema is written once
+in the config: the backend enforces it and the prompt cites it. Each label gets a
+boolean column `<label>_<taskname>` (e.g. `kept_animal`); every other answer, such
+as `needs_human_review`, is saved as `vlm_<taskname>_<field>`. Species outside a
+config's `species` list pass through with `False` labels and empty answers.
 
 Materialization exposes kept/rejected images through symlinks. Human review is
 a separate step: prepare the corrected partition tree expected by the
@@ -960,21 +981,22 @@ are not automatically converted, and there is no path-prefix migration utility.
 
 ### YOLO dataset creation and label order
 
-Dataset creators accept `path_to_image_data`, `dataset_output_path`, optional
-`class_names` (`null` discovers species), and SpeciesNet inference options.
-The classifier creator writes animal crops; the detector creator writes
-labels and links to source images. Both preserve existing split assignments and
-oversampled rows and require a new destination directory. Model weights load
-lazily when inference is first needed, not during configuration loading.
+A `YoloDatasetCreator` combines an input root's split records
+(`load_split_records`, with optional `class_names`; `null` discovers species), a
+detector (`SpeciesNetDetector` with its inference options) and a layout. The
+`classifier` layout writes animal crops; the `detector` layout writes labels and
+links to source images. Both preserve existing split assignments and oversampled
+rows and require a new destination directory. One detector serves every dataset of
+a configuration; its weights load lazily when inference is first needed, not
+during configuration loading.
 
 ```python
-from smartrodent.yolo_dataset_creation import YoloClassifierDatasetCreatorFromSpeciesnet
+from smartrodent.yolo_dataset_creation import DatasetCreationPlan
 
-creator = YoloClassifierDatasetCreatorFromSpeciesnet.from_config(
-    "configs/create_yolo_classifier_dataset.yaml"
-)
+plan = DatasetCreationPlan.from_yaml("configs/create_yolo_classifier_dataset.yaml")
+creators = plan.creators()  # reads and checks every dataset's records
 # Explicitly writes dataset outputs and may download/load SpeciesNet weights:
-# creator.create()
+# plan.create()
 ```
 
 Ultralytics classification derives IDs from **alphabetically sorted species
@@ -1099,7 +1121,7 @@ selection uses existing validation data, never a test split. See
 ### Ultralytics detector wrapper
 
 The `train_yolo_detector.py` command delegates training to Ultralytics through
-`smartrodent.training`. Its config contains native
+`smartrodent.yolo_training`. Its config contains native
 `train_kwargs`, `tune_kwargs` (including tuner `space`/`iterations`), and
 `export_kwargs` (for example `format: onnx`). Outputs follow native
 `project`/`name` settings, not the modern experiment directory convention.

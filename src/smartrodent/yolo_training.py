@@ -2,70 +2,32 @@
 
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import mlflow
 import pandas as pd
 import yaml
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
 from ultralytics import YOLO, settings
 
+from .training_validation import Nonblank, parse_settings
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class MlflowTrackingConfiguration:
-    """Configure local MLflow tracking for training and tuning operations."""
+    """Configure local MLflow tracking for training and tuning operations.
 
-    tracking_uri: str
-    train_experiment_name: str
-    tune_experiment_name: str
+    Args:
+        tracking_uri: MLflow tracking URI, e.g. ``sqlite:///mlflow.db``.
+        train_experiment_name: Experiment that training runs are logged to.
+        tune_experiment_name: Experiment that tuning runs are logged to.
+    """
 
-    @classmethod
-    def from_mapping(
-        cls, configuration: Mapping[str, str] | None
-    ) -> "MlflowTrackingConfiguration | None":
-        """Build a validated tracking configuration from YAML-compatible values.
-
-        Args:
-            configuration: The optional ``mlflow`` mapping from a trainer config.
-
-        Returns:
-            A tracking configuration, or ``None`` when MLflow is not configured.
-
-        Raises:
-            TypeError: The configuration is not a mapping of string values.
-            ValueError: Required keys are missing, unexpected, or blank.
-        """
-        if configuration is None:
-            return None
-        if not isinstance(configuration, Mapping):
-            raise TypeError("The 'mlflow' configuration must be a mapping")
-
-        required = {
-            "tracking_uri",
-            "train_experiment_name",
-            "tune_experiment_name",
-        }
-        supplied = set(configuration)
-        if supplied != required:
-            missing = sorted(required.difference(supplied))
-            unexpected = sorted(supplied.difference(required))
-            details = []
-            if missing:
-                details.append(f"missing keys: {', '.join(missing)}")
-            if unexpected:
-                details.append(f"unexpected keys: {', '.join(unexpected)}")
-            raise ValueError("Invalid 'mlflow' configuration; " + "; ".join(details))
-
-        values = {}
-        for key in required:
-            value = configuration[key]
-            if not isinstance(value, str):
-                raise TypeError(f"The 'mlflow.{key}' value must be a string")
-            if not value.strip():
-                raise ValueError(f"The 'mlflow.{key}' value must not be blank")
-            values[key] = value
-        return cls(**values)
+    tracking_uri: Nonblank
+    train_experiment_name: Nonblank
+    tune_experiment_name: Nonblank
 
     def configure(self, operation: Literal["train", "tune"]) -> None:
         """Configure MLflow and Ultralytics for one tracked operation.
@@ -137,7 +99,11 @@ class YoloDetectionTrainer:
         self.train_kwargs = train_kwargs
         self.history: dict[int, dict[str, Any]] = {}
         self.export_kwargs = export_kwargs
-        self.mlflow_config = MlflowTrackingConfiguration.from_mapping(mlflow_config)
+        self.mlflow_config = (
+            parse_settings(MlflowTrackingConfiguration, mlflow_config)
+            if mlflow_config is not None
+            else None
+        )
         self.model = YOLO(str(self.model_name))
 
     @classmethod
@@ -209,13 +175,12 @@ class YoloDetectionTrainer:
 
         metrics = trainer.metrics
         det_metrics = trainer.validator.metrics
-        box = det_metrics.box
         names = det_metrics.names
-        if isinstance(names, list):
-            names = dict(enumerate(names))
+        class_indices = {name: index for index, name in names.items()}
 
         # Start with every known class so classes with no validation detections still
-        # appear in the returned structure with explicit None metrics.
+        # appear in the returned structure with explicit None metrics; Ultralytics'
+        # summary only lists classes that occur in the validation labels.
         classes = {
             name: {
                 "class_index": class_index,
@@ -227,19 +192,15 @@ class YoloDetectionTrainer:
             }
             for class_index, name in sorted(names.items())
         }
-
-        # Ultralytics stores per-class arrays in the order of box.ap_class_index, not
-        # necessarily in raw class-index order.
-        for i, class_index in enumerate(box.ap_class_index):
-            class_index = int(class_index)
-            class_name = names.get(class_index, str(class_index))
-            classes[class_name] = {
-                "class_index": class_index,
-                "precision": float(box.p[i]),
-                "recall": float(box.r[i]),
-                "f1": float(box.f1[i]),
-                "ap50": float(box.ap50[i]),
-                "ap50_95": float(box.ap[i]),
+        # summary() rounds to 5 decimals; that precision is ample for comparing runs.
+        for row in det_metrics.summary():
+            classes[row["Class"]] = {
+                "class_index": class_indices[row["Class"]],
+                "precision": float(row["Box-P"]),
+                "recall": float(row["Box-R"]),
+                "f1": float(row["Box-F1"]),
+                "ap50": float(row["mAP50"]),
+                "ap50_95": float(row["mAP50-95"]),
             }
 
         map50 = float(metrics["metrics/mAP50(B)"])

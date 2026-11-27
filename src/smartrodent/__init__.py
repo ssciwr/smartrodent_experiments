@@ -1,11 +1,11 @@
 """SmartRodent model experiment package."""
 
-from .filter import FilterOllama, FilterVLLM, VLMFilter
-from .training import YoloDetectionTrainer
+from .vlm_filter import OllamaBackend, VllmBackend, VLMFilter
+from .yolo_training import YoloDetectionTrainer
 
 __all__ = [
-    "FilterOllama",
-    "FilterVLLM",
+    "OllamaBackend",
     "VLMFilter",
+    "VllmBackend",
     "YoloDetectionTrainer",
 ]

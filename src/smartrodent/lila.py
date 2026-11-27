@@ -14,13 +14,19 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import pandas as pd
-import requests
 from pydantic import Field, validate_call
 from tqdm import tqdm
 
 from smartrodent.base import DatasetLoader
 from smartrodent.config_loading import load_section
-from smartrodent.training_validation import Nonblank, NonnegativeInt, PathSetting, Seed
+from smartrodent.http_session import retrying_session
+from smartrodent.training_validation import (
+    Nonblank,
+    NonnegativeInt,
+    NonnegativeNumber,
+    PathSetting,
+    Seed,
+)
 
 
 class LilaDataset(DatasetLoader):
@@ -40,6 +46,7 @@ class LilaDataset(DatasetLoader):
         taxonomy_url: URL of the LILA taxonomy-mapping CSV.
         max_img_num: Maximum images per class and dataset.
         seed: Seed for sampling sequences when capping.
+        session: Session that retries transient failures of every request.
     """
 
     # Most to least specific: a label goes to the first rank that is a configured class.
@@ -67,6 +74,8 @@ class LilaDataset(DatasetLoader):
         taxonomy_url: Nonblank,
         max_img_num: NonnegativeInt = 2500,
         seed: Seed = 42,
+        max_retries: NonnegativeInt = 5,
+        backoff_factor: NonnegativeNumber = 0.5,
     ) -> None:
         """Store the download settings and create the metadata cache directory.
 
@@ -82,6 +91,9 @@ class LilaDataset(DatasetLoader):
             taxonomy_url: URL of the LILA taxonomy-mapping CSV.
             max_img_num: Maximum images per class and dataset.
             seed: Seed for sampling sequences when capping.
+            max_retries: Retries after the first attempt of each request.
+            backoff_factor: Base of the exponential delay between retries, in
+                seconds.
 
         Raises:
             ValueError: If a setting is invalid.
@@ -96,7 +108,9 @@ class LilaDataset(DatasetLoader):
         self.taxonomy_url = taxonomy_url
         self.max_img_num = max_img_num
         self.seed = seed
-        self.logger = logging.getLogger(type(self).__name__)
+        self.session = retrying_session(max_retries, backoff_factor)
+        # The module's logger, under the package logger the entry point configures.
+        self.logger = logging.getLogger(__name__)
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> LilaDataset:
@@ -118,8 +132,11 @@ class LilaDataset(DatasetLoader):
 
     def download(self) -> None:
         """Select records for all classes, then download their images."""
-        self.retrieve_records()
-        self.download_images()
+        try:
+            self.retrieve_records()
+            self.download_images()
+        finally:
+            self.session.close()
 
     def retrieve_records(self) -> None:
         """Write ``records.csv`` for every class that does not have one yet.
@@ -285,11 +302,11 @@ class LilaDataset(DatasetLoader):
             Path of the cached file.
 
         Raises:
-            requests.HTTPError: If the request fails.
+            requests.HTTPError: If the request still fails after retries.
         """
         path = self.cache / Path(urllib.parse.urlparse(url).path).name
         if not path.is_file():
-            response = requests.get(url, timeout=120)
+            response = self.session.get(url, timeout=120)
             response.raise_for_status()
             path.write_bytes(response.content)
         return path
@@ -353,11 +370,12 @@ class LilaDataset(DatasetLoader):
             it (404).
 
         Raises:
-            requests.HTTPError: If the request fails with another status.
+            requests.HTTPError: If the request still fails with another status
+                after retries.
         """
         if path.is_file():
             return True
-        response = requests.get(url, timeout=60)
+        response = self.session.get(url, timeout=60)
         if response.status_code == 404:
             return False
         else:

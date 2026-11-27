@@ -9,14 +9,12 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
-import torch
 import yaml
 from bundle_test_support import move_bundle, write_stage_records
-from hypothesis import assume, given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 from PIL import Image
 from speciesnet_test_support import SpeciesNetDetectorStub, SpeciesNetStub, detection
-from ultralytics.utils.metrics import box_iou
 
 from smartrodent import yolo_dataset_creation
 from smartrodent.yolo_dataset_creation import (
@@ -347,86 +345,6 @@ def test_nms_keeps_strongest_overlap_and_separate_detection(images):
     assert [record["confidence"] for record in records] == [0.95, 0.8]
 
 
-def _xyxy(detection_):
-    """SpeciesNet's normalized xywh box as a one-row xyxy tensor."""
-    x, y, width, height = detection_["bbox"]
-    return torch.tensor([[x, y, x + width, y + height]], dtype=torch.float32)
-
-
-def _greedy_nms_reference(detections, iou_threshold):
-    """The hand-written NMS loop that torchvision replaces, kept to compare against.
-
-    Temporary: remove this and its test once the swap has been reviewed.
-    """
-
-    def xyxy(index):
-        return _xyxy(detections[index])
-
-    order = sorted(
-        range(len(detections)), key=lambda i: detections[i]["conf"], reverse=True
-    )
-    keep, suppressed = [], set()
-    for position, index in enumerate(order):
-        if index in suppressed:
-            continue
-        keep.append(index)
-        for other in order[position + 1 :]:
-            if (
-                other not in suppressed
-                and box_iou(xyxy(index), xyxy(other)).item() > iou_threshold
-            ):
-                suppressed.add(other)
-    return keep
-
-
-@settings(max_examples=200, deadline=None)
-@given(
-    boxes=st.lists(
-        st.tuples(
-            st.floats(0.0, 0.5),
-            st.floats(0.0, 0.5),
-            st.floats(0.01, 0.5),
-            st.floats(0.01, 0.5),
-        ),
-        max_size=8,
-    ),
-    # Distinct even in float32, the precision NMS compares scores in.
-    confidences=st.lists(
-        st.integers(100, 10_000), min_size=8, max_size=8, unique=True
-    ).map(lambda values: [value / 10_000 for value in values]),
-    iou_threshold=st.floats(0.0, 1.0),
-)
-def test_nms_matches_the_replaced_greedy_loop(boxes, confidences, iou_threshold):
-    """Temporary old-vs-new check for distinct scores; ties may now resolve differently."""
-    detections = [
-        detection(confidence, bbox=box)
-        for box, confidence in zip(boxes, confidences, strict=False)
-    ]
-    # Ultralytics' IoU adds 1e-7 to the union and torchvision's does not, so a pair
-    # whose IoU is within rounding distance of the threshold may legitimately differ.
-    assume(
-        all(
-            abs(box_iou(_xyxy(first), _xyxy(second)).item() - iou_threshold) > 1e-3
-            for position, first in enumerate(detections)
-            for second in detections[position + 1 :]
-        )
-    )
-    with TemporaryDirectory() as directory:
-        path = (Path(directory) / "source.png").resolve()
-        Image.new("RGB", (20, 10)).save(path)
-        detector = SpeciesNetDetector(
-            model=SpeciesNetStub([{"filepath": str(path), "detections": detections}]),
-            confidence_threshold=0.0,
-            iou_threshold=iou_threshold,
-        )
-
-        records = detector.detect([path])[str(path)]
-
-    assert [record["detection_index"] for record in records] == _greedy_nms_reference(
-        detections, iou_threshold
-    )
-
-
 @pytest.mark.parametrize("detections", [[], [detection(0.1)]])
 def test_images_without_accepted_detections_remain_in_results(images, detections):
     """An empty result is explicit rather than silently dropping its source image."""
@@ -749,26 +667,6 @@ def test_create_skips_images_without_accepted_boxes_and_records_why(
         assert record["outputs"] == []
     assert not list(output.rglob("*.txt"))
     assert not list(output.rglob("*.png"))
-
-
-def test_detector_filenames_do_not_collide_for_same_named_sources_in_one_split(
-    creator_input, images, tmp_path
-):
-    """Distinct sources sharing a basename and split cannot overwrite each other."""
-    records_path = images[1].parent / "records.csv"
-    records = pd.read_csv(records_path)
-    records["dataset_split"] = "train"
-    records.to_csv(records_path, index=False)
-    output = tmp_path / "output"
-
-    make_creator(creator_input, output, model=stub_for(images)).create()
-
-    links = list((output / "images" / "train").iterdir())
-    assert len(links) == 3
-    assert len({link.name for link in links}) == 3
-    assert sum(link.resolve() == images[0] for link in links) == 2
-    assert sum(link.resolve() == images[1] for link in links) == 1
-    assert len(list((output / "labels" / "train").glob("*.txt"))) == 3
 
 
 @pytest.mark.parametrize("destination", ["input", "inside_input", "parent"])

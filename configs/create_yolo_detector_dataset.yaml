@@ -1,16 +1,20 @@
 # Run: python scripts/create_yolo_dataset.py configs/create_yolo_detector_dataset.yaml
 # Reads already-split per-species records.csv files and symlinks source images.
 # Paths are relative to the working directory (normally the project root).
-creator:
-  # Creator class in smartrodent.yolo_dataset_creation, or "module:Class".
-  name: YoloDetectorDatasetCreatorFromSpeciesnet
-  parameters:  # Shared by every dataset below.
-    # null discovers all species; a list selects directories in class-index order.
-    class_names: null
+# Output layout: symlinked source images with YOLO box labels.
+layout: detector
+# null discovers all species; a list selects directories in class-index order.
+class_names: null
+# Source rows per inference batch; bounds the crops held in memory.
+batch_size: 64
+detector:
+  # Detector class in smartrodent.yolo_dataset_creation, or "module:Class".
+  name: SpeciesNetDetector
+  parameters:
     # Explicitly use the SpeciesNet version configured on the development branch.
-    # Weights load lazily on the first nonempty inference request.
+    # Weights load lazily on the first nonempty inference request, once for all
+    # datasets below.
     model_name: kaggle:google/speciesnet/pyTorch/v4.0.3b/1
-    batch_size: 64
     confidence_threshold: 0.45
     allowed_classes: [animal]
     iou_threshold: 0.45

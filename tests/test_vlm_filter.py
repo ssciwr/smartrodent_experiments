@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import sys
 import tempfile
 import types
@@ -158,7 +159,7 @@ def test_from_config_builds_the_configured_backend(tmp_path):
 def test_from_config_names_the_bundled_backends(
     tmp_path, ollama_client, backend, backend_type
 ):
-    """Constructing a backend contacts no server and loads no engine."""
+    """With pulling off, constructing a backend contacts no server or engine."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -487,6 +488,26 @@ def test_ollama_parallel_workers_keep_the_input_order(tmp_path, ollama_client):
     assert ollama_client[0].pull_calls == []
 
 
+def test_ollama_unload_failure_is_logged_and_retried_on_the_next_close(
+    ollama_client, caplog
+):
+    """A failed unload is logged rather than raised, and retried on the next close."""
+    backend = OllamaBackend(model="llava", pull_model=False)
+    client = ollama_client[0]
+
+    def unreachable(**request):
+        raise ConnectionError("server gone")
+
+    client.generate = unreachable
+    with caplog.at_level(logging.WARNING):
+        backend.close()
+    client.generate = lambda **request: client.generate_calls.append(request)
+    backend.close()
+
+    assert "Could not unload Ollama model llava" in caplog.text
+    assert client.generate_calls == [{"model": "llava", "keep_alive": 0}]
+
+
 def test_ollama_close_unloads_the_model_once(ollama_client):
     backend = OllamaBackend(model="llava", pull_model=False)
 
@@ -502,7 +523,13 @@ def test_ollama_close_unloads_the_model_once(ollama_client):
 @pytest.fixture
 def fake_vllm(monkeypatch):
     """Install a fake ``vllm`` package that records engine and sampling setup."""
-    seen = {"engines": [], "chats": [], "sampling": [], "shutdowns": 0}
+    seen = {
+        "engines": [],
+        "chats": [],
+        "sampling": [],
+        "shutdowns": 0,
+        "shutdown_error": None,
+    }
 
     class FakeStructuredOutputsParams:
         def __init__(self, **kwargs):
@@ -515,6 +542,8 @@ def fake_vllm(monkeypatch):
     class FakeEngine:
         def shutdown(self):
             seen["shutdowns"] += 1
+            if seen["shutdown_error"] is not None:
+                raise seen["shutdown_error"]
 
     class FakeLLM:
         def __init__(self, **kwargs):
@@ -625,3 +654,21 @@ def test_vllm_close_shuts_down_the_engine(tmp_path, fake_vllm):
     backend.close()
 
     assert fake_vllm["shutdowns"] == 1
+
+
+def test_vllm_shutdown_failure_is_logged_and_still_releases_the_engine(
+    tmp_path, fake_vllm, caplog
+):
+    image = tmp_path / "a.png"
+    image.write_bytes(b"a")
+    backend = VllmBackend(model="org/model")
+    backend.generate([image], system_prompt="", prompt="", schema={})
+    fake_vllm["shutdown_error"] = RuntimeError("engine stuck")
+
+    with caplog.at_level(logging.WARNING):
+        backend.close()
+    backend.generate([image], system_prompt="", prompt="", schema={})
+
+    assert "Could not shut down vLLM engine" in caplog.text
+    # The failed engine was dropped, so the next request loads a new one.
+    assert len(fake_vllm["engines"]) == 2

@@ -79,8 +79,6 @@ def test_processing_scripts_copy_supplied_yaml(
     config_path = tmp_path / "settings.yaml"
     config = {
         "paths": {input_key: str(input_root), output_key: str(output_root)},
-        "taskname": "animal",
-        "labels": ["kept", "rejected"],
     }
     if module_name == "scripts.split_dataset":
         config["paths"]["records_glob"] = "*/records.csv"
@@ -110,13 +108,62 @@ def test_processing_scripts_copy_supplied_yaml(
 
 
 @pytest.mark.parametrize(
+    ("module_name", "dataset_name", "settings", "log_name"),
+    [
+        (
+            "scripts.download_inaturalist_data",
+            "InaturalistDataset",
+            {"inaturalist": {"species": ["Mus musculus"], "years": [2024]}},
+            "inaturalist_dataset.log",
+        ),
+        (
+            "scripts.download_lila_data",
+            "LilaDataset",
+            {
+                "lila": {
+                    "datasets": {"Alpha Traps": "cdla"},
+                    "classes": ["Rattus"],
+                    "allowed_licenses": ["cdla"],
+                    "index_url": "https://lila.test/index.csv",
+                    "taxonomy_url": "https://lila.test/taxonomy.csv",
+                }
+            },
+            "lila_dataset.log",
+        ),
+    ],
+)
+def test_download_entry_points_log_to_a_file_in_the_output(
+    tmp_path, monkeypatch, package_logger, module_name, dataset_name, settings, log_name
+):
+    """The downloaders' messages reach a log file next to the downloaded data."""
+    module = importlib.import_module(module_name)
+    output_root = tmp_path / "downloaded"
+    (section,) = settings
+    config_path = tmp_path / "download.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {"data": {section: {"output_path": str(output_root), **settings[section]}}}
+        )
+    )
+
+    def download(dataset):
+        dataset.logger.info("probe message")
+
+    monkeypatch.setattr(getattr(module, dataset_name), "download", download)
+
+    module.main(config_path)
+
+    assert "probe message" in (output_root / log_name).read_text()
+
+
+@pytest.mark.parametrize(
     ("module_name", "dataset_name", "section"),
     [
         ("scripts.download_inaturalist_data", "InaturalistDataset", "inaturalist"),
     ],
 )
 def test_download_entry_points_copy_config_before_download(
-    tmp_path, monkeypatch, module_name, dataset_name, section
+    tmp_path, monkeypatch, package_logger, module_name, dataset_name, section
 ):
     module = importlib.import_module(module_name)
     output_root = tmp_path / "downloaded"
