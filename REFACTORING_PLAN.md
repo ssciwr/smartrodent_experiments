@@ -1,6 +1,6 @@
 # Refactoring plan: smartrodent
 
-Status: Part 1 committed (`4e70493`). Part 3 committed (`a174eed`, `6b42463`). Part 2a implemented and approved, uncommitted (`uv lock` pending for scikit-learn). Next: 2b+2c. `datasets/` untouched.
+Status: Part 1 committed (`4e70493`). Part 3 committed (`a174eed`, `6b42463`). Part 2 (2a–2e) implemented and approved; 2b–2e uncommitted, details in `plan_part_2.md`. `uv.lock` is up to date. Open: the `dvc.yaml` `create_yolo_classifier_dataset` outs mismatch (see the dead code register), and a first run of `notebooks/supcon_training.ipynb` on real data. `datasets/` untouched.
 
 ## Decisions
 
@@ -131,6 +131,8 @@ Status: DONE
 ## Part 2: Lightning, custom encoders, standalone Ultralytics trainer
 
 The workflow runs per sub-part (2a, 2b+2c, 2d+2e).
+
+Status: DONE
 
 **2a. Restore the standalone Ultralytics trainer.**
 - Restore the trainer, both scripts, its config, the DVC stages and its tests from `2431935^`.
