@@ -113,19 +113,23 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`datasets.py`](src/smartrodent/datasets.py) | `ImageDataset`, `MultiViewImageDataset`, `collate_views`: class mappings, image indexing, and two-view batching. |
 | [`config_loading.py`](src/smartrodent/config_loading.py) | YAML loading with the study tags (`load_yaml`, `parse_yaml`) and plain section lookup (`load_section`). |
 | [`components.py`](src/smartrodent/components.py) | `ComponentSpec`: a class or function chosen by name (or `module:attr`) plus its parameters, e.g. Optuna samplers or dataset creators. |
-| [`training_validation.py`](src/smartrodent/training_validation.py) | Shared configuration schemas, parsing, serialization, and output/input path protections. |
+| [`training_validation.py`](src/smartrodent/training_validation.py) | Shared configuration schemas, parsing, and serialization. |
 | [`yolo_training.py`](src/smartrodent/yolo_training.py) | `UltralyticsTrainer` (`task: detect \| classify`): one wrapper around Ultralytics train/tune/export, with `UltralyticsSettings`, per-task strategies (`DetectTask`, `ClassifyTask`) and a `PerClassMetricsRecorder` that writes `per_class_metrics.csv`. |
-| [`supcon_model.py`](src/smartrodent/supcon_model.py), [`supcon_training.py`](src/smartrodent/supcon_training.py) | `YoloSupConModel`, `TrainingConfiguration`, `SupConExperiment`. |
-| [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierBuilder`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and native Ultralytics training with configurable layer freezing. |
+| [`encoders.py`](src/smartrodent/encoders.py), [`yolo_encoder.py`](src/smartrodent/yolo_encoder.py) | The plain-PyTorch `Encoder` interface (`build_encoder`), `FreezePolicy`, random `Reinitialization`, `preflight_encoders`; `YoloEncoder` exposes a YOLO classification backbone's pooled features without hooks and can export a native model. |
+| [`transforms.py`](src/smartrodent/transforms.py), [`metrics.py`](src/smartrodent/metrics.py), [`training_optimization.py`](src/smartrodent/training_optimization.py), [`output_paths.py`](src/smartrodent/output_paths.py) | Fixed preprocessing plus configured augmentations, sklearn metrics and their registry identity, optimizer and scheduler phases, and `RunArtifacts`/`validate_output_paths` (the output and input path protections). |
+| [`supcon_task.py`](src/smartrodent/supcon_task.py), [`classifier_task.py`](src/smartrodent/classifier_task.py) | Lightning modules `SupConTask` (with `SupConData`) and `ClassifierTask`. |
+| [`stage_runner.py`](src/smartrodent/stage_runner.py), [`stage_experiment.py`](src/smartrodent/stage_experiment.py) | `StageRunner` (Lightning trainer, checkpointing, early stopping, loggers, native export) and the shared experiment flow. |
+| [`stage_configurations.py`](src/smartrodent/stage_configurations.py), [`stages.py`](src/smartrodent/stages.py) | `SupConConfiguration`, `ClassifierConfiguration` and the `SUPCON`/`CLASSIFIER` `Stage` values. |
+| [`supcon_training.py`](src/smartrodent/supcon_training.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `SupConExperiment`, `ClassifierExperiment`. |
 | [`search_space.py`](src/smartrodent/search_space.py) | `SearchSpace`: named Optuna distributions declared by `!suggest-float`, `!suggest-int`, and `!suggest-categorical` tags, including `!coupled` values that follow a categorical choice; `reject_search_tags()` for single-run documents. |
 | [`hyperparameter_search.py`](src/smartrodent/hyperparameter_search.py) | `HyperparameterStudy`, `StudyConfiguration`, `StudyObjective`, `StudyResult`: trainer-independent Optuna studies that run, rank, and report trials of one search space. |
-| [`training_studies.py`](src/smartrodent/training_studies.py) | `SupConStudy`, `ClassifierStudy`, `is_study_configuration()`: bind `HyperparameterStudy` to the SupCon and classifier trainers, with one `trial_NNNN` directory per trial. |
+| [`training_studies.py`](src/smartrodent/training_studies.py) | `StageStudy(stage, document)`, `is_study_configuration()`: bind `HyperparameterStudy` to one stage, with one `trial_NNNN` directory per trial. |
 | [`two_stage_training.py`](src/smartrodent/two_stage_training.py) | `TwoStageConfiguration`, `TwoStagePlan`, `TwoStageExperiment`: a SupCon run or study, encoder selection, then a classifier run or study. |
-| [`experiment_support.py`](src/smartrodent/experiment_support.py), [`experiment_results.py`](src/smartrodent/experiment_results.py) | Transforms, schedulers, stopping, checkpoint storage, tracking/publication, and structured results. |
-| [`onnx_export.py`](src/smartrodent/onnx_export.py) | `OnnxExporter`: ONNX export of CE classifiers (probabilities) and SupCon encoders (pooled features). |
+| [`experiment_support.py`](src/smartrodent/experiment_support.py), [`experiment_results.py`](src/smartrodent/experiment_results.py) | MLflow settings and model publication, and structured results (`ExperimentResult`, `Objective`). |
+| [`onnx_export.py`](src/smartrodent/onnx_export.py) | `OnnxExporter`: one Torch ONNX path for CE classifiers (probabilities) and SupCon encoders (features). |
 | [`classifier_champions.py`](src/smartrodent/classifier_champions.py) | `ClassifierChampionRegistry`: provenance-aware historical comparison and promotion. |
 | [`model_card.py`](src/smartrodent/model_card.py) | Template loading, training-card population, YAML/Markdown rendering and writing. |
-| [`eval.py`](src/smartrodent/eval.py) | `EvaluationImages`, `FeatureExtractor`, `EvaluationFeatures`, `TsneComparison`: fixed-subset representation evaluation. |
+| [`eval.py`](src/smartrodent/eval.py) | `EvaluationImages`, `FeatureExtractor(encoder, projector)`, `EvaluationFeatures`, `TsneComparison`: fixed-subset representation evaluation; the encoder is called directly. |
 | [`base.py`](src/smartrodent/base.py) | Shared protocols `Configurable`, `Filterable`, `DatasetLoader`; an implementation missing a method fails when it is created. |
 | [`http_session.py`](src/smartrodent/http_session.py) | `retrying_session`: a `requests` session that retries 429/5xx responses and dropped connections, used by both downloaders. |
 | [`logging_setup.py`](src/smartrodent/logging_setup.py) | `log_to_console_and_file`: the download scripts' console and log-file output; library classes add no handlers. |
@@ -248,8 +252,8 @@ flowchart TB
 #### Training modules
 
 Almost every training module imports `training_validation` (settings types
-and parsing), and the orchestration and single-stage modules also import
-`config_loading`. To keep the graph readable, those foundation edges are left
+and parsing), and the orchestration and stage modules also import
+`config_loading` and `components`. To keep the graph readable, those foundation edges are left
 out here. `hyperparameter_search` additionally imports `components`.
 
 ```mermaid
@@ -261,14 +265,20 @@ flowchart TB
         search_space
     end
 
-    subgraph stages["Single-stage experiments"]
+    subgraph stages["Stages"]
+        stages_py["stages"]
+        stage_configurations
+        stage_experiment
         supcon_training
         classifier_training
     end
 
-    subgraph models["Models and export"]
-        supcon_model
-        classifier_model
+    subgraph tasks["Lightning tasks and runner"]
+        supcon_task
+        classifier_task
+        stage_runner
+        encoders
+        yolo_encoder
         onnx_export
     end
 
@@ -278,6 +288,7 @@ flowchart TB
         experiment_results
         classifier_champions
         model_card
+        output_paths
     end
 
     subgraph standalone["Standalone"]
@@ -286,53 +297,45 @@ flowchart TB
     end
 
     two_stage_training --> training_studies
-    two_stage_training --> hyperparameter_search
-    two_stage_training --> search_space
-    two_stage_training --> supcon_training
-    two_stage_training --> classifier_training
-    two_stage_training --> classifier_model
+    two_stage_training --> stages_py
+    two_stage_training --> stage_configurations
+    two_stage_training --> encoders
+    two_stage_training --> output_paths
     two_stage_training --> model_card
-    two_stage_training --> experiment_support
-    two_stage_training --> experiment_results
-
     training_studies --> hyperparameter_search
     training_studies --> search_space
-    training_studies --> supcon_training
-    training_studies --> classifier_training
-    training_studies --> classifier_champions
-    training_studies --> experiment_support
-    training_studies --> experiment_results
-
+    training_studies --> stages_py
     hyperparameter_search --> search_space
     hyperparameter_search --> experiment_results
-
-    supcon_training --> supcon_model
-    supcon_training --> onnx_export
-    supcon_training --> datasets
-    supcon_training --> experiment_support
-    supcon_training --> experiment_results
-    supcon_training --> model_card
-    supcon_training --> search_space
-
-    classifier_training --> classifier_model
-    classifier_training --> onnx_export
-    classifier_training --> datasets
-    classifier_training --> experiment_support
-    classifier_training --> experiment_results
+    stages_py --> supcon_training
+    stages_py --> classifier_training
+    stages_py --> stage_configurations
+    supcon_training --> stage_experiment
+    classifier_training --> stage_experiment
     classifier_training --> classifier_champions
-    classifier_training --> model_card
-    classifier_training --> search_space
-
-    classifier_model --> supcon_model
-    onnx_export --> supcon_model
-
+    stage_configurations --> output_paths
+    stage_configurations --> stage_runner
+    stage_experiment --> stage_runner
+    stage_experiment --> onnx_export
+    stage_experiment --> experiment_support
+    stage_experiment --> model_card
+    supcon_training --> supcon_task
+    classifier_training --> classifier_task
+    supcon_task --> encoders
+    classifier_task --> encoders
+    encoders --> yolo_encoder
+    stage_runner --> experiment_results
+    stage_runner --> output_paths
+    onnx_export --> supcon_task
+    onnx_export --> classifier_task
     classifier_champions --> experiment_support
     classifier_champions --> experiment_results
+    supcon_task --> datasets
+    classifier_training --> datasets
 ```
 
-`training_validation`, `config_loading`, `datasets`, `model_card`, and
-`supcon_model` import nothing else from the package, so they are the safest places to
-start reading.
+`training_validation`, `config_loading`, `datasets`, and `model_card` import
+nothing else from the package, so they are the safest places to start reading.
 
 ### Class diagrams
 
@@ -429,79 +432,60 @@ classDiagram
 #### Single-stage experiments: SupCon and CE classifier
 
 Each experiment is built from a frozen configuration dataclass and returns an
-`ExperimentResult`. The SupCon stage runs its own PyTorch loop. The classifier
-stage plugs custom subclasses into Ultralytics' native classification trainer.
+`ExperimentResult`. Both stages train a Lightning module (`SupConTask`,
+`ClassifierTask`) around a plain PyTorch encoder through one `StageRunner`;
+`StageExperiment` owns tracking, export, model cards and publication.
 
 ```mermaid
 classDiagram
     direction LR
 
-    class TrainingConfiguration {
+    class StageConfiguration {
         <<dataclass>>
         +from_yaml(path)$
         +from_mapping(values)$
+        +artifacts
         +to_dict()
     }
-    class SupConExperiment {
-        +run()
-        +run_with_result(epoch_callback)
+    class SupConConfiguration {
+        <<dataclass>>
     }
     class ClassifierConfiguration {
         <<dataclass>>
-        +from_yaml(path)$
-        +from_mapping(values)$
-        +native_freeze(layer_count)
-        +to_dict()
+        +head
+        +metric_definition
     }
-    class ClassifierExperiment {
+    class StageExperiment {
+        <<abstract>>
         +run()
         +run_with_result(epoch_callback)
-        +champion_registry
+        +promote(configuration, result)$
     }
-    class ExperimentResult {
-        <<dataclass>>
-        +best_checkpoint
-        +best_value
-        +to_dict()
+    class SupConExperiment
+    class ClassifierExperiment
+    class SupConTask {
+        <<LightningModule>>
     }
-
-    class YoloSupConModel {
-        +from_checkpoint(path)$
+    class ClassifierTask {
+        <<LightningModule>>
+        +native_model()
+    }
+    class StageRunner {
+        +fit(task, train_loader, ...)
+    }
+    class Encoder {
+        <<Protocol>>
+        +feature_dim
         +forward(images)
-        +finalize()
+        +reinitialize_post_pooling()?
+        +to_native(head, labels)?
     }
-    class YoloClassifierBuilder {
-        +initialize(...)$
-        +prepare_head(...)$
-        +load_native(path)$
-    }
-    class ClassificationTrainer {
-        <<Ultralytics>>
-    }
-    class ClassificationValidator {
-        <<Ultralytics>>
-    }
-    class Dataset {
-        <<PyTorch>>
-    }
-    class Module {
-        <<PyTorch>>
-    }
-    class _ClassifierTrainer
-    class _ClassifierValidator
+    class YoloEncoder
+    class FreezePolicy
+    class Reinitialization
     class ImageDataset
-    class MultiViewImageDataset
-    class ImageTransforms {
-        +training()
-        +validation()
-    }
-    class CheckpointStore {
-        +save(...)
-    }
-    class EarlyStopping
-    class SchedulerConfiguration {
-        +build(optimizer)
-    }
+    class SupConData
+    class ImageTransforms
     class MlflowConfiguration {
         <<dataclass>>
         +start_run()
@@ -516,48 +500,46 @@ classDiagram
         +classifier(checkpoint)
         +encoder(checkpoint)
     }
+    class ExperimentResult {
+        <<dataclass>>
+        +best_checkpoint
+        +best_value
+        +to_dict()
+    }
 
-    SupConExperiment o-- TrainingConfiguration
-    TrainingConfiguration o-- MlflowConfiguration
-    TrainingConfiguration o-- SchedulerConfiguration
-    SupConExperiment ..> YoloSupConModel : trains
-    SupConExperiment *-- MultiViewImageDataset
-    SupConExperiment *-- ImageDataset
-    SupConExperiment *-- ImageTransforms
-    SupConExperiment *-- CheckpointStore
-    SupConExperiment ..> EarlyStopping
-    SupConExperiment *-- OnnxExporter
-    SupConExperiment ..> ModelPublication
-    SupConExperiment ..> ExperimentResult
-
-    Dataset <|-- ImageDataset
-    ImageDataset <|-- MultiViewImageDataset
-    Module <|-- YoloSupConModel
-    ClassificationTrainer <|-- _ClassifierTrainer
-    ClassificationValidator <|-- _ClassifierValidator
-
+    StageConfiguration <|-- SupConConfiguration
+    StageConfiguration <|-- ClassifierConfiguration
+    StageConfiguration o-- MlflowConfiguration
+    StageExperiment <|-- SupConExperiment
+    StageExperiment <|-- ClassifierExperiment
+    StageExperiment *-- StageRunner
+    StageExperiment *-- OnnxExporter
+    StageExperiment ..> ModelPublication
+    StageExperiment ..> ExperimentResult
+    SupConExperiment o-- SupConConfiguration
+    SupConExperiment *-- SupConTask
+    SupConExperiment *-- SupConData
     ClassifierExperiment o-- ClassifierConfiguration
-    ClassifierConfiguration o-- MlflowConfiguration
+    ClassifierExperiment *-- ClassifierTask
     ClassifierExperiment *-- ImageDataset
-    ClassifierExperiment *-- ImageTransforms
-    ClassifierExperiment *-- OnnxExporter
-    ClassifierExperiment ..> _ClassifierTrainer : trains with
-    _ClassifierTrainer ..> _ClassifierValidator
-    ClassifierExperiment ..> YoloClassifierBuilder
     ClassifierExperiment ..> ClassifierChampionRegistry
-    ClassifierExperiment ..> ModelPublication
-    ClassifierExperiment ..> ExperimentResult
-
-    YoloClassifierBuilder ..> YoloSupConModel : loads SupCon encoder
-    OnnxExporter ..> YoloSupConModel : exports pooled features
+    SupConData *-- ImageTransforms
+    SupConTask *-- Encoder
+    ClassifierTask *-- Encoder
+    SupConTask o-- FreezePolicy
+    ClassifierTask o-- FreezePolicy
+    ClassifierTask o-- Reinitialization
+    Encoder <|.. YoloEncoder
+    OnnxExporter ..> SupConTask : exports encoder
+    OnnxExporter ..> ClassifierTask : exports probabilities
 ```
 
 #### Hyperparameter studies and two-stage training
 
 Optuna studies sample a `SearchSpace` built from `!suggest-float`,
 `!suggest-int`, and `!suggest-categorical` tags; `!coupled` values follow a
-categorical choice. `_StageStudy` adapts the generic `HyperparameterStudy` to
-one training stage. `TwoStagePlan` validates every stage candidate of a
+categorical choice. `StageStudy` adapts the generic `HyperparameterStudy` to
+one `Stage` (`SUPCON` or `CLASSIFIER`). `TwoStagePlan` validates every stage candidate of a
 `TwoStageConfiguration`, and `TwoStageExperiment` chains a SupCon stage (one run
 or a study) into a classifier stage (one run or a study) through the selected
 encoder checkpoint.
@@ -585,14 +567,16 @@ classDiagram
         <<dataclass>>
     }
 
-    class _StageStudy {
-        <<abstract>>
-        +from_yaml(path)$
+    class StageStudy {
+        +from_yaml(stage, path)$
         +preflight()
         +run() StudyResult
     }
-    class SupConStudy
-    class ClassifierStudy
+    class Stage {
+        <<dataclass>>
+        +configuration
+        +experiment
+    }
 
     class HyperparameterStudy {
         +preflight()
@@ -624,29 +608,27 @@ classDiagram
 
     class SupConExperiment
     class ClassifierExperiment
-    class TrainingConfiguration
+    class SupConConfiguration
     class ClassifierConfiguration
     class ExperimentResult
 
     TwoStageConfiguration *-- StageStudies
     TwoStagePlan o-- TwoStageConfiguration
-    TwoStagePlan *-- TrainingConfiguration
+    TwoStagePlan *-- SupConConfiguration
     TwoStagePlan *-- ClassifierConfiguration
-    TwoStagePlan *-- SupConStudy
-    TwoStagePlan ..> ClassifierStudy : builds per encoder
+    TwoStagePlan *-- StageStudy
     TwoStageExperiment *-- TwoStagePlan
-    TwoStageExperiment *-- SupConExperiment
+    TwoStageExperiment ..> SupConExperiment
     TwoStageExperiment ..> ClassifierExperiment
     TwoStageExperiment ..> TwoStageResult
 
-    _StageStudy <|-- SupConStudy
-    _StageStudy <|-- ClassifierStudy
-    _StageStudy *-- StudyConfiguration
-    _StageStudy *-- SearchSpace
-    _StageStudy *-- StudyObjective
-    _StageStudy ..> HyperparameterStudy : creates per run
-    SupConStudy ..> SupConExperiment : runs trials
-    ClassifierStudy ..> ClassifierExperiment : runs trials
+    StageStudy o-- Stage
+    StageStudy *-- StudyConfiguration
+    StageStudy *-- SearchSpace
+    StageStudy *-- StudyObjective
+    StageStudy ..> HyperparameterStudy : creates per run
+    Stage o-- SupConExperiment
+    Stage o-- ClassifierExperiment
 
     HyperparameterStudy o-- SearchSpace
     HyperparameterStudy o-- StudyConfiguration
@@ -798,9 +780,9 @@ These commands initialize models and start actual training. They do not expose
 
 | Command | Workflow and reported output |
 | --- | --- |
-| `python scripts/train_supcon.py configs/train_supcon_config.yaml` | One fresh standalone SupCon run, or an Optuna study; prints each final `last.pt` path and, for a study, the selected `best.pt`. |
-| `python scripts/train_classifier.py configs/train_classifier_config.yaml` | One fresh standalone CE classifier run, or an Optuna study; prints final checkpoints and, for a study, the selected `best.pt`. |
-| `python scripts/train_two_stage.py configs/train_two_stage_config.yaml` | SupCon run or study, encoder selection, then CE run or study; prints final classifier checkpoints and the selected classifier's `best.pt`. |
+| `python scripts/train_supcon.py configs/train_supcon_config.yaml` | One fresh standalone SupCon run, or an Optuna study; prints each final `last.ckpt` path and, for a study, the selected `best.ckpt`. |
+| `python scripts/train_classifier.py configs/train_classifier_config.yaml` | One fresh standalone CE classifier run, or an Optuna study; prints final checkpoints and, for a study, the selected `best.ckpt`. |
+| `python scripts/train_two_stage.py configs/train_two_stage_config.yaml` | SupCon run or study, encoder selection, then CE run or study; prints final classifier checkpoints and the selected classifier's `best.ckpt`. |
 | `python scripts/train_yolo.py configs/train_yolo_detector_config.yaml` (or `train_yolo_classifier_config.yaml`) | Ultralytics training of the configured `task`, then the configured export; prints the export location. |
 | `python scripts/tune_yolo.py configs/train_yolo_classifier_config.yaml` | Ultralytics `YOLO.tune` with the config's `tune_kwargs`; prints the tuning project directory. Never exports: the best weights and `best_hyperparameters.yaml` stay in the tuner's `<name or tune>[N]/` subdirectory of it (numbered on reruns). |
 
@@ -838,7 +820,7 @@ which use `task`, `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
 | Review materialization/reconciliation | Input/output paths, rejection-column prefix or corrected partition/column lists, accepted image suffixes. |
 | Splitting/sampling/downsampling | Input/output metadata roots, record discovery, split/sampling rules, seeds, or per-class caps. |
 | YOLO dataset creators | `detector: {name, parameters}` (`SpeciesNetDetector` or `module:Class`), `layout` (`detector` or `classifier`), `class_names`, `batch_size`, and a `datasets` list of `path_to_image_data`/`dataset_output_path` pairs. |
-| Modern standalone training | Top-level data/output, transforms, validation, tracking, and model/initialization settings; SupCon uses AdamW options, CE uses native `train_kwargs`. |
+| Modern standalone training | Top-level data/output, transforms, validation, tracking, `encoder`, and the `optimizer`, `scheduler`, `early_stopping` and `trainer` sections shared by both stages; CE adds `head`, `freeze`, `reinitialization` and `native_checkpoint`. |
 | Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, optional shared `mlflow`, and optional per-stage `tuning`. |
 | Optuna studies | A standalone SupCon or CE configuration with `!suggest-*` tags plus a top-level `tuning` section; see [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna). |
 | Ultralytics trainer | `task` (`detect`/`classify`), `model`, `dataset`, native `train_kwargs`/`export_kwargs`, optional `tune_kwargs` (`iterations`, `space`, real overrides), and optional wrapper-specific `mlflow` settings. |
@@ -859,21 +841,19 @@ without adding an independent dimension:
 
 ```yaml
 # Fragment within a standalone classifier configuration:
-initialization:
-  head:
-    replace: !suggest-categorical
-      choices: [linear, full]
-    source: !suggest-categorical
-      choices: [random, yolo_checkpoint]
-    checkpoint: !coupled
-      target: initialization.head.source
-      values: [null, /path/to/species_classifier.pt]
+head: !suggest-categorical
+  choices: [linear, full]
+freeze:
+  prefixes: !coupled
+    target: head
+    values: [[network], [network.model.0, network.model.1]]
+  batchnorm: eval
 ```
 
-This fragment describes four head combinations. Coupled lists have the same
+This fragment describes two head combinations. Coupled lists have the same
 length as their target's choices, and targets are full dotted paths from the
 document root. In a two-stage document, the corresponding target is
-`classifier.initialization.head.source`. Choices can be any YAML value,
+`classifier.head`. Choices can be any YAML value,
 including lists and mappings; Optuna stores the choice index, and reports show
 the value. The stages of the two-stage workflow are searched independently;
 classifier choices do not multiply SupCon training runs. See
@@ -884,45 +864,37 @@ classifier choices do not multiply SupCon training runs. See
 | Node | Choices/meaning |
 | --- | --- |
 | `transforms` | torchvision v2 keyword dictionaries; `image_size` is a positive square size. Augmentation `p` values range from 0 to 1. |
-| SupCon `optimizer` | AdamW kwargs, including a positive `lr`; this is not an optimizer-name selector. |
-| CE `train_kwargs` | Native Ultralytics training options such as `optimizer`, `lr0`, `lrf`, `cos_lr`, `warmup_epochs`, `patience`, and `amp`. Shared model/data/output/batch/device/seed, `freeze`, and `save_period` (only `best.pt`/`last.pt` are kept) cannot be overridden here. |
-| `epochs`, `workers`, `seed`, `device` | Maximum epoch count, nonnegative loader worker count, integer seed in `[0, 2**32)`, and PyTorch device such as `cpu`/`cuda:0`. |
+| `encoder` | `{name, parameters}` of an encoder class or factory (`YoloEncoder`, or `module:attr`); in CE also `{checkpoint: path}` of a SupCon or classifier `.ckpt`. In the two-stage pipeline the classifier's `encoder` is reserved: the winning SupCon `best.ckpt` is supplied. |
+| `optimizer` | `{name, parameters}` of a `torch.optim` optimizer, e.g. `AdamW` with `lr`. |
+| `scheduler` | A list of phases `{name, parameters, epochs?, interval?}`. `[]` keeps the learning rate constant; several phases run in sequence (all but the last set `epochs`); `ReduceLROnPlateau` must be alone and follows the stage's objective; `interval: step` is allowed for a single phase. |
+| `early_stopping` | `null`, or native Lightning `EarlyStopping` options such as `patience` and `min_delta`; the monitored metric and direction come from the stage's objective. |
+| `trainer` | Native `lightning.Trainer` arguments (`accelerator`, `devices`, `precision`, ...). `max_epochs` is required; `callbacks`, `logger` and `default_root_dir` belong to the runner and are rejected. |
+| `freeze` | `{prefixes: [...], batchnorm: eval \| adapt}`: encoder parameter-name prefixes to freeze, on dotted boundaries (`network.model.1` does not match `network.model.10`); an unmatched prefix fails before training. `eval` keeps frozen BatchNorm statistics fixed, `adapt` updates them. For `YoloEncoder`, layer `N` is `network.model.N` and `network` is the whole encoder. |
+| CE `head` | `linear` (default) puts a new final layer on the encoder's features. `full` also renews everything after the pooling through the encoder's optional `reinitialize_post_pooling()`; for YOLO that is the `Classify` convolution. An encoder without the method rejects `full` before training. The head is always newly initialized. |
+| CE `reinitialization` | Optional `{prefixes, source: random}`: the matched encoder modules redraw themselves; every other parameter stays intact. |
+| CE `native_checkpoint` | `true` also writes an Ultralytics `best.pt` next to `best.ckpt` (needs an encoder with `to_native`, such as `YoloEncoder`); `YOLO(path)` loads it. Rejected before training for other encoders. |
+| `workers`, `seed` | Nonnegative loader worker count and integer seed in `[0, 2**32)`. The device is set by `trainer.accelerator`. |
 | `validation_dataset` | Existing class-folder validation split, or `null` for standalone training-only operation. Two-stage selection uses validation. |
-| `validation_metrics` | Named sklearn metric specifications, or `null`. Each receives true/predicted labels, not probabilities. `function` names the metric; other entries are native kwargs. |
-| `tracked_metric` | SupCon native loss statistic/custom alias, or CE's `ce_loss_mean`/custom alias. SupCon defaults to `supcon_loss_mean`; CE defaults to `ce_loss_mean`. |
-| `tracked_mode` | `min`, `max`, or `null`/omitted for inferred loss-min/score-max direction. |
-| SupCon `scheduler` | `null`/omitted for constant LR, or `name: ReduceLROnPlateau` with `parameters`. |
-| SupCon `early_stopping` | `null`/omitted, or positive `patience`, nonnegative absolute `tolerance`, and `comparison: less`/`greater`. |
+| CE `validation_metrics` | Named sklearn scorers `{alias: {name, parameters}}`, or `null`. Each receives true/predicted labels, not probabilities. |
+| CE `tracked_metric`, `tracked_mode` | `ce_loss_mean` (default) or a `validation_metrics` alias; `tracked_mode` is `min`, `max`, or omitted for loss-min/score-max. SupCon always minimizes `supcon_loss_mean`. |
 | `mlflow` | `null`/omitted, or tracking/registry settings described below. |
 | `model_card_template` | Optional template path; defaults to `configs/model_card_template.yaml`. |
 | `onnx_export` | `null`/omitted for no export, or a mapping with optional `dynamic` (default `false`: batch 1 at `image_size`; `true`: any batch and image size) and `simplify` (default `true`: onnxslim). `{}` exports with these defaults. The opset is not configurable; see [Sharing ONNX exports](#sharing-onnx-exports). |
 
-Native SupCon validation statistics are `supcon_loss_min`,
-`supcon_loss_mean`, `supcon_loss_std`, and `supcon_loss_max`; custom aliases
-cannot replace them. CE reserves `ce_loss_mean` and native names `fitness`,
-`val/loss`, `metrics/accuracy_top1`, `metrics/accuracy_top5`, `train/loss`, `epoch`,
-`time`, and native learning-rate fields `lr/pgN` (integer group index). Sklearn
-aliases cannot overwrite these fields. Metric specs can include `function: f1_score`,
-`average: macro`, and `zero_division: 0`.
+SupCon logs `supcon_loss_min`, `supcon_loss_mean`, `supcon_loss_std` and
+`supcon_loss_max`; the mean selects the best checkpoint and drives early stopping
+(without validation, the training mean does). CE logs `ce_loss_mean`, the
+unweighted full-split mean cross-entropy, and the configured sklearn aliases;
+these names are reserved. Ties go to the earliest epoch. A nonfinite loss raises
+`FloatingPointError` before anything is published.
 
-Use `min` for losses and `max` for scores where larger is better. SupCon's
-scheduler mode and stopping `comparison: less`/`greater` must agree with that
-direction. Its scheduler patience, stopping tolerance, and strictly improving
-best-checkpoint selection retain their existing meanings. Without SupCon
-validation, disable validation metrics/scheduling/stopping and leave
-`tracked_metric`/`tracked_mode` omitted or null.
+Use `min` for losses and `max` for scores where larger is better. Without CE
+validation, only `ce_loss_mean` on the training split can be tracked and no
+champion is selected; a study ranks trials by the configured objective and
+requires validation.
 
-CE uses the configured objective as native fitness, including for native
-stopping and best selection; it does not silently substitute top-1 accuracy.
-`train_kwargs.patience: 0` disables stopping. Native best weights retain the
-latest tied epoch within a run; study selection keeps the first tied trial. Training-only CE uses `ce_loss_mean`, not a validation metric alias.
-CE `ce_loss_mean` on validation remains unweighted full-split mean cross-entropy,
-separate from native `val/loss` batch aggregation or optional class weighting.
-
-SupCon remains FP32. CE accepts native `amp` settings; the examples explicitly
-use FP32. Both start fresh optimizer state. The scripts do not expose training
-resumption, and CE rejects `train_kwargs.resume`. CE configures optimization
-through native `train_kwargs` and the explicit `freeze` setting.
+Both stages train in the precision set by `trainer.precision` and start fresh
+optimizer state. The scripts do not expose training resumption.
 
 ### Inspect configuration without training
 
@@ -930,30 +902,29 @@ There is no validation-only CLI flag, but the library configuration loaders
 validate settings without constructing models or starting runs:
 
 ```python
-from smartrodent.classifier_training import ClassifierConfiguration
-from smartrodent.supcon_training import TrainingConfiguration
+from smartrodent.stage_configurations import SupConConfiguration
 from smartrodent.two_stage_training import TwoStageConfiguration, TwoStagePlan
 
-supcon = TrainingConfiguration.from_yaml("configs/train_supcon_config.yaml")
+supcon = SupConConfiguration.from_yaml("configs/train_supcon_config.yaml")
 pipeline = TwoStageConfiguration.from_yaml("configs/train_two_stage_config.yaml")
 plan = TwoStagePlan(
     pipeline
-)  # validates every candidate; reads architectures and head donors, trains nothing
+)  # validates every candidate, builds encoders and reads card templates; trains nothing
 print(len(plan.supcon_configurations), len(plan.classifier_candidates))
 ```
 
-`ClassifierConfiguration.from_yaml(path)` does the same for a single classifier
+`ClassifierConfiguration.from_yaml(path)` (from `smartrodent.stage_configurations`) does the same for a single classifier
 run.
 
-Study configurations prevalidate the same way: `SupConStudy.from_yaml(path)` and
-`ClassifierStudy.from_yaml(path)` from `smartrodent.training_studies` parse the
+Study configurations prevalidate the same way: `StageStudy.from_yaml(SUPCON, path)` and
+`StageStudy.from_yaml(CLASSIFIER, path)` (`SUPCON` and `CLASSIFIER` from `smartrodent.stages`, `StageStudy` from `smartrodent.training_studies`) parse the
 `tuning` section and search space and build every prevalidated candidate. They
 do not open the Optuna storage or start trials. `is_study_configuration(path)`
 reports whether a file has a `tuning` section.
 
-Parsing is not a complete donor/architecture/device compatibility check. Creating
-an experiment additionally prepares datasets, transforms, scorers, and templates;
-model-dependent checks occur when actual models are initialized.
+Parsing is not a complete encoder/device compatibility check. Creating an
+experiment additionally prepares datasets, transforms, scorers, templates and the
+task (encoder, freeze, head and reinitialization checks).
 
 ## Dataset workflow
 
@@ -1046,7 +1017,7 @@ selects source images per class: a batch contains P*M source selections and
 2*P*M independently augmented views. `samples_per_epoch` counts source
 selections and rounds down to complete batches. `dropout` and `output_features`
 configure the projection head; `temperature` controls SupCon loss, and `freeze`
-lists native YOLO layer indices to freeze.
+selects encoder parameter prefixes to freeze.
 
 Validation uses a fixed seeded P-K cohort with deterministic single-view
 preprocessing and complete batches. Its loss statistics summarize validation
@@ -1063,55 +1034,38 @@ A single run writes directly to `output_directory`; a study writes one
 python scripts/train_classifier.py configs/train_classifier_config.yaml
 ```
 
-The encoder format is explicit:
+The encoder is either configured (`encoder: {name, parameters}`, e.g.
+`YoloEncoder` with a local `model_name`) or restored from a checkpoint
+(`encoder: {checkpoint: runs/supcon/best.ckpt}`), which rebuilds it from the
+saved hyperparameters and weights. The encoder is a plain PyTorch module that
+returns `(B, feature_dim)` features for RGB in `[0, 1]`; custom encoders follow
+the same interface and need no YOLO code. The head is always newly initialized:
+`head: linear` adds a new final `Linear`; `head: full` also renews the encoder's
+post-pooling part through its optional `reinitialize_post_pooling()` (for
+`YoloEncoder`, the `Classify` convolution), keeping everything before it from the
+encoder. Which parameters train is decided separately by `freeze`.
 
-| `initialization.encoder.source` | `checkpoint` format |
-| --- | --- |
-| `supcon` | Standalone SmartRodent SupCon checkpoint. |
-| `ultralytics` | Local native Ultralytics classification checkpoint. |
+`freeze` takes encoder parameter-name prefixes, matched on dotted boundaries, and
+fails before training if a prefix matches nothing (in the two-stage pipeline,
+before SupCon trains, against every candidate encoder). Frozen modules stay in
+eval mode, including Dropout; `batchnorm: eval` fixes the running statistics of
+frozen BatchNorm layers, `adapt` updates only those. For `YoloEncoder`, layer `N`
+is `network.model.N`. `reinitialization` redraws the modules under further
+prefixes randomly before freezing.
 
-All supported encoder formats contain YOLO classification models, not arbitrary
-Torch modules. Unsupported non-YOLO models raise `NotImplementedError`.
-`head.replace: linear` replaces only the final linear layer.
-`head.replace: full` replaces the entire native `Classify` block. Which layers
-train is decided separately by `freeze`.
-
-`head.source: random` uses native constructors, not a custom initialization
-scheme. `yolo_checkpoint` copies only shape-compatible tensors from an explicit
-native classifier donor into that fresh target head. It never transfers the
-donor backbone. Class-name equality is not required, and rows are copied by
-shape, not remapped semantically. A 1,000→26 full head can transfer its compatible
-convolution/BatchNorm while leaving the output linear fresh. A linear-only
-1,000→26 donor transfers no output weights: a warning before training flags its
-equivalence to random linear initialization. All configured variants still run.
-A random head accepts an omitted/null donor checkpoint.
-
-`freeze` is required: a layer count N freezes layers `0..N-1` (Ultralytics'
-convention), a list names unique layer indices, and `0`/`[]` trains everything.
-The last layer is the `Classify` head; its index is only valid with
-`replace: linear` and freezes the head convolution, so only Linear trains (for
-YOLO26-cls, `freeze: 11` is a linear probe and `freeze: 10` freezes the encoder
-under a trainable full head). Out-of-range values fail before training; in the
-two-stage pipeline they fail before SupCon trains. Frozen layers stay in eval
-mode, including Dropout. `encoder_batchnorm` is required when layers are frozen:
-`eval` fixes their running statistics, `adapt` updates only those statistics. It
-must be omitted (or null) when nothing is frozen. `train_kwargs.dropout` sets the
-head's Dropout before Linear for every `replace` mode (native default 0.0); other
-Dropout modules are not changed.
 Configured torchvision augmentations remain the actual training transforms;
-validation uses deterministic, unaugmented preprocessing. Dataset/cache-writing
-native discovery and conflicting augmentation options are not used.
+validation uses deterministic, unaugmented preprocessing.
 
 CE uses ordinary shuffled, single-view batches and retains the final partial
 batch. Validation traverses the full split, computes sample-weighted mean CE,
 and evaluates configured label metrics. Each run owns a fresh model and
-optimizer. Without validation, standalone training is allowed but no champion
-is selected; a study ranks trials by the configured objective and requires
-validation.
+optimizer. Without validation, standalone training is allowed and the model is
+still registered, but no champion is selected or replaced; a study ranks trials by
+the configured objective and requires validation.
 
 A single run uses the output root; a study writes one `trial_NNNN` directory per
-trial and a `study.yaml` report. Each run writes native `weights/best.pt`,
-`weights/last.pt`, and `results.csv`.
+trial and a `study.yaml` report. Each run writes `best.ckpt`, `last.ckpt`,
+`metrics.csv` and `hparams.yaml`, plus `best.pt` with `native_checkpoint: true`.
 
 ### Two-stage SupCon → CE
 
@@ -1121,18 +1075,20 @@ python scripts/train_two_stage.py configs/train_two_stage_config.yaml
 
 The root owns shared data, output root, and MLflow settings. `supcon` and
 `classifier` contain their respective stage settings rather than copies of the
-shared paths/classes. Two-stage orchestration owns classifier encoder binding;
-standalone encoder source/path choices cannot override the selected winner.
+shared paths/classes. Two-stage orchestration owns the classifier's `encoder`: the key is reserved and
+filled with the selected SupCon `best.ckpt`.
 
 Execution:
 
 1. Validate both stages (`TwoStagePlan`): every SupCon candidate, every
-   classifier candidate against a placeholder encoder, output paths, freeze
-   settings against every SupCon model, head donors and card templates.
+   classifier candidate against a placeholder encoder, output paths (including the
+   root `config.yaml` and `selection.yaml`), freeze, reinitialization, head and
+   native-export settings against every SupCon candidate's encoder, and card
+   templates.
 2. Train the SupCon run, or every trial of its study. Selection uses the
    configured validation metric and direction; a study keeps the scorer
    definition/options and temperature fixed across trials.
-3. Select the winning **best-epoch** checkpoint, not its final `last.pt`.
+3. Select the winning **best-epoch** checkpoint (`best.ckpt`), not its final `last.ckpt`.
 4. Bind that selected encoder/checksum/provenance to the classifier run, or to
    every trial of its study, with fresh model/optimizer state per run.
 5. Select the CE winner and, if registration is enabled, compare it with the
@@ -1183,7 +1139,7 @@ configuration, trains it with the existing trainer, and is ranked by that
 trainer's tracked metric and mode.
 
 [`train_classifier_config.yaml`](configs/train_classifier_config.yaml) is a
-grid study over head settings. For a sampled study, add tags and a `tuning`
+grid study over the head mode. For a sampled study, add tags and a `tuning`
 section to a copy of
 [`train_supcon_config.yaml`](configs/train_supcon_config.yaml) or
 [`train_classifier_config.yaml`](configs/train_classifier_config.yaml):
@@ -1191,7 +1147,9 @@ section to a copy of
 ```yaml
 # Fragments within a standalone SupCon configuration:
 optimizer:
-  lr: !suggest-float {low: 1.0e-5, high: 1.0e-3, log: true}
+  name: AdamW
+  parameters:
+    lr: !suggest-float {low: 1.0e-5, high: 1.0e-3, log: true}
 dropout: !suggest-categorical {choices: [0.0, 0.1, 0.3]}
 
 tuning:
@@ -1215,8 +1173,8 @@ python scripts/train_classifier.py path/to/classifier_study.yaml
 
 ### Search tags
 
-Parameters are named by their full dotted path, for example `optimizer.lr` or
-`transforms.random_resized_crop.scale[0]`.
+Parameters are named by their full dotted path, for example
+`optimizer.parameters.lr` or `head`.
 
 | Tag | Settings | Optuna call |
 | --- | --- | --- |
@@ -1236,22 +1194,20 @@ combinations. For example, a classifier study can tie `freeze` to a sampled head
 mode:
 
 ```yaml
-initialization:
-  encoder: {source: supcon, checkpoint: runs/supcon/best.pt}
-  head:
-    replace: !suggest-categorical {choices: [linear, full]}
-    source: random
-    checkpoint: null
-freeze: !coupled
-  target: initialization.head.replace
-  values: [11, 10]
+encoder: {checkpoint: runs/supcon/best.ckpt}
+head: !suggest-categorical {choices: [linear, full]}
+freeze:
+  prefixes: !coupled
+    target: head
+    values: [[network], [network.model.0, network.model.1]]
+  batchnorm: eval
 ```
 
 Settings that define comparability or locations cannot be searched:
 `tracked_metric`, `tracked_mode`, `validation_metrics`, `train_dataset`,
 `validation_dataset`, `class_names`, `output_directory`, and `mlflow`. SupCon
 studies also keep `temperature` fixed. A study requires `validation_dataset`,
-because trials are ranked on validation data. Model, encoder, head and template
+because trials are ranked on validation data. Encoder checkpoints and template
 files of every trial must lie outside the study's `output_directory`, where
 trials write their artifacts.
 
@@ -1331,19 +1287,17 @@ must not contain search tags, and an empty `tuning` mapping is an error. Stage
 sections must not contain their own `tuning` key.
 
 ```yaml
-classifier:
-  initialization:
-    encoder:
-      source: selected_supcon
-    head:
-      replace: !suggest-categorical {choices: [linear, full]}
-      source: random
-      checkpoint: null
-  freeze: !coupled
-    target: classifier.initialization.head.replace  # Full path from the root.
-    values: [11, 10]
-  train_kwargs:
-    lr0: !suggest-float {low: 1.0e-4, high: 1.0e-2, log: true}
+classifier:  # No `encoder` key: the pipeline supplies the winning SupCon best.ckpt.
+  head: !suggest-categorical {choices: [linear, full]}
+  freeze:
+    prefixes: !coupled
+      target: classifier.head  # Full path from the root.
+      values: [[network], [network.model.0, network.model.1]]
+    batchnorm: eval
+  optimizer:
+    name: AdamW
+    parameters:
+      lr: !suggest-float {low: 1.0e-4, high: 1.0e-2, log: true}
   # ... remaining classifier settings ...
 
 tuning:
@@ -1356,7 +1310,7 @@ tuning:
 ```
 
 - A single SupCon run writes to `<output_directory>/supcon/`; a SupCon study
-  writes `study.yaml` and `trial_NNNN/` there. The winning `best.pt` becomes the
+  writes `study.yaml` and `trial_NNNN/` there. The winning `best.ckpt` becomes the
   encoder.
 - A classifier study is keyed by the selected encoder. It runs in
   `<output_directory>/classifier/<key>/` under the study name
@@ -1389,23 +1343,26 @@ are never registered.
 
 ### Modern experiment artifacts
 
-| Artifact | SupCon | Native CE |
-| --- | --- | --- |
-| Concrete owned configuration | `config.yaml` | `config.yaml` plus native `args.yaml` |
-| Epoch history | `history.yaml` | `results.csv` and checkpoint `train_results` |
-| Latest weights | `last.pt` | `weights/last.pt` |
-| Selected best weights | `best.pt` | `weights/best.pt` |
-| Selected snapshot cards | `best.model_card.yaml` / `.md` | `weights/best.model_card.yaml` / `.md` |
-| ONNX export (with `onnx_export`) | `best.onnx` (pooled encoder features) | `weights/best.onnx` (class probabilities) |
+Both stages write the same files into their output directory:
 
-SupCon checkpoints embed architecture/state, label mapping, configuration,
-optimizer and optional scheduler state. Its history exposes `learning_rate`
-and `next_learning_rate`. CE saves complete native classification modules with
-native `.names` and encoder-selection `.provenance`. Native finalization strips
-optimizer state and sets checkpoint `epoch` to `-1`; use the selected result,
-selection summary or card for the best epoch, not the full history length.
-Periodic CE snapshots are available through native `train_kwargs.save_period`.
-Saved optimizer metadata does not imply a supported resume CLI.
+| Artifact | File |
+| --- | --- |
+| Concrete owned configuration | `config.yaml` |
+| Epoch metrics and hyperparameters | `metrics.csv`, `hparams.yaml` |
+| Latest weights | `last.ckpt` |
+| Selected best weights | `best.ckpt` |
+| Selected snapshot cards | `best.model_card.yaml` / `.md` |
+| ONNX export (with `onnx_export`) | `best.onnx` (SupCon: encoder features; CE: class probabilities) |
+| Native YOLO classifier (CE with `native_checkpoint: true`) | `best.pt` |
+
+Checkpoints are Lightning `.ckpt` files: the task's saved hyperparameters (the
+encoder's component spec, optimizer, scheduler, freeze policy and, for CE, the
+label mapping) plus weights. `SupConTask.load_from_checkpoint` and
+`ClassifierTask.load_from_checkpoint` rebuild the module without the original
+starting weights. Ties in the best checkpoint go to the earliest epoch. Old
+SupCon `best.pt` files cannot be used as encoders. The native `best.pt` is an
+Ultralytics checkpoint of the best epoch, built through the encoder's
+`to_native`, and is what registration logs for YOLO classifiers.
 
 For a two-stage experiment with a SupCon study and a single classifier run:
 
@@ -1417,9 +1374,10 @@ For a two-stage experiment with a SupCon study and a single classifier run:
     study.yaml
     trial_0000/              # One directory per SupCon trial
       config.yaml
-      history.yaml
-      last.pt
-      best.pt
+      metrics.csv
+      hparams.yaml
+      last.ckpt
+      best.ckpt
       best.onnx              # Only with onnx_export
       best.model_card.yaml
       best.model_card.md
@@ -1427,14 +1385,14 @@ For a two-stage experiment with a SupCon study and a single classifier run:
       ...
   classifier/                # A single classifier run
     config.yaml
-    args.yaml
-    results.csv
-    weights/
-      best.pt
-      best.onnx              # Only with onnx_export
-      last.pt
-      best.model_card.yaml
-      best.model_card.md
+    metrics.csv
+    hparams.yaml
+    last.ckpt
+    best.ckpt
+    best.pt                  # Only with native_checkpoint
+    best.onnx                # Only with onnx_export
+    best.model_card.yaml
+    best.model_card.md
 ```
 
 A single SupCon run writes its artifacts directly under `supcon/`. A classifier
@@ -1445,51 +1403,54 @@ old checkpoints to infer a winner. Completed artifacts/registry versions may
 remain after a later failure. Use a fresh output root for a new experiment and
 do not write concurrently to one run directory.
 
-SupCon publishes checkpoints atomically per file and uses hard links for
-`best.pt`; its filesystem must support them. CE uses the native checkpoint
-writer/finalization. Neither is a transaction across all artifacts or provides
-power-loss durability guarantees; arbitrary old outputs are not pruned.
+Lightning writes the checkpoints; none of this is a transaction across all
+artifacts or provides power-loss durability guarantees, and arbitrary old outputs
+are not pruned.
 
 ### Reloading without the original starting weights
 
-SupCon and new native CE checkpoints reload without the original starting
-weights or notebook session:
+Both stages reload without the original starting weights or notebook session:
 
 ```python
 from ultralytics import YOLO
-from smartrodent.supcon_model import YoloSupConModel
+from smartrodent.classifier_task import ClassifierTask
+from smartrodent.supcon_task import SupConTask
 
-supcon = YoloSupConModel.from_checkpoint(
-    "runs/supcon_standalone_xl_srilanka_lr-00001/best.pt", device="cpu"
+supcon = SupConTask.load_from_checkpoint(
+    "runs/supcon_standalone_xl_srilanka_lr-00001/best.ckpt", map_location="cpu"
 )
-classifier = YOLO(
-    "runs/classifier_xl_srilanka/trial_0000/weights/best.pt", task="classify"
-).to("cpu")
-print(classifier.names)  # Integer ID -> species name.
-# classifier(...) uses the native prediction API.
-# classifier.model in eval mode returns (probabilities, logits).
-supcon.finalize()  # Release the SupCon feature hook when finished.
+encoder = supcon.encoder.eval()  # features: (B, feature_dim), RGB in [0, 1]
+classifier = ClassifierTask.load_from_checkpoint(
+    "runs/classifier_xl_srilanka/trial_0000/best.ckpt", map_location="cpu"
+).eval()
+print(classifier.label_names)  # Species name -> integer ID.
+# With native_checkpoint: true, Ultralytics loads the best.pt next to it:
+native = YOLO("runs/classifier_xl_srilanka/trial_0000/best.pt", task="classify")
 ```
 
-CE weights are native Ultralytics checkpoints: they load with encoder
-`source: ultralytics` and can serve as native head donors. Pickled checkpoints
-must come from trusted sources and require compatible installed
-PyTorch/Ultralytics/library versions.
+Custom encoder modules must be importable wherever a checkpoint or a registered
+model is loaded: checkpoints store the encoder's `module:attr` spec, and
+registered models are pickled. Pickled objects must come from trusted sources and
+require compatible installed PyTorch/Ultralytics/library versions.
 
 ### Sharing ONNX exports
 
-With `onnx_export` set, every run exports its selected `best.pt` to ONNX next
-to it, before any MLflow publication; a failed export, including a failed
+With `onnx_export` set, every run exports its selected `best.ckpt` to ONNX next
+to it (`best.onnx`), before any MLflow publication; a failed export, including a failed
 onnxslim simplification, fails the run and leaves no ONNX file. A recipient
 needs only `onnxruntime`, `numpy`, and an image library, not PyTorch,
 Ultralytics, or this package.
 
-| | CE classifier `weights/best.onnx` | SupCon `best.onnx` |
+| | CE classifier `best.onnx` | SupCon `best.onnx` |
 | --- | --- | --- |
-| Exporter | Ultralytics' native ONNX export | Ultralytics' `torch2onnx` on the pooled encoder |
+| Exporter | One Torch ONNX path (Ultralytics' `torch2onnx`) for both | the same |
 | Input | `images` | `images` |
-| Output | `output0`: softmax class probabilities, N x classes | `embeddings`: pooled encoder features (before the projector), N x `embedding_dim` |
-| Metadata | Ultralytics' `names`, `imgsz`, and more | `imgsz`, `embedding_dim`, `checkpoint_sha256` of `best.pt`, `input` |
+| Output | `probabilities`: softmax class probabilities, N x classes | `embeddings`: encoder features (before the projector), N x `embedding_dim` |
+| Metadata | `names`, `task`, `batch`, `stride`, `channels`, plus the common keys below | `embedding_dim`, plus the common keys below |
+
+Common metadata keys: `opset` (also declared in the file's `opset_import`), `imgsz`,
+`checkpoint_sha256` of the `best.ckpt`, and `input`. The classifier file loads in
+`YOLO(path, task="classify")` for images whose size is a multiple of 32.
 
 Both expect the same input: RGB, float32 in `[0, 1]`, N x 3 x S x S, with S
 from the `imgsz` metadata. Resize (stretch, not crop) to S x S; there is no
@@ -1518,10 +1479,10 @@ print(names[int(output.argmax(axis=1)[0])])
 
 For library-driven execution, use `SupConExperiment(configuration).run_with_result()`,
 `ClassifierExperiment(configuration).run_with_result()`,
-`SupConStudy.from_yaml(path).run()`, `ClassifierStudy.from_yaml(path).run()`, or
+`StageStudy.from_yaml(SUPCON, path).run()`, `StageStudy.from_yaml(CLASSIFIER, path).run()`, or
 `TwoStageExperiment(configuration).run()`. These **execute training**. Studies
 return a `StudyResult` with every completed trial result and the selected one. The
-single-experiment `run()` methods return `last.pt`; structured results expose
+single-experiment `run()` methods return `last.ckpt`; structured results expose
 best/last paths, best epoch/value, tracked metric/direction, validation identity,
 and tracking information.
 
@@ -1535,7 +1496,7 @@ and available MLflow run/model/version IDs. Optional tracking/data identifiers
 remain `null` when unavailable. Narrative fields are preserved; `model_card_template` selects another
 compatible template.
 
-Cards are saved beside `best.pt`. Tracking uploads best-model artifacts; registry
+Cards are saved beside `best.ckpt`. Tracking uploads best-model artifacts; registry
 publication also attaches cards to the logged model and uses the Markdown as
 the model-version description. A Git commit tag identifies HEAD, not a snapshot
 of uncommitted source changes.
@@ -1685,10 +1646,9 @@ working directory.
   [Studies and MLflow](#studies-and-mlflow).
 
 Runs record stage-specific parameters and epoch metrics, selected best values
-and epochs, source Git/data tags, and best checkpoint/cards (plus `best.onnx` with `onnx_export`). CE metrics use
-`training/ce_loss_mean` and `validation/<metric>`; SupCon records native training
-loss statistics, validation metrics, and current/next learning rates. Local
-`config.yaml` and SupCon `history.yaml` / CE `results.csv` remain useful independently of the tracking UI.
+and epochs, source Git/data tags, and best checkpoint/cards (plus `best.onnx` with `onnx_export`). Both stages log their epoch metrics
+(`ce_loss_mean` and the sklearn aliases, or the four `supcon_loss_*` statistics) through Lightning. Local
+`config.yaml`, `metrics.csv` and `hparams.yaml` remain useful independently of the tracking UI.
 
 Modern experiments own their MLflow run contexts. An unrelated active run or
 `MLFLOW_RUN_ID` requesting implicit resumption is rejected rather than silently
@@ -1699,8 +1659,9 @@ from DVC; set it deliberately when comparing versioned input data.
 
 Modern CE publication and ranking are separate:
 
-1. Each run's or trial's selected `best.pt` is restored and published as a
-   registered model version, with completed cards and comparison metadata.
+1. Each run's or trial's selected `best.ckpt` is restored and published as a
+   registered model version (the whole `ClassifierTask`, or the native model for
+   `native_checkpoint: true`, with `best.pt` logged beside the checkpoint), with completed cards and comparison metadata.
 2. A study defers alias movement until **all** trials have trained and
    published successfully. A trial failure that stops the study prevents
    promotion of a partial winner; already created runs/versions are not rolled
@@ -1781,8 +1742,8 @@ weights and use substantial GPU resources; enable them intentionally.
 | Config or input path is not found | Run from the repository root or use appropriate absolute paths; paths are not rebased to the YAML directory. Sample configs refer to existing local datasets/checkpoints, not bundled assets. |
 | Unknown YAML tag | Only the training CLIs/library loaders accept the study tags (`!suggest-*`, `!coupled`); other scripts and tags are plain YAML. |
 | Dataset class is missing/empty | Verify exact species-directory names, selected population, split paths, and indexed suffixes. Modern datasets default to `.jpg` and `.png`. |
-| Head transfer or checkpoint loading fails | Match source format, donor dimensions, and exact labels/IDs. Starting ImageNet weights are not automatically valid species-head donors. |
-| CUDA/backend failure | Check installed hardware/runtime and modern `device` settings; the Ultralytics scripts take the device from `device` in the config and do not mask GPUs. |
+| Encoder or head setup fails before training | Check that freeze/reinitialization prefixes exist in the encoder, that `head: full` and `native_checkpoint` are used with an encoder that offers `reinitialize_post_pooling`/`to_native`, and that the checkpoint was written by this version (old SupCon `best.pt` files cannot be used). |
+| CUDA/backend failure | Check installed hardware/runtime and the modern `trainer.accelerator`/`devices` settings; the Ultralytics scripts take the device from `device` in the config and do not mask GPUs. |
 | Search tag rejected with "add a tuning section" | A configuration without `tuning` (two-stage: without a `tuning` entry for that stage) is a single run. Add the section or replace the tags with values. |
 | Study refuses to start or resume | The `study_name` already exists without `load_if_exists: true`, or its stored search space, objective, direction, or encoder checksums differ. Use a new `study_name` and `output_directory`. |
 | Study ends with no completed trial | Inspect each trial's `state` and `error` in `study.yaml`; pruned and failed trials are never selected. |
