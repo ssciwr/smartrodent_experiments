@@ -5,7 +5,7 @@ model: opus
 effort: high
 tools: Read, Grep, Glob
 permissionMode: plan
-maxTurns: 20
+maxTurns: 100
 ---
 # Planner subagent
 

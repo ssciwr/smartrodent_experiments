@@ -1,10 +1,10 @@
 """Conventions shared by every pipeline script: positional config and config copies."""
 
 import importlib
+import os
 import runpy
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pandas as pd
@@ -21,7 +21,8 @@ import yaml
         ("scripts.sample_training_dataset", "_parse_args"),
         ("scripts.split_dataset", "_parse_args"),
         ("scripts.create_yolo_dataset", "_parse_args"),
-        ("scripts.train_yolo_detector", "_parse_args"),
+        ("scripts.train_yolo", "_parse_args"),
+        ("scripts.tune_yolo", "_parse_args"),
     ],
 )
 # The config is positional and required: it parses, and omitting it fails. Unknown
@@ -196,64 +197,41 @@ def test_download_entry_points_copy_config_before_download(
 
 
 @pytest.mark.parametrize(
-    ("module_name", "trainer_name", "config_name", "operation", "uses_cli"),
+    ("module_name", "operation", "project_attribute"),
     [
-        (
-            "scripts.train_yolo_detector",
-            "YoloDetectionTrainer",
-            "train_yolo_detector_config.yaml",
-            "train",
-            True,
-        ),
+        ("scripts.train_yolo", "train", "train_project"),
+        ("scripts.tune_yolo", "tune", "tune_project"),
     ],
 )
-def test_training_scripts_copy_original_config_to_project_base(
-    tmp_path,
-    monkeypatch,
-    module_name,
-    trainer_name,
-    config_name,
-    operation,
-    uses_cli,
+def test_yolo_scripts_copy_original_config_to_project_before_running(
+    tmp_path, monkeypatch, module_name, operation, project_attribute
 ):
+    """Config copied byte-for-byte into the project; only training exports; no CUDA env."""
     import smartrodent
 
-    monkeypatch.chdir(tmp_path)
-    config_dir = (
-        tmp_path
-        if uses_cli
-        else tmp_path / "projects" / "smartrodent_experiments" / "configs"
-    )
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / config_name
-    output_root = tmp_path / "training_outputs"
-    config_path.write_text(
-        "# original training configuration\n"
-        + yaml.safe_dump(
-            {
-                "train_kwargs": {"project": str(output_root)},
-                "tune_kwargs": {"project": str(output_root)},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    # Device choice belongs to the config: an unset variable must stay unset.
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    config_path = tmp_path / "yolo_config.yaml"
+    config_path.write_text("# original configuration\ntask: detect\n", encoding="utf-8")
+    project = tmp_path / "outputs" / "nested"
     trainer = Mock()
-    trainer.train_kwargs = {"project": str(output_root)}
-    trainer.model = SimpleNamespace(ckpt={"train_args": {}})
+    setattr(trainer, project_attribute, project)
 
     def run():
-        assert (output_root / config_name).read_bytes() == config_path.read_bytes()
+        assert (project / config_path.name).read_bytes() == config_path.read_bytes()
+        return project
 
     getattr(trainer, operation).side_effect = run
     factory = Mock()
     factory.from_config.return_value = trainer
-    monkeypatch.setattr(smartrodent, trainer_name, factory)
-    if uses_cli:
-        monkeypatch.setattr(sys, "argv", [module_name, str(config_path)])
+    monkeypatch.setattr(smartrodent, "UltralyticsTrainer", factory)
+    monkeypatch.setattr(sys, "argv", [module_name, str(config_path)])
     # Other tests import the script as a regular module; runpy warns when re-running
     # an already-imported module as __main__, so drop it for this test only.
     monkeypatch.delitem(sys.modules, module_name, raising=False)
     runpy.run_module(module_name, run_name="__main__")
+
+    factory.from_config.assert_called_once_with(config_path)
     getattr(trainer, operation).assert_called_once()
-    trainer.export.assert_called_once()
+    assert trainer.export.call_count == (1 if operation == "train" else 0)
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ

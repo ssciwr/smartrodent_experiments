@@ -106,12 +106,39 @@ stages:
     outs:
       - datasets/stage8_yolo_classifier
 
+  # The config copy written into each output directory is part of the output.
   train_yolo_detector:
-    cmd: uv run python scripts/train_yolo_detector.py configs/train_yolo_detector_config.yaml
+    cmd: uv run python scripts/train_yolo.py configs/train_yolo_detector_config.yaml
     deps:
-      - scripts/train_yolo_detector.py
+      - scripts/train_yolo.py
       - src/smartrodent/yolo_training.py
+      - src/smartrodent/config_loading.py
+      - src/smartrodent/training_validation.py
       - configs/train_yolo_detector_config.yaml
-      - datasets/stage8_yolo_detector
+      - datasets/stage8_yolo_detector_srilanka
     outs:
       - projects/smartrodent_experiments/training/yolo_detect
+
+  train_yolo_classifier:
+    cmd: uv run python scripts/train_yolo.py configs/train_yolo_classifier_config.yaml
+    deps:
+      - scripts/train_yolo.py
+      - src/smartrodent/yolo_training.py
+      - src/smartrodent/config_loading.py
+      - src/smartrodent/training_validation.py
+      - configs/train_yolo_classifier_config.yaml
+      - datasets/stage8_yolo_classifier_srilanka
+    outs:
+      - projects/smartrodent_experiments/training/yolo_classify
+
+  tune_yolo_classifier:
+    cmd: uv run python scripts/tune_yolo.py configs/train_yolo_classifier_config.yaml
+    deps:
+      - scripts/tune_yolo.py
+      - src/smartrodent/yolo_training.py
+      - src/smartrodent/config_loading.py
+      - src/smartrodent/training_validation.py
+      - configs/train_yolo_classifier_config.yaml
+      - datasets/stage8_yolo_classifier_srilanka
+    outs:
+      - projects/smartrodent_experiments/tuning/yolo_classify

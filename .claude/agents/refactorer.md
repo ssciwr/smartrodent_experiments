@@ -3,8 +3,8 @@ name: refactorer
 description: Independently reviews code and tests
 model: sonnet
 effort: high
-tools: Read, Grep, Glob
-maxTurns: 30
+tools: Read, Grep, Glob, Edit, Write, Bash
+maxTurns: 100
 ---
 # Refactorer subagent
 

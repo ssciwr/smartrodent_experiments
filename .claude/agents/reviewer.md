@@ -4,8 +4,10 @@ description: Independently reviews code and tests
 model: sonnet
 effort: high
 tools: Read, Grep, Glob
-maxTurns: 30
+maxTurns: 100
 ---
+
+# Reviewer subagent
 
 Review changes against the approved specification.
 

@@ -3,7 +3,7 @@
 Python tools for acquiring, reviewing, preparing, and learning from wildlife
 images, with a focus on rodents, snakes, birds, and other small animals. The
 repository contains an iNaturalist/LILA data workflow, SpeciesNet-assisted YOLO
-dataset creation, an Ultralytics detector training wrapper, and independent PyTorch
+dataset creation, an Ultralytics detector and classifier trainer, and independent PyTorch
 supervised-contrastive (SupCon) and cross-entropy (CE) training workflows. The
 SupCon and CE stages run either once or as Optuna hyperparameter studies; a grid
 is a study over categorical choices.
@@ -114,7 +114,7 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`config_loading.py`](src/smartrodent/config_loading.py) | YAML loading with the study tags (`load_yaml`, `parse_yaml`) and plain section lookup (`load_section`). |
 | [`components.py`](src/smartrodent/components.py) | `ComponentSpec`: a class or function chosen by name (or `module:attr`) plus its parameters, e.g. Optuna samplers or dataset creators. |
 | [`training_validation.py`](src/smartrodent/training_validation.py) | Shared configuration schemas, parsing, serialization, and output/input path protections. |
-| [`yolo_training.py`](src/smartrodent/yolo_training.py) | `YoloDetectionTrainer`: wrapper around Ultralytics detector train/tune/export. |
+| [`yolo_training.py`](src/smartrodent/yolo_training.py) | `UltralyticsTrainer` (`task: detect \| classify`): one wrapper around Ultralytics train/tune/export, with `UltralyticsSettings`, per-task strategies (`DetectTask`, `ClassifyTask`) and a `PerClassMetricsRecorder` that writes `per_class_metrics.csv`. |
 | [`supcon_model.py`](src/smartrodent/supcon_model.py), [`supcon_training.py`](src/smartrodent/supcon_training.py) | `YoloSupConModel`, `TrainingConfiguration`, `SupConExperiment`. |
 | [`classifier_model.py`](src/smartrodent/classifier_model.py), [`classifier_training.py`](src/smartrodent/classifier_training.py) | `YoloClassifierBuilder`, `ClassifierConfiguration`, `ClassifierExperiment`: explicit encoder/head initialization and native Ultralytics training with configurable layer freezing. |
 | [`search_space.py`](src/smartrodent/search_space.py) | `SearchSpace`: named Optuna distributions declared by `!suggest-float`, `!suggest-int`, and `!suggest-categorical` tags, including `!coupled` values that follow a categorical choice; `reject_search_tags()` for single-run documents. |
@@ -160,7 +160,8 @@ flowchart LR
         s_split[split_dataset.py]
         s_sample[sample_training_dataset.py]
         s_yolo[create_yolo_dataset.py]
-        s_det[train_yolo_detector.py]
+        s_yolotrain[train_yolo.py]
+        s_yolotune[tune_yolo.py]
         s_supcon[train_supcon.py]
         s_clf[train_classifier.py]
         s_two[train_two_stage.py]
@@ -188,7 +189,8 @@ flowchart LR
     s_split --> dataset_splitting
     s_sample --> dataset_splitting
     s_yolo --> yolo_dataset_creation
-    s_det -->|via package root| yolo_training
+    s_yolotrain -->|via package root| yolo_training
+    s_yolotune -->|via package root| yolo_training
     s_supcon --> supcon_training
     s_supcon --> training_studies
     s_clf --> classifier_training
@@ -279,7 +281,7 @@ flowchart TB
     end
 
     subgraph standalone["Standalone"]
-        training["training (Ultralytics detector wrapper)"]
+        training["training (Ultralytics trainer)"]
         eval["eval (representation evaluation)"]
     end
 
@@ -656,11 +658,11 @@ classDiagram
     TwoStageResult o-- ExperimentResult
 ```
 
-#### Detector wrapper and representation evaluation
+#### Ultralytics trainer and representation evaluation
 
 These classes stand apart from the experiment framework above.
-`YoloDetectionTrainer` wraps Ultralytics detector training, tuning, and
-export. The `eval` classes extract features from a fixed image subset and
+`UltralyticsTrainer` wraps Ultralytics detector or classifier training, tuning,
+and export. The `eval` classes extract features from a fixed image subset and
 compare them with t-SNE (see
 [`notebooks/`](notebooks/)).
 
@@ -668,12 +670,29 @@ compare them with t-SNE (see
 classDiagram
     direction LR
 
-    class YoloDetectionTrainer {
+    class UltralyticsTrainer {
         +from_config(config_path)$
-        +train()
-        +tune()
-        +export()
-        +dataframe()
+        +train() DataFrame
+        +tune() Path
+        +export() str
+    }
+    class UltralyticsSettings {
+        <<dataclass>>
+        +task
+        +train_kwargs
+        +tune_kwargs
+        +export_kwargs
+    }
+    class UltralyticsTask {
+        <<protocol>>
+        +data_argument(dataset)
+        +epoch_metrics(trainer)
+    }
+    class DetectTask
+    class ClassifyTask
+    class PerClassMetricsRecorder {
+        +__call__(trainer)
+        +frame()
     }
     class MlflowTrackingConfiguration {
         <<dataclass>>
@@ -698,7 +717,12 @@ classDiagram
         +plot(...)
     }
 
-    YoloDetectionTrainer *-- MlflowTrackingConfiguration
+    UltralyticsTrainer *-- UltralyticsSettings
+    UltralyticsTrainer o-- UltralyticsTask
+    UltralyticsTrainer ..> PerClassMetricsRecorder : registers
+    UltralyticsSettings o-- MlflowTrackingConfiguration
+    UltralyticsTask <|.. DetectTask
+    UltralyticsTask <|.. ClassifyTask
     Dataset <|-- EvaluationImages
     FeatureExtractor ..> EvaluationImages : reads
     FeatureExtractor ..> EvaluationFeatures : produces
@@ -777,7 +801,8 @@ These commands initialize models and start actual training. They do not expose
 | `python scripts/train_supcon.py configs/train_supcon_config.yaml` | One fresh standalone SupCon run, or an Optuna study; prints each final `last.pt` path and, for a study, the selected `best.pt`. |
 | `python scripts/train_classifier.py configs/train_classifier_config.yaml` | One fresh standalone CE classifier run, or an Optuna study; prints final checkpoints and, for a study, the selected `best.pt`. |
 | `python scripts/train_two_stage.py configs/train_two_stage_config.yaml` | SupCon run or study, encoder selection, then CE run or study; prints final classifier checkpoints and the selected classifier's `best.pt`. |
-| `python scripts/train_yolo_detector.py configs/train_yolo_detector_config.yaml` | Ultralytics detector training followed by the configured export; prints the export location. |
+| `python scripts/train_yolo.py configs/train_yolo_detector_config.yaml` (or `train_yolo_classifier_config.yaml`) | Ultralytics training of the configured `task`, then the configured export; prints the export location. |
+| `python scripts/tune_yolo.py configs/train_yolo_classifier_config.yaml` | Ultralytics `YOLO.tune` with the config's `tune_kwargs`; prints the tuning project directory. Never exports: the best weights and `best_hyperparameters.yaml` stay in the tuner's `<name or tune>[N]/` subdirectory of it (numbered on reruns). |
 
 `train_supcon.py` and `train_classifier.py` run an Optuna study instead of the
 single configured run when the configuration has a top-level `tuning` section;
@@ -785,9 +810,9 @@ without it, search tags are rejected. In
 `train_two_stage.py`, the root `tuning` section chooses the stages that run as
 studies. See [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna).
 
-The detector script is separate from the modern SupCon/CE experiment
-implementation. It currently sets `CUDA_VISIBLE_DEVICES=0` in its process;
-keep that GPU masking in mind when selecting native Ultralytics devices.
+The two Ultralytics scripts are separate from the modern SupCon/CE experiment
+implementation. Each copies its config into the training or tuning project
+directory before it runs; the device comes from `device` in the config.
 
 ## Configuration guide
 
@@ -798,9 +823,10 @@ choices, types, and ranges:
 - [`train_classifier_config.yaml`](configs/train_classifier_config.yaml): standalone CE, as a grid study over head settings.
 - [`train_two_stage_config.yaml`](configs/train_two_stage_config.yaml): unified two-stage experiment.
 
-These are different schemas from the detector's
-[`train_yolo_detector_config.yaml`](configs/train_yolo_detector_config.yaml),
-which uses `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
+These are different schemas from the standalone Ultralytics configs
+[`train_yolo_detector_config.yaml`](configs/train_yolo_detector_config.yaml) and
+[`train_yolo_classifier_config.yaml`](configs/train_yolo_classifier_config.yaml),
+which use `task`, `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
 
 ### Configuration families
 
@@ -815,7 +841,7 @@ which uses `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
 | Modern standalone training | Top-level data/output, transforms, validation, tracking, and model/initialization settings; SupCon uses AdamW options, CE uses native `train_kwargs`. |
 | Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, optional shared `mlflow`, and optional per-stage `tuning`. |
 | Optuna studies | A standalone SupCon or CE configuration with `!suggest-*` tags plus a top-level `tuning` section; see [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna). |
-| Ultralytics detector wrapper | Dataset/model, trainer options, native train/tune/export kwargs, and optional wrapper-specific MLflow settings. |
+| Ultralytics trainer | `task` (`detect`/`classify`), `model`, `dataset`, native `train_kwargs`/`export_kwargs`, optional `tune_kwargs` (`iterations`, `space`, real overrides), and optional wrapper-specific `mlflow` settings. |
 | Model cards | [`model_card_template.yaml`](configs/model_card_template.yaml): model, classes, validation, provenance, and editable narrative. |
 
 ### Search tags and coupled values
@@ -1118,15 +1144,34 @@ S*C classifiers. Stage failures propagate rather than being skipped. Two-stage
 selection uses existing validation data, never a test split. See
 [Studies in the two-stage pipeline](#studies-in-the-two-stage-pipeline).
 
-### Ultralytics detector wrapper
+### Ultralytics trainer
 
-The `train_yolo_detector.py` command delegates training to Ultralytics through
-`smartrodent.yolo_training`. Its config contains native
-`train_kwargs`, `tune_kwargs` (including tuner `space`/`iterations`), and
-`export_kwargs` (for example `format: onnx`). Outputs follow native
-`project`/`name` settings, not the modern experiment directory convention.
-The wrapper uses a different MLflow schema and does not implement the modern
-classifier champion-comparison workflow.
+`train_yolo.py` and `tune_yolo.py` delegate to Ultralytics through
+`smartrodent.yolo_training`. One config describes one setup:
+
+- `task: detect | classify` selects the dataset layout (`<dataset>/data.yaml` or
+  `<dataset>/train`) and the per-class metrics.
+- `train_kwargs` and `export_kwargs` are native Ultralytics arguments, passed
+  under their own names. `project` and `optimizer` are required in
+  `train_kwargs`, `format` in `export_kwargs`; `opset` is rejected, so
+  Ultralytics exports with its own best ONNX opset. `data`, `model` and `task`
+  are top-level settings and must not appear in the kwargs.
+- `tune_kwargs` hold `iterations`, `space` (`name: [low, high]` or
+  `[low, high, gain]`) and only the arguments that differ from `train_kwargs`;
+  repeating a train value is an error. A `project` override gives the tuning
+  its own directory.
+- Argument names and types are validated at load time with Ultralytics' own
+  checks, so a typo fails before any training starts.
+
+Outputs follow native `project`/`name` settings, not the modern experiment
+directory convention. A relative `project` is resolved against the working
+directory (the repo root under DVC), not Ultralytics' own `runs` directory, so
+it matches the DVC `outs`. The tuner writes into `<project>/<name or tune>`,
+numbered (`<name>2`, ...) when that exists. Training also writes `per_class_metrics.csv`
+(precision, recall, F1 and support per class and epoch, plus `macro_f1`) into the
+run directory; classes without validation samples or predictions are NaN, not 0.
+The trainer uses a different MLflow schema and does not implement the modern
+classifier champion-comparison workflow. An instance trains or tunes once.
 
 ## Hyperparameter studies with Optuna
 
@@ -1523,8 +1568,11 @@ download_inaturalist
   -> filter_animal -> filter_flying_bird -> filter_snake
   -> materialize_filtered_data -> reconcile_filtered_data
   -> split_dataset -> sample_training_dataset
-       -> create_yolo_detector_dataset -> train_yolo_detector
+       -> create_yolo_detector_dataset
        -> create_yolo_classifier_dataset
+
+train_yolo_detector, train_yolo_classifier, tune_yolo_classifier
+  (read the stage-8 `_srilanka` dataset roots named in their configs)
 
 download_lila  (independent)
 ```
@@ -1681,9 +1729,9 @@ historical comparison or study-wide deferred promotion. Use separate registry
 names for encoders and final CE classifiers. Two-stage orchestration disables
 SupCon registration and applies the CE policy to classifier candidates only.
 
-### Ultralytics wrapper tracking
+### Ultralytics trainer tracking
 
-The `train_yolo_detector.py` wrapper uses this distinct schema:
+The `train_yolo.py` and `tune_yolo.py` scripts use this distinct schema:
 
 ```yaml
 mlflow:
@@ -1692,8 +1740,9 @@ mlflow:
   tune_experiment_name: yolo-tuning
 ```
 
-The wrapper selects the operation's experiment, sets MLflow process settings,
-and enables Ultralytics' MLflow integration. Its native callbacks/logging and
+The trainer selects the operation's experiment, sets MLflow process settings,
+and enables Ultralytics' MLflow integration; without an `mlflow` section it
+switches that integration off. Its native callbacks/logging and
 output/export behavior are separate from the modern model-card/champion
 workflow; the modern registry fields do not belong in this mapping.
 
@@ -1733,7 +1782,7 @@ weights and use substantial GPU resources; enable them intentionally.
 | Unknown YAML tag | Only the training CLIs/library loaders accept the study tags (`!suggest-*`, `!coupled`); other scripts and tags are plain YAML. |
 | Dataset class is missing/empty | Verify exact species-directory names, selected population, split paths, and indexed suffixes. Modern datasets default to `.jpg` and `.png`. |
 | Head transfer or checkpoint loading fails | Match source format, donor dimensions, and exact labels/IDs. Starting ImageNet weights are not automatically valid species-head donors. |
-| CUDA/backend failure | Check installed hardware/runtime and modern `device` settings; `train_yolo_detector.py` masks visible GPUs to device 0. |
+| CUDA/backend failure | Check installed hardware/runtime and modern `device` settings; the Ultralytics scripts take the device from `device` in the config and do not mask GPUs. |
 | Search tag rejected with "add a tuning section" | A configuration without `tuning` (two-stage: without a `tuning` entry for that stage) is a single run. Add the section or replace the tags with values. |
 | Study refuses to start or resume | The `study_name` already exists without `load_if_exists: true`, or its stored search space, objective, direction, or encoder checksums differ. Use a new `study_name` and `output_directory`. |
 | Study ends with no completed trial | Inspect each trial's `state` and `error` in `study.yaml`; pruned and failed trials are never selected. |
