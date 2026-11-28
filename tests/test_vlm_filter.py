@@ -1,183 +1,267 @@
+"""Behavioral tests for the VLM image filter and its Ollama and vLLM backends."""
+
+import base64
 import json
+import logging
 import sys
 import tempfile
 import types
+from copy import deepcopy
 from pathlib import Path
 
 import pandas as pd
 import pytest
 import yaml
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
+from vlm_test_support import ANSWER_SCHEMA, ScriptedBackend, answer
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from smartrodent.vlm_filter import OllamaBackend, VllmBackend, VLMFilter
 
-from smartrodent.filter import FilterOllama, FilterVLLM, VLMFilter
-
-
-@pytest.fixture(autouse=True)
-def fake_ollama_client(monkeypatch):
-    """Keep tests independent of a locally running Ollama daemon."""
-
-    class FakeOllamaClient:
-        def __init__(self, host=None):
-            self.host = host
-            self.pull_calls = []
-            self.generate_calls = []
-
-        def pull(self, model, *, stream):
-            self.pull_calls.append({"model": model, "stream": stream})
-            return {"status": "success"}
-
-        def generate(self, **kwargs):
-            self.generate_calls.append(kwargs)
-            return types.SimpleNamespace(
-                response=json.dumps({"label": "kept", "visible_animal": True})
-            )
-
-    monkeypatch.setattr("smartrodent.filter.ollama.Client", FakeOllamaClient)
+LABEL_COLUMNS = ["kept_animal", "rejected_animal"]
+ANSWER_COLUMNS = ["vlm_animal_needs_human_review", "vlm_animal_evidence"]
+OUTPUT_COLUMNS = LABEL_COLUMNS + ANSWER_COLUMNS
 
 
-def make_ollama_filter(tmp_path, **kwargs):
+def make_filter(backend=None, **kwargs):
     options = {
-        "prompt": "prompt",
+        "prompt": "Answer with this schema: {answer_schema}",
         "system_prompt": "system",
-        "labels": ["kept", "rejected"],
+        "answer_schema": ANSWER_SCHEMA,
         "taskname": "animal",
-        "photo_id_column": "photo.id",
-        "image_path_column": "image_path",
-        "model": "llava",
+        "backend": backend if backend is not None else ScriptedBackend(),
     }
     options.update(kwargs)
-    return FilterOllama(**options)
-
-
-def make_vllm_filter(tmp_path, *, batch_size=2, **kwargs):
-    options = {
-        "prompt": "prompt",
-        "system_prompt": "system",
-        "labels": ["kept", "rejected"],
-        "taskname": "animal",
-        "photo_id_column": "photo.id",
-        "image_path_column": "image_path",
-        "model_name": "/models/qwen",
-        "batch_size": batch_size,
-    }
-    options.update(kwargs)
-    return FilterVLLM(**options)
+    return VLMFilter(**options)
 
 
 def make_records(tmp_path, rows):
     """Create records whose paths point to real temporary image files."""
     records = []
-    for photo_id, label, filename in rows:
+    for photo_id, filename in rows:
         path = tmp_path / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"image-bytes")
-        records.append(
-            {"photo.id": photo_id, "image_path": str(path), "source": filename}
-        )
+        records.append({"photo.id": photo_id, "image_path": str(path)})
     return pd.DataFrame(records)
 
 
-def test_parse_response_accepts_only_configured_labels(tmp_path):
-    vlm_filter = make_ollama_filter(tmp_path, labels=["candidate", "discard"])
-
-    parsed = vlm_filter.parse_response(json.dumps({"label": "candidate"}))
-    unknown = vlm_filter.parse_response(json.dumps({"label": "kept"}))
-
-    assert parsed["label"] == "candidate"
-    assert parsed["parse_error"] is False
-    assert unknown["label"] is None
-    assert unknown["parse_error"] is True
+def labels_by_name(**labels):
+    """Respond with the label configured for each image's file stem."""
+    return lambda path: answer(labels[path.stem])
 
 
-@pytest.mark.parametrize("raw", ["not json", "{", "[]", "null", None])
-def test_parse_response_marks_invalid_json_as_failure(raw, tmp_path):
-    parsed = make_ollama_filter(tmp_path).parse_response(raw)
+# --- configuration ---------------------------------------------------------------
 
-    assert parsed["label"] is None
-    assert parsed["parse_error"] is True
-    assert parsed["raw_response"] == raw
+
+def test_labels_and_output_columns_come_from_the_answer_schema():
+    vlm_filter = make_filter()
+
+    assert vlm_filter.labels == ("kept", "rejected")
+    assert vlm_filter.output_columns == OUTPUT_COLUMNS
+
+
+def test_backend_receives_the_prompt_with_the_schema_filled_in(tmp_path):
+    backend = ScriptedBackend()
+    records = make_records(tmp_path, [(1, "a.jpg")])
+
+    make_filter(backend).filter_data({"mouse": records})
+
+    (request,) = backend.requests
+    prefix = "Answer with this schema: "
+    assert request["prompt"].startswith(prefix)
+    assert json.loads(request["prompt"].removeprefix(prefix)) == ANSWER_SCHEMA
+    assert request["system_prompt"] == "system"
+    assert request["schema"] == ANSWER_SCHEMA
+
+
+def test_prompt_without_schema_placeholder_is_rejected():
+    """The schema is written once, in the configuration, so the prompt must cite it."""
+    with pytest.raises(ValueError, match="answer_schema"):
+        make_filter(prompt="Answer as JSON with a label.")
+
+
+def _schema_with(change):
+    schema = deepcopy(ANSWER_SCHEMA)
+    change(schema)
+    return schema
 
 
 @pytest.mark.parametrize(
-    "labels",
-    [[], "kept", [" "], [1, "kept"], ["same", "same"]],
-)
-def test_vlm_filter_rejects_invalid_labels(tmp_path, labels):
-    with pytest.raises(ValueError, match="labels"):
-        make_ollama_filter(tmp_path, labels=labels)
-
-
-@pytest.mark.parametrize(
-    "configuration",
+    "schema",
     [
-        {"taskname": ""},
-        {"photo_id_column": ""},
-        {"image_path_column": ""},
+        _schema_with(lambda s: s["properties"].pop("label")),
+        _schema_with(lambda s: s["properties"]["label"].pop("enum")),
+        _schema_with(lambda s: s["properties"]["label"].update(enum=[])),
+        _schema_with(lambda s: s["properties"]["label"].update(enum=["kept", "kept"])),
+        _schema_with(lambda s: s["required"].remove("label")),
+        # The label column kept_<task> equals the answer column vlm_<task>_<field>.
+        _schema_with(
+            lambda s: s["properties"].update(
+                {"label": {"type": "string", "enum": ["vlm_animal_x"]}, "x_animal": {}}
+            )
+        ),
+    ],
+    ids=[
+        "no_label",
+        "no_enum",
+        "empty_enum",
+        "duplicate_enum",
+        "optional",
+        "collision",
     ],
 )
-def test_vlm_filter_rejects_invalid_column_and_task_names(tmp_path, configuration):
+def test_invalid_answer_schema_is_rejected(schema):
     with pytest.raises(ValueError):
-        make_ollama_filter(tmp_path, **configuration)
+        make_filter(answer_schema=schema)
 
 
-def test_filter_data_preserves_frames_and_adds_configured_label_columns(
-    monkeypatch, tmp_path
+def test_from_config_builds_the_configured_backend(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "paths": {},
+                "filter": {
+                    "prompt": "{answer_schema}",
+                    "system_prompt": "system",
+                    "answer_schema": ANSWER_SCHEMA,
+                    "taskname": "custom",
+                    "photo_id_column": "photo_key",
+                    "image_path_column": "path",
+                    "backend": {"name": "vlm_test_support:ScriptedBackend"},
+                },
+            }
+        )
+    )
+
+    vlm_filter = VLMFilter.from_config(config_path)
+
+    assert isinstance(vlm_filter.backend, ScriptedBackend)
+    assert vlm_filter.photo_id_column == "photo_key"
+    assert vlm_filter.image_path_column == "path"
+    assert vlm_filter.output_columns[:2] == ["kept_custom", "rejected_custom"]
+
+
+@pytest.mark.parametrize(
+    ("backend", "backend_type"),
+    [
+        (
+            {
+                "name": "OllamaBackend",
+                "parameters": {"model": "llava", "pull_model": False},
+            },
+            OllamaBackend,
+        ),
+        ({"name": "VllmBackend", "parameters": {"model": "org/model"}}, VllmBackend),
+    ],
+)
+def test_from_config_names_the_bundled_backends(
+    tmp_path, ollama_client, backend, backend_type
 ):
-    records = make_records(
-        tmp_path,
-        [(101, None, "kept.jpg"), (102, None, "rejected.jpg")],
-    ).drop(columns="source")
+    """With pulling off, constructing a backend contacts no server or engine."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "filter": {
+                    "prompt": "{answer_schema}",
+                    "system_prompt": "system",
+                    "answer_schema": ANSWER_SCHEMA,
+                    "taskname": "animal",
+                    "backend": backend,
+                }
+            }
+        )
+    )
+
+    assert isinstance(VLMFilter.from_config(config_path).backend, backend_type)
+    assert all(
+        client.pull_calls == client.generate_calls == [] for client in ollama_client
+    )
+
+
+def test_from_config_rejects_unknown_backend(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "filter": {
+                    "prompt": "{answer_schema}",
+                    "system_prompt": "system",
+                    "answer_schema": ANSWER_SCHEMA,
+                    "taskname": "animal",
+                    "backend": {"name": "UnknownBackend"},
+                }
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="UnknownBackend"):
+        VLMFilter.from_config(config_path)
+
+
+# --- filtering ---------------------------------------------------------------------
+
+
+def test_filter_data_preserves_frames_and_saves_every_answer(tmp_path):
+    """Labels become booleans; the other answers become columns of their own (D13)."""
+    records = make_records(tmp_path, [(101, "kept.jpg"), (102, "rejected.jpg")])
     records.index = [7, 11]
     original = records.copy(deep=True)
-    vlm_filter = make_ollama_filter(tmp_path)
-    outcomes = {
-        str(path): label
-        for path, label in zip(records.image_path, ["kept", "rejected"])
-    }
-    monkeypatch.setattr(
-        vlm_filter,
-        "classify",
-        lambda path: {"label": outcomes[str(path)], "parse_error": False},
+    backend = ScriptedBackend(
+        lambda path: (
+            answer("kept", evidence=["whiskers", "tail"])
+            if path.stem == "kept"
+            else answer("rejected", review=True)
+        )
     )
 
-    result = vlm_filter.filter_data({"mouse": records})
+    result = make_filter(backend).filter_data({"mouse": records})["mouse"]
 
-    assert list(result) == ["mouse"]
     pd.testing.assert_frame_equal(records, original)
-    pd.testing.assert_index_equal(result["mouse"].index, original.index)
-    assert result["mouse"]["kept_animal"].tolist() == [True, False]
-    assert result["mouse"]["rejected_animal"].tolist() == [False, True]
-    pd.testing.assert_frame_equal(
-        result["mouse"].drop(columns=["kept_animal", "rejected_animal"]), original
-    )
+    pd.testing.assert_index_equal(result.index, original.index)
+    assert result["kept_animal"].tolist() == [True, False]
+    assert result["rejected_animal"].tolist() == [False, True]
+    assert result["vlm_animal_needs_human_review"].tolist() == [False, True]
+    # Lists are stored as JSON text so they survive the CSV round trip.
+    assert json.loads(result.loc[7, "vlm_animal_evidence"]) == ["whiskers", "tail"]
+    assert pd.isna(result.loc[11, "vlm_animal_evidence"])
+    pd.testing.assert_frame_equal(result.drop(columns=OUTPUT_COLUMNS), original)
 
 
-def test_duplicate_photo_is_classified_once_and_result_is_repeated(
-    monkeypatch, tmp_path
-):
+@pytest.mark.parametrize(
+    "response",
+    [
+        "not json",
+        "[]",
+        None,
+        answer("unexpected"),
+        {"label": "kept"},  # a required answer is missing
+    ],
+    ids=["invalid_json", "not_an_object", "no_response", "unknown_label", "incomplete"],
+)
+def test_unusable_answer_sets_every_output_column_to_missing(tmp_path, response):
+    records = make_records(tmp_path, [(55, "image.jpg")])
+    backend = ScriptedBackend(lambda path: response)
+
+    result = make_filter(backend).filter_data({"mouse": records})["mouse"]
+
+    assert result[OUTPUT_COLUMNS].isna().all(axis=None)
+
+
+def test_duplicate_photo_is_classified_once_and_result_is_repeated(tmp_path):
     image_path = tmp_path / "same.jpg"
     image_path.write_bytes(b"image-bytes")
     records = pd.DataFrame(
-        {
-            "photo.id": [55, 55, 56],
-            "image_path": [str(image_path), str(image_path), str(image_path)],
-        },
+        {"photo.id": [55, 55, 56], "image_path": [str(image_path)] * 3},
         index=[2, 4, 8],
     )
-    vlm_filter = make_ollama_filter(tmp_path)
-    calls = []
+    backend = ScriptedBackend()
 
-    def classify(path):
-        calls.append(Path(path))
-        return {"label": "kept", "parse_error": False}
+    result = make_filter(backend).filter_data({"mouse": records})["mouse"]
 
-    monkeypatch.setattr(vlm_filter, "classify", classify)
-
-    result = vlm_filter.filter_data({"mouse": records})["mouse"]
-
-    assert len(calls) == 2
+    assert len(backend.image_paths) == 2
     assert result["kept_animal"].tolist() == [True, True, True]
     assert result["rejected_animal"].tolist() == [False, False, False]
     assert result.index.tolist() == [2, 4, 8]
@@ -196,75 +280,28 @@ def test_generated_within_species_duplicates_have_one_consistent_result(photo_id
                 "image_path": [str(paths[photo_id]) for photo_id in photo_ids],
             }
         )
-        vlm_filter = make_ollama_filter(tmp_path)
-        calls = []
+        backend = ScriptedBackend(
+            lambda path: answer("kept" if int(path.stem) % 2 else "rejected")
+        )
 
-        def classify(path):
-            calls.append(Path(path))
-            label = "kept" if int(Path(path).stem) % 2 else "rejected"
-            return {"label": label, "parse_error": False}
+        result = make_filter(backend).filter_data({"mouse": records})["mouse"]
 
-        with pytest.MonkeyPatch.context() as monkeypatch:
-            monkeypatch.setattr(vlm_filter, "classify", classify)
-            result = vlm_filter.filter_data({"mouse": records})["mouse"]
-
-        assert len(calls) == len(set(photo_ids))
+        assert len(backend.image_paths) == len(set(photo_ids))
         for photo_id, row in zip(photo_ids, result.to_dict("records"), strict=True):
-            expected_label = "kept" if photo_id % 2 else "rejected"
-            assert row[f"{expected_label}_animal"] is True
-            other_label = "rejected" if expected_label == "kept" else "kept"
-            assert row[f"{other_label}_animal"] is False
+            assert row["kept_animal"] is bool(photo_id % 2)
+            assert row["rejected_animal"] is not bool(photo_id % 2)
 
 
-def test_same_photo_id_in_different_species_is_processed_independently(
-    monkeypatch, tmp_path
-):
-    mouse = make_records(tmp_path, [(55, None, "mouse.jpg")])
-    rat = make_records(tmp_path, [(55, None, "rat.jpg")])
-    vlm_filter = make_ollama_filter(tmp_path)
-    calls = []
-    outcomes = {mouse.image_path.iloc[0]: "kept", rat.image_path.iloc[0]: "rejected"}
+def test_same_photo_id_in_different_species_is_processed_independently(tmp_path):
+    mouse = make_records(tmp_path, [(55, "mouse.jpg")])
+    rat = make_records(tmp_path, [(55, "rat.jpg")])
+    backend = ScriptedBackend(labels_by_name(mouse="kept", rat="rejected"))
 
-    def classify(path):
-        calls.append(Path(path))
-        return {"label": outcomes[str(path)], "parse_error": False}
+    result = make_filter(backend).filter_data({"mouse": mouse, "rat": rat})
 
-    monkeypatch.setattr(vlm_filter, "classify", classify)
-
-    result = vlm_filter.filter_data({"mouse": mouse, "rat": rat})
-
-    assert len(calls) == 2
+    assert len(backend.image_paths) == 2
     assert result["mouse"]["kept_animal"].tolist() == [True]
     assert result["rat"]["rejected_animal"].tolist() == [True]
-
-
-def test_duplicate_photo_id_with_different_paths_fails_before_inference(
-    monkeypatch, tmp_path
-):
-    records = make_records(
-        tmp_path,
-        [(55, None, "one.jpg"), (55, None, "two.jpg")],
-    )
-    vlm_filter = make_ollama_filter(tmp_path)
-    calls = []
-    monkeypatch.setattr(vlm_filter, "classify", lambda path: calls.append(path))
-
-    with pytest.raises(ValueError, match="photo.id.*image_path"):
-        vlm_filter.filter_data({"mouse": records})
-
-    assert calls == []
-
-
-def test_null_photo_id_fails_explicitly(monkeypatch, tmp_path):
-    records = make_records(tmp_path, [(None, None, "missing-id.jpg")])
-    vlm_filter = make_ollama_filter(tmp_path)
-    calls = []
-    monkeypatch.setattr(vlm_filter, "classify", lambda path: calls.append(path))
-
-    with pytest.raises(ValueError, match="photo.id"):
-        vlm_filter.filter_data({"mouse": records})
-
-    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -274,465 +311,364 @@ def test_null_photo_id_fails_explicitly(monkeypatch, tmp_path):
         ({"mouse": []}, TypeError, "DataFrame"),
         ({"mouse": pd.DataFrame({"photo.id": [1]})}, ValueError, "image_path"),
         ({"mouse": pd.DataFrame({"image_path": ["x.jpg"]})}, ValueError, "photo.id"),
+        (
+            {"mouse": pd.DataFrame({"photo.id": [None], "image_path": ["x.jpg"]})},
+            ValueError,
+            "photo.id",
+        ),
+        (
+            {"mouse": pd.DataFrame({"photo.id": [55], "image_path": [None]})},
+            ValueError,
+            "image_path",
+        ),
+        (
+            {
+                "mouse": pd.DataFrame(
+                    {"photo.id": [55, 55], "image_path": ["one.jpg", "two.jpg"]}
+                )
+            },
+            ValueError,
+            "photo.id.*image_path",
+        ),
+    ],
+    ids=[
+        "not_a_dict",
+        "not_a_frame",
+        "no_path_column",
+        "no_id_column",
+        "null_id",
+        "null_path",
+        "duplicate_id_two_paths",
     ],
 )
-def test_filter_data_rejects_invalid_input_before_inference(
-    monkeypatch, tmp_path, records_by_species, error_type, message
-):
-    vlm_filter = make_ollama_filter(tmp_path)
-    calls = []
-    monkeypatch.setattr(vlm_filter, "classify", lambda path: calls.append(path))
+def test_invalid_input_fails_before_inference(records_by_species, error_type, message):
+    backend = ScriptedBackend()
 
     with pytest.raises(error_type, match=message):
-        vlm_filter.filter_data(records_by_species)
+        make_filter(backend).filter_data(records_by_species)
 
-    assert calls == []
-
-
-def test_null_image_path_fails_before_inference(monkeypatch, tmp_path):
-    records = pd.DataFrame({"photo.id": [55], "image_path": [None]})
-    vlm_filter = make_ollama_filter(tmp_path)
-    calls = []
-    monkeypatch.setattr(vlm_filter, "classify", lambda path: calls.append(path))
-
-    with pytest.raises(ValueError, match="image_path"):
-        vlm_filter.filter_data({"mouse": records})
-
-    assert calls == []
+    assert backend.requests == []
 
 
-def test_empty_input_mapping_returns_empty_mapping(tmp_path):
-    assert make_ollama_filter(tmp_path).filter_data({}) == {}
-
-
-def test_unknown_classifier_label_sets_all_task_columns_to_nan(monkeypatch, tmp_path):
-    records = make_records(tmp_path, [(55, None, "unknown-label.jpg")])
-    vlm_filter = make_ollama_filter(tmp_path)
-    monkeypatch.setattr(
-        vlm_filter,
-        "classify",
-        lambda path: {"label": "unexpected", "parse_error": False},
-    )
-
-    result = vlm_filter.filter_data({"mouse": records})["mouse"]
-
-    assert pd.isna(result.loc[0, "kept_animal"])
-    assert pd.isna(result.loc[0, "rejected_animal"])
-
-
-def test_backend_result_count_mismatch_raises_and_closes_filter(monkeypatch, tmp_path):
-    records = make_records(tmp_path, [(55, None, "missing-result.jpg")])
-    vlm_filter = make_ollama_filter(tmp_path)
-    monkeypatch.setattr(vlm_filter, "_classify_paths", lambda paths: [])
-
-    with pytest.raises(RuntimeError, match="different number of results"):
-        vlm_filter.filter_data({"mouse": records})
-
-    assert vlm_filter.client.generate_calls[-1] == {
-        "model": "llava",
-        "keep_alive": 0,
-    }
-
-
-def test_inference_exception_propagates_and_closes_ollama(monkeypatch, tmp_path):
-    records = make_records(tmp_path, [(55, None, "inference-error.jpg")])
-    vlm_filter = make_ollama_filter(tmp_path)
-
-    def fail_inference(path):
-        raise RuntimeError("inference failed")
-
-    monkeypatch.setattr(vlm_filter, "classify", fail_inference)
-
-    with pytest.raises(RuntimeError, match="inference failed"):
-        vlm_filter.filter_data({"mouse": records})
-
-    assert vlm_filter.client.generate_calls[-1] == {
-        "model": "llava",
-        "keep_alive": 0,
-    }
-
-
-def test_inference_failure_sets_all_task_columns_to_nan(monkeypatch, tmp_path):
-    records = make_records(tmp_path, [(55, None, "bad-response.jpg")])
-    vlm_filter = make_ollama_filter(tmp_path)
-    monkeypatch.setattr(
-        vlm_filter,
-        "classify",
-        lambda path: {"label": None, "parse_error": True},
-    )
-
-    result = vlm_filter.filter_data({"mouse": records})["mouse"]
-
-    assert pd.isna(result.loc[0, "kept_animal"])
-    assert pd.isna(result.loc[0, "rejected_animal"])
-
-
-@pytest.mark.parametrize("existing_column", ["kept_animal", "rejected_animal"])
-def test_existing_task_columns_raise_before_inference(
-    monkeypatch, tmp_path, existing_column
-):
-    records = make_records(tmp_path, [(55, None, "existing.jpg")])
+@pytest.mark.parametrize("existing_column", ["kept_animal", "vlm_animal_evidence"])
+def test_existing_output_columns_raise_before_inference(tmp_path, existing_column):
+    records = make_records(tmp_path, [(55, "existing.jpg")])
     records[existing_column] = True
-    vlm_filter = make_ollama_filter(tmp_path)
-    calls = []
-    monkeypatch.setattr(vlm_filter, "classify", lambda path: calls.append(path))
+    backend = ScriptedBackend()
 
     with pytest.raises(ValueError, match=existing_column):
-        vlm_filter.filter_data({"mouse": records})
+        make_filter(backend).filter_data({"mouse": records})
 
-    assert calls == []
+    assert backend.requests == []
     assert records[existing_column].tolist() == [True]
 
 
-def test_empty_species_frame_is_preserved_with_task_columns(tmp_path):
-    records = pd.DataFrame(columns=["photo.id", "image_path"])
-    vlm_filter = make_ollama_filter(tmp_path)
+def test_empty_input_mapping_returns_empty_mapping():
+    assert make_filter().filter_data({}) == {}
 
-    result = vlm_filter.filter_data({"empty species": records})["empty species"]
+
+def test_empty_species_frame_keeps_every_output_column_without_inference():
+    backend = ScriptedBackend()
+    records = pd.DataFrame(columns=["photo.id", "image_path"])
+
+    result = make_filter(backend).filter_data({"empty": records})["empty"]
 
     assert result.empty
-    assert "kept_animal" in result.columns
-    assert "rejected_animal" in result.columns
+    assert list(result.columns) == ["photo.id", "image_path", *OUTPUT_COLUMNS]
+    assert backend.image_paths == []
 
 
-def test_vlm_filter_rejects_invalid_label_configuration(tmp_path):
-    with pytest.raises(ValueError, match="labels"):
-        FilterOllama(
-            prompt="prompt",
-            system_prompt="system",
-            labels=["kept", "kept"],
-            taskname="animal",
-            photo_id_column="photo.id",
-            image_path_column="image_path",
-            model="llava",
+def test_backend_is_released_after_filtering(tmp_path):
+    backend = ScriptedBackend()
+
+    make_filter(backend).filter_data({"mouse": make_records(tmp_path, [(55, "a.jpg")])})
+
+    assert backend.closed == 1
+
+
+def test_backend_result_count_mismatch_raises_and_releases_backend(tmp_path):
+    class MissingResults(ScriptedBackend):
+        def generate(self, image_paths, **prompts):
+            return []
+
+    backend = MissingResults()
+
+    with pytest.raises(RuntimeError, match="different number of results"):
+        make_filter(backend).filter_data(
+            {"mouse": make_records(tmp_path, [(55, "a.jpg")])}
         )
 
+    assert backend.closed == 1
 
-def test_ollama_classify_uses_persistent_client(tmp_path):
+
+def test_inference_exception_propagates_and_releases_backend(tmp_path):
+    def fail(path):
+        raise RuntimeError("inference failed")
+
+    backend = ScriptedBackend(fail)
+
+    with pytest.raises(RuntimeError, match="inference failed"):
+        make_filter(backend).filter_data(
+            {"mouse": make_records(tmp_path, [(55, "a.jpg")])}
+        )
+
+    assert backend.closed == 1
+
+
+# --- Ollama backend ------------------------------------------------------------------
+
+
+@pytest.fixture
+def ollama_client(monkeypatch):
+    """Keep tests independent of a locally running Ollama daemon."""
+
+    class FakeOllamaClient:
+        def __init__(self, host=None):
+            self.host = host
+            self.pull_calls = []
+            self.generate_calls = []
+            clients.append(self)
+
+        def pull(self, model, *, stream):
+            self.pull_calls.append({"model": model, "stream": stream})
+            return {"status": "success"}
+
+        def generate(self, **kwargs):
+            self.generate_calls.append(kwargs)
+            # Echo the image so tests can check the order of the responses.
+            return types.SimpleNamespace(response=kwargs.get("images", [""])[0])
+
+    clients = []
+    monkeypatch.setattr("smartrodent.vlm_filter.ollama.Client", FakeOllamaClient)
+    return clients
+
+
+def test_ollama_sends_each_image_with_the_schema_and_configured_options(
+    tmp_path, ollama_client
+):
     image_path = tmp_path / "image.jpg"
     image_path.write_bytes(b"abc")
-    vlm_filter = make_ollama_filter(tmp_path)
+    options = {"temperature": 0.1, "repeat_penalty": 1.1, "num_gpu": 0}
+    backend = OllamaBackend(model="llava", options=options)
 
-    parsed = vlm_filter.classify(image_path)
-
-    assert parsed["label"] == "kept"
-    assert vlm_filter.client.host is None
-    assert vlm_filter.client.pull_calls == [{"model": "llava", "stream": False}]
-    assert vlm_filter.client.generate_calls[0] == {
-        "model": "llava",
-        "system": "system",
-        "prompt": "prompt",
-        "images": ["YWJj"],
-        "format": "json",
-        "stream": False,
-        "think": False,
-        "options": {"temperature": 0},
-    }
-
-
-def test_ollama_classify_uses_configured_generation_options(tmp_path):
-    image_path = tmp_path / "image.jpg"
-    image_path.write_bytes(b"abc")
-    configured_options = {
-        "temperature": 0.1,
-        "repeat_penalty": 1.1,
-        "repeat_last_n": 64,
-        "num_predict": 512,
-        "num_gpu": 0,
-    }
-    vlm_filter = make_ollama_filter(tmp_path, options=configured_options)
-
-    vlm_filter.classify(image_path)
-
-    assert vlm_filter.client.generate_calls[0]["options"] == configured_options
-
-
-@pytest.mark.parametrize("options", [[], {"": 1}, {1: 1}])
-def test_ollama_rejects_invalid_generation_options(tmp_path, options):
-    with pytest.raises(ValueError, match="Ollama options"):
-        make_ollama_filter(tmp_path, options=options)
-
-
-def test_ollama_closes_after_filtering(monkeypatch, tmp_path):
-    records = make_records(tmp_path, [(55, None, "image.jpg")])
-    vlm_filter = make_ollama_filter(tmp_path)
-    monkeypatch.setattr(
-        vlm_filter, "classify", lambda path: {"label": "kept", "parse_error": False}
+    responses = backend.generate(
+        [image_path], system_prompt="system", prompt="prompt", schema=ANSWER_SCHEMA
     )
 
-    vlm_filter.filter_data({"mouse": records})
+    (client,) = ollama_client
+    assert responses == ["YWJj"]
+    assert client.pull_calls == [{"model": "llava", "stream": False}]
+    assert client.generate_calls == [
+        {
+            "model": "llava",
+            "system": "system",
+            "prompt": "prompt",
+            "images": ["YWJj"],
+            "format": ANSWER_SCHEMA,
+            "stream": False,
+            "think": False,
+            "options": options,
+        }
+    ]
 
-    assert vlm_filter.client.generate_calls[-1] == {
-        "model": "llava",
-        "keep_alive": 0,
+
+def test_ollama_parallel_workers_keep_the_input_order(tmp_path, ollama_client):
+    paths = []
+    for index in range(5):
+        path = tmp_path / f"{index}.jpg"
+        path.write_bytes(str(index).encode())
+        paths.append(path)
+    backend = OllamaBackend(model="llava", pull_model=False, num_workers=3)
+
+    responses = backend.generate(paths, system_prompt="", prompt="", schema={})
+
+    assert [base64.b64decode(response) for response in responses] == [
+        str(index).encode() for index in range(5)
+    ]
+    assert ollama_client[0].pull_calls == []
+
+
+def test_ollama_unload_failure_is_logged_and_retried_on_the_next_close(
+    ollama_client, caplog
+):
+    """A failed unload is logged rather than raised, and retried on the next close."""
+    backend = OllamaBackend(model="llava", pull_model=False)
+    client = ollama_client[0]
+
+    def unreachable(**request):
+        raise ConnectionError("server gone")
+
+    client.generate = unreachable
+    with caplog.at_level(logging.WARNING):
+        backend.close()
+    client.generate = lambda **request: client.generate_calls.append(request)
+    backend.close()
+
+    assert "Could not unload Ollama model llava" in caplog.text
+    assert client.generate_calls == [{"model": "llava", "keep_alive": 0}]
+
+
+def test_ollama_close_unloads_the_model_once(ollama_client):
+    backend = OllamaBackend(model="llava", pull_model=False)
+
+    backend.close()
+    backend.close()
+
+    assert ollama_client[0].generate_calls == [{"model": "llava", "keep_alive": 0}]
+
+
+# --- vLLM backend --------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_vllm(monkeypatch):
+    """Install a fake ``vllm`` package that records engine and sampling setup."""
+    seen = {
+        "engines": [],
+        "chats": [],
+        "sampling": [],
+        "shutdowns": 0,
+        "shutdown_error": None,
     }
-
-
-def test_vllm_schema_matches_prompt_and_uses_configured_labels(tmp_path):
-    vlm_filter = make_vllm_filter(tmp_path, labels=["candidate", "discard"])
-
-    schema = vlm_filter.response_json_schema
-    assert schema["properties"]["label"]["enum"] == ["candidate", "discard"]
-    assert schema["properties"] == {
-        "label": {"type": "string", "enum": ["candidate", "discard"]},
-        "visible_animal": {"type": "boolean"},
-        "evidence_kept": {"type": "array", "items": {"type": "string"}},
-        "evidence_rejected": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "image_quality": {
-            "type": "string",
-            "enum": ["clear", "poor", "unusable"],
-        },
-        "needs_human_review": {"type": "boolean"},
-    }
-    assert schema["required"] == list(schema["properties"])
-    assert schema["additionalProperties"] is False
-
-
-def test_vllm_classify_builds_engine_with_configured_schema(monkeypatch, tmp_path):
-    image_path = tmp_path / "image.png"
-    image_path.write_bytes(b"image-bytes")
-    seen = {"engine_inits": 0}
 
     class FakeStructuredOutputsParams:
         def __init__(self, **kwargs):
-            seen["schema"] = kwargs["json"]
+            self.kwargs = kwargs
 
     class FakeSamplingParams:
         def __init__(self, **kwargs):
-            seen["sampling_params_kwargs"] = kwargs
-            seen["sampling_params"] = self
-
-    class FakeOutput:
-        outputs = [types.SimpleNamespace(text=json.dumps({"label": "candidate"}))]
-
-    class FakeLLM:
-        def __init__(self, **kwargs):
-            seen["engine_inits"] += 1
-            seen["engine_kwargs"] = kwargs
-
-        def chat(self, conversations, *, sampling_params, use_tqdm):
-            seen["conversations"] = conversations
-            seen["used_sampling_params"] = sampling_params
-            seen["use_tqdm"] = use_tqdm
-            return [FakeOutput()]
-
-    fake_vllm = types.ModuleType("vllm")
-    fake_vllm.LLM = FakeLLM
-    fake_vllm.SamplingParams = FakeSamplingParams
-    fake_sampling_params = types.ModuleType("vllm.sampling_params")
-    fake_sampling_params.StructuredOutputsParams = FakeStructuredOutputsParams
-    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
-    monkeypatch.setitem(sys.modules, "vllm.sampling_params", fake_sampling_params)
-    vlm_filter = make_vllm_filter(
-        tmp_path,
-        labels=["candidate", "discard"],
-        gpu_memory_utilization=0.4,
-        max_model_len=2048,
-        max_new_tokens=17,
-    )
-
-    result = vlm_filter.classify(image_path)
-    repeated_result = vlm_filter.classify(image_path)
-
-    assert result["label"] == "candidate"
-    assert repeated_result["label"] == "candidate"
-    assert result["parse_error"] is False
-    assert seen["engine_inits"] == 1
-    assert seen["engine_kwargs"] == {
-        "model": "/models/qwen",
-        "limit_mm_per_prompt": {"image": 1},
-        "gpu_memory_utilization": 0.4,
-        "max_model_len": 2048,
-    }
-    assert seen["schema"]["properties"]["label"]["enum"] == [
-        "candidate",
-        "discard",
-    ]
-    assert seen["sampling_params_kwargs"]["temperature"] == 0
-    assert seen["sampling_params_kwargs"]["max_tokens"] == 17
-    assert seen["used_sampling_params"] is seen["sampling_params"]
-    assert seen["use_tqdm"] is False
-
-
-def test_vllm_image_to_data_url_uses_mime_suffix(tmp_path):
-    jpg = tmp_path / "a.JPG"
-    png = tmp_path / "b.png"
-    jpg.write_bytes(b"jpg")
-    png.write_bytes(b"png")
-
-    assert FilterVLLM.image_to_data_url(jpg) == "data:image/jpeg;base64,anBn"
-    assert FilterVLLM.image_to_data_url(png) == "data:image/png;base64,cG5n"
-
-
-def test_vllm_filter_keeps_empty_species_without_initializing_engine(
-    monkeypatch, tmp_path
-):
-    records = pd.DataFrame(columns=["photo.id", "image_path"])
-    vlm_filter = make_vllm_filter(tmp_path)
-
-    def unexpected_engine_initialization():
-        raise AssertionError("empty records should not initialize vLLM")
-
-    monkeypatch.setattr(vlm_filter, "_ensure_engine", unexpected_engine_initialization)
-
-    result = vlm_filter.filter_data({"empty": records})["empty"]
-
-    assert result.empty
-    assert "kept_animal" in result.columns
-    assert "rejected_animal" in result.columns
-
-
-def test_vllm_filter_data_batches_unique_photos_and_preserves_files(
-    monkeypatch, tmp_path
-):
-    path1 = tmp_path / "a.jpg"
-    path2 = tmp_path / "b.jpg"
-    path1.write_bytes(b"image-a")
-    path2.write_bytes(b"image-b")
-    records = pd.DataFrame(
-        {
-            "photo.id": [1, 1, 2],
-            "image_path": [str(path1), str(path1), str(path2)],
-        }
-    )
-    vlm_filter = make_vllm_filter(tmp_path, batch_size=2)
-    seen_chunks = []
-
-    def classify_batch(paths):
-        seen_chunks.append(list(paths))
-        return [
-            {
-                "label": "kept" if Path(path) == path1 else "rejected",
-                "parse_error": False,
-            }
-            for path in paths
-        ]
-
-    monkeypatch.setattr(vlm_filter, "_classify_batch", classify_batch)
-
-    result = vlm_filter.filter_data({"mouse": records})["mouse"]
-
-    assert seen_chunks == [[path1, path2]]
-    assert result["kept_animal"].tolist() == [True, True, False]
-    assert result["rejected_animal"].tolist() == [False, False, True]
-    assert path1.read_bytes() == b"image-a"
-    assert path2.read_bytes() == b"image-b"
-    assert set(tmp_path.iterdir()) == {path1, path2}
-    assert all(not path.is_symlink() for path in tmp_path.iterdir())
-
-
-def test_vllm_context_manager_shuts_down_engine(tmp_path):
-    vlm_filter = make_vllm_filter(tmp_path)
-    seen = {"shutdowns": 0}
+            seen["sampling"].append(kwargs)
 
     class FakeEngine:
         def shutdown(self):
             seen["shutdowns"] += 1
+            if seen["shutdown_error"] is not None:
+                raise seen["shutdown_error"]
 
-    vlm_filter._llm = types.SimpleNamespace(llm_engine=FakeEngine())
-    vlm_filter._sampling_params = object()
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            seen["engines"].append(kwargs)
+            self.llm_engine = FakeEngine()
 
-    with vlm_filter:
-        pass
+        def chat(self, conversations, **options):
+            seen["chats"].append(conversations)
+            return [
+                types.SimpleNamespace(
+                    outputs=(types.SimpleNamespace(text=f"answer {index}"),)
+                )
+                for index, _ in enumerate(conversations)
+            ]
 
-    assert seen["shutdowns"] == 1
-    assert vlm_filter._llm is None
-    assert vlm_filter._sampling_params is None
+    vllm = types.ModuleType("vllm")
+    vllm.LLM = FakeLLM
+    vllm.SamplingParams = FakeSamplingParams
+    sampling_params = types.ModuleType("vllm.sampling_params")
+    sampling_params.StructuredOutputsParams = FakeStructuredOutputsParams
+    monkeypatch.setitem(sys.modules, "vllm", vllm)
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", sampling_params)
+    return seen
 
 
-def test_from_config_passes_filter_settings(tmp_path):
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "backend": "ollama",
-                "prompt": "prompt",
-                "system_prompt": "system",
-                "taskname": "animal",
-                "labels": ["kept", "rejected"],
-                "columns": {"photo_id": "photo.id", "image_path": "image_path"},
-                "paths": {},
-                "ollama": {
-                    "model": "llava",
-                    "pull_model": False,
-                    "options": {
-                        "temperature": 0.1,
-                        "repeat_penalty": 1.1,
-                        "repeat_last_n": 64,
-                        "num_predict": 512,
-                    },
-                },
-            }
-        )
+def test_vllm_builds_one_engine_and_batches_conversations(tmp_path, fake_vllm):
+    """Engine and sampling settings pass through; the schema constrains decoding."""
+    paths = [tmp_path / "a.JPG", tmp_path / "b.png", tmp_path / "c.png"]
+    for path in paths:
+        path.write_bytes(path.stem.encode())
+    backend = VllmBackend(
+        model="org/model",
+        batch_size=2,
+        engine={"gpu_memory_utilization": 0.4, "max_model_len": 2048},
+        sampling={"temperature": 0, "max_tokens": 17},
     )
 
-    vlm_filter = VLMFilter.from_config(config_path)
+    responses = backend.generate(
+        paths, system_prompt="system", prompt="prompt", schema=ANSWER_SCHEMA
+    )
+    backend.generate(paths[:1], system_prompt="system", prompt="prompt", schema={})
 
-    assert isinstance(vlm_filter, FilterOllama)
-    assert vlm_filter.labels == ["kept", "rejected"]
-    assert vlm_filter.taskname == "animal"
-    assert vlm_filter.photo_id_column == "photo.id"
-    assert vlm_filter.image_path_column == "image_path"
-    assert vlm_filter.generation_options == {
-        "temperature": 0.1,
-        "repeat_penalty": 1.1,
-        "repeat_last_n": 64,
-        "num_predict": 512,
-    }
-
-
-def test_from_config_reads_vllm_settings_in_yaml(tmp_path):
-    config_path = tmp_path / "vllm.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "backend": "vllm",
-                "prompt": "prompt",
-                "system_prompt": "system",
-                "taskname": "custom",
-                "labels": ["yes", "no"],
-                "columns": {"photo_id": "photo_key", "image_path": "path"},
-                "vllm": {
-                    "model": "namespace/model",
-                    "gpu_memory_utilization": 0.6,
-                    "max-model-len": 4096,
-                    "max_new_tokens": 73,
-                    "batch_size": 5,
-                },
-            }
-        )
+    assert responses == ["answer 0", "answer 1", "answer 0"]
+    assert fake_vllm["engines"] == [
+        {
+            "model": "org/model",
+            "limit_mm_per_prompt": {"image": 1},
+            "gpu_memory_utilization": 0.4,
+            "max_model_len": 2048,
+        }
+    ]
+    # Only configured sampling settings pass through; nothing is injected.
+    sampling = fake_vllm["sampling"][0]
+    structured_outputs = sampling.pop("structured_outputs")
+    assert sampling == {"temperature": 0, "max_tokens": 17}
+    assert structured_outputs.kwargs == {"json": ANSWER_SCHEMA}
+    assert [len(chat) for chat in fake_vllm["chats"][:2]] == [2, 1]
+    first = fake_vllm["chats"][0][0]
+    assert first[0] == {"role": "system", "content": "system"}
+    assert first[1]["content"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,YQ=="}},
+        {"type": "text", "text": "prompt"},
+    ]
+    assert fake_vllm["chats"][0][1][1]["content"][0]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
     )
 
-    vlm_filter = VLMFilter.from_config(config_path)
 
-    assert isinstance(vlm_filter, FilterVLLM)
-    assert vlm_filter.model_name == "namespace/model"
-    assert vlm_filter.labels == ["yes", "no"]
-    assert vlm_filter.taskname == "custom"
-    assert vlm_filter.photo_id_column == "photo_key"
-    assert vlm_filter.image_path_column == "path"
-    assert vlm_filter.gpu_memory_utilization == 0.6
-    assert vlm_filter.max_model_len == 4096
-    assert vlm_filter.max_new_tokens == 73
-    assert vlm_filter.batch_size == 5
+def test_vllm_injects_no_sampling_settings(tmp_path, fake_vllm):
+    image = tmp_path / "a.png"
+    image.write_bytes(b"a")
 
-
-def test_from_config_rejects_unknown_backend(tmp_path):
-    config_path = tmp_path / "unknown.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "backend": "unknown",
-                "prompt": "prompt",
-                "system_prompt": "system",
-                "taskname": "custom",
-                "labels": ["yes", "no"],
-            }
-        )
+    VllmBackend(model="org/model").generate(
+        [image], system_prompt="", prompt="", schema={}
     )
 
-    with pytest.raises(ValueError, match="Unknown backend 'unknown'"):
-        VLMFilter.from_config(config_path)
+    assert list(fake_vllm["sampling"][0]) == ["structured_outputs"]
+
+
+def test_vllm_loads_no_engine_without_images(fake_vllm):
+    backend = VllmBackend(model="org/model")
+
+    assert backend.generate([], system_prompt="", prompt="", schema={}) == []
+    assert fake_vllm["engines"] == []
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"engine": {"model": "other"}},
+        {"engine": {"limit_mm_per_prompt": {"image": 2}}},
+        {"sampling": {"structured_outputs": None}},
+    ],
+    ids=["model", "images_per_prompt", "structured_outputs"],
+)
+def test_vllm_settings_cannot_override_what_the_backend_supplies(settings):
+    with pytest.raises(ValueError):
+        VllmBackend(model="org/model", **settings)
+
+
+def test_vllm_close_shuts_down_the_engine(tmp_path, fake_vllm):
+    image = tmp_path / "a.png"
+    image.write_bytes(b"a")
+    backend = VllmBackend(model="org/model")
+    backend.generate([image], system_prompt="", prompt="", schema={})
+
+    backend.close()
+    backend.close()
+
+    assert fake_vllm["shutdowns"] == 1
+
+
+def test_vllm_shutdown_failure_is_logged_and_still_releases_the_engine(
+    tmp_path, fake_vllm, caplog
+):
+    image = tmp_path / "a.png"
+    image.write_bytes(b"a")
+    backend = VllmBackend(model="org/model")
+    backend.generate([image], system_prompt="", prompt="", schema={})
+    fake_vllm["shutdown_error"] = RuntimeError("engine stuck")
+
+    with caplog.at_level(logging.WARNING):
+        backend.close()
+    backend.generate([image], system_prompt="", prompt="", schema={})
+
+    assert "Could not shut down vLLM engine" in caplog.text
+    # The failed engine was dropped, so the next request loads a new one.
+    assert len(fake_vllm["engines"]) == 2

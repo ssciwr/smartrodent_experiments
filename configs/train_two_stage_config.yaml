@@ -1,0 +1,132 @@
+# python scripts/train_two_stage.py configs/train_two_stage_config.yaml
+# Stages named under the root `tuning` section run as Optuna studies.
+# Searched values: !suggest-float | !suggest-int | !suggest-categorical {choices: [...]}.
+output_directory: runs/two_stage_xl_srilanka
+
+data:
+  train_dataset: datasets/stage8_yolo_classifier_srilanka/train
+  validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
+  class_names:
+    - Accipiter virgatus
+    - Bandicota bengalensis
+    - Bandicota indica
+    - Canis familiaris
+    - Falco tinnunculus
+    - Felis catus
+    - Glaucidium castanotum
+    - Glaucidium radiatum
+    - Ketupa nipalensis
+    - Ketupa zeylonensis
+    - Milvus migrans
+    - Mus booduga
+    - Mus musculus
+    - Naja naja
+    - Ninox scutulata
+    - Otus thilohoffmanni
+    - Pavo cristatus
+    - Ptyas mucosa
+    - Python molurus
+    - Rattus norvegicus
+    - Rattus rattus
+    - Suncus murinus
+    - Tatera indica
+    - Tyto javanica
+    - Urva edwardsii
+    - Vandeleuria oleraceus
+supcon:
+  encoder:  # Component class or factory (name or module:attr) with its keyword arguments.
+    name: YoloEncoder
+    parameters: {model_name: ./yolo26x-cls.pt}
+  freeze: {prefixes: [], batchnorm: eval}
+  optimizer: {name: AdamW, parameters: {lr: 0.0001, weight_decay: 0.01}}
+  scheduler:  # Learning-rate phases (empty list = constant). All but the last set `epochs`.
+    - {name: ReduceLROnPlateau, parameters: {factor: 0.5, patience: 2, threshold: 0.001, threshold_mode: abs, min_lr: 0.000001}}
+  early_stopping: {patience: 6, min_delta: 0.005}  # Native EarlyStopping options | null.
+  trainer:  # Native lightning.Trainer arguments; max_epochs is required.
+    accelerator: gpu
+    devices: 1
+    max_epochs: 30
+    precision: 32-true
+    num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
+  classes_per_batch: 4
+  samples_per_class: 4
+  samples_per_epoch: 100000
+  workers: 12
+  prefetch_factor: 4
+  seed: 42
+  dropout: 0.0
+  output_features: 128
+  temperature: 0.1
+  transforms:  # Fixed preprocessing, then augmentations in order (torchvision.transforms.v2 classes).
+    image_size: 480  # Integer >0; square image size.
+    resize: {interpolation: bilinear, antialias: true}
+    augmentations:
+      - {name: RandomAdjustSharpness, parameters: {sharpness_factor: 0.5, p: 0.2}}
+      - {name: RandomGrayscale, parameters: {p: 0.2}}
+      - {name: RandomPerspective, parameters: {distortion_scale: 0.5, p: 0.2, fill: 0}}
+      - {name: RandomHorizontalFlip, parameters: {p: 0.2}}
+      - {name: RandomResizedCrop, parameters: {size: [480, 480], scale: [0.75, 1.0], ratio: [0.75, 1.3333333333333333], antialias: true}}
+  onnx_export:  # ONNX export of best.ckpt written next to it | null (no export).
+    dynamic: false
+    simplify: true
+
+classifier:  # No `encoder` key: the pipeline supplies the winning SupCon best.ckpt.
+  head: !suggest-categorical  # linear (new final layer only) | full (also renew the encoder's post-pooling part)
+    choices: [linear, full]
+  freeze:  # Linear probe (whole encoder) | layers 0-9 frozen with a trainable renewed Classify convolution.
+    prefixes: !coupled
+      target: classifier.head
+      values: [[network], [network.model.0, network.model.1, network.model.2, network.model.3, network.model.4, network.model.5, network.model.6, network.model.7, network.model.8, network.model.9]]
+    batchnorm: eval
+  native_checkpoint: false
+  optimizer: {name: AdamW, parameters: {lr: !suggest-categorical {choices: [0.001, 0.0005]}}}
+  scheduler:  # Learning-rate phases (empty list = constant). All but the last set `epochs`.
+    - {name: ReduceLROnPlateau, parameters: {factor: 0.5, patience: 2, threshold: 0.001, threshold_mode: abs, min_lr: 0.000001}}
+  early_stopping: {patience: 6, min_delta: 0.005}  # Native EarlyStopping options | null.
+  trainer:  # Native lightning.Trainer arguments; max_epochs is required.
+    accelerator: gpu
+    devices: 1
+    max_epochs: 30
+    precision: 32-true
+    num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
+  batch_size: 24
+  workers: 12
+  seed: 42
+  validation_metrics:
+    balanced_accuracy: {name: balanced_accuracy_score}
+  tracked_metric: balanced_accuracy
+  tracked_mode: max
+  transforms:  # Fixed preprocessing, then augmentations in order (torchvision.transforms.v2 classes).
+    image_size: 480  # Integer >0; square image size.
+    resize: {interpolation: bilinear, antialias: true}
+    augmentations:
+      - {name: RandomAdjustSharpness, parameters: {sharpness_factor: 0.5, p: 0.2}}
+      - {name: RandomGrayscale, parameters: {p: 0.2}}
+      - {name: RandomPerspective, parameters: {distortion_scale: 0.5, p: 0.2, fill: 0}}
+      - {name: RandomHorizontalFlip, parameters: {p: 0.2}}
+      - {name: RandomResizedCrop, parameters: {size: [480, 480], scale: [0.75, 1.0], ratio: [0.75, 1.3333333333333333], antialias: true}}
+  onnx_export:  # ONNX export of best.ckpt written next to it | null (no export).
+    dynamic: false
+    simplify: true
+
+mlflow:  # Tracking settings | null (disabled).
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: two-stage-sri-lanka-xl
+  registered_model_name: species-classifier-xl  # Nonempty model name | null (no registration).
+  model_artifact_name: species-classifier-xl
+  champion_alias: champion
+  # dataset_revision: <revision>
+
+tuning:  # Per-stage Optuna studies; an omitted stage runs once (no search tags).
+  classifier:
+    study_name: two-stage-classifier-xl  # Suffixed with the selected encoder's checksum.
+    storage: sqlite:///optuna.db
+    n_trials: 4
+    sampler: {name: BruteForceSampler, parameters: {seed: 42}}
+    pruner: null
+    load_if_exists: true  # true resumes this study on rerun with the same encoder.
+
+logging:  # Console output only: messages matching any regex are hidden there but kept in <output_directory>/training.log.
+  suppress:
+    - 'Tip: For seamless cloud logging|litlogger'
+    - 'module\(s\) in eval mode at the start of training'

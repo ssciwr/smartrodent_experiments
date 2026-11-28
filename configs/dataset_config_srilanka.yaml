@@ -29,7 +29,6 @@ data:
       - Urva edwardsii # Indian grey mongoose
       - Felis catus # house cat
       - Canis familiaris # domestic dog
-    seed: 42
     max_img_num: 2500
     max_observations: 5000
     cache_file: datasets/inaturalist/api_requests.db

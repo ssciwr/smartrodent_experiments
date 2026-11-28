@@ -1,0 +1,25 @@
+# The trainer fills model identity, classes, validation results, and provenance.
+model:
+  name: null
+  registry_version: null
+  base_model: null
+  task: image-classification
+intended_use: >-
+  Classification of camera-trap images into the species listed below.
+limitations: >-
+  Performance on other species, camera setups, and environments has not been
+  established. Validation metrics describe only the recorded validation dataset.
+classes: {}
+validation:
+  status: null
+  dataset: null
+  epoch: null
+  metrics: {}
+provenance:
+  checkpoint: null
+  checkpoint_sha256: null
+  epoch: null
+  run_id: null
+  model_id: null
+  git_commit: null
+  dataset_revision: null

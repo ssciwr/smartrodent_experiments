@@ -1,66 +1,45 @@
-train_dataset: datasets/stage8_yolo_detector_srilanka
-model_name: yolo26x.pt
-include_macro_f1: true
-return_format: dataframe
-mlflow:
+# Standalone Ultralytics detector: scripts/train_yolo.py trains and exports it,
+# scripts/tune_yolo.py runs YOLO.tune on it. Keys are passed to Ultralytics under their own names.
+task: detect # detect | classify
+model: yolo26x.pt
+dataset: datasets/stage8_yolo_detector_srilanka # root holding data.yaml
+mlflow: # optional; leave out to switch Ultralytics' MLflow integration off
   tracking_uri: sqlite:///mlflow.db
   train_experiment_name: smartrodent-yolo-detector-training
   tune_experiment_name: smartrodent-yolo-detector-tuning
-train_kwargs:
+train_kwargs: # YOLO.train; `project` and `optimizer` are required
   epochs: 100
   imgsz: 640
   batch: 24
   device: 0
   workers: 20
   patience: 25
-  project: ./projects/smartrodent_experiments/training/yolo_detect
+  optimizer: auto
+  project: projects/smartrodent_experiments/training/yolo_detect # relative to the working directory (repo root under DVC); also the DVC output
   name: full_data_detector_xl_with_recommended_defaults
   exist_ok: true
   plots: true
   save: true
   val: true
-export_kwargs:
-  format: "onnx"
-
-tune_kwargs:
-  epochs: 30
+export_kwargs: # YOLO.export; `format` is required
+  format: onnx
+tune_kwargs: # YOLO.tune; unlisted arguments keep their train_kwargs value
   iterations: 40
-  plots: true
+  # Only real overrides of train_kwargs belong here (repeating a train value is an error).
+  project: projects/smartrodent_experiments/tuning/yolo_detect # relative to the working directory (repo root under DVC); also the DVC output
+  epochs: 30
   save: false
+  # Search space: each key is [min, max] (an optional third value is the mutation gain).
   space:
-    lr0:
-      - 1.0e-05
-      - 0.01
-    lrf:
-      - 0.01
-      - 1.0
-    momentum:
-      - 0.7
-      - 0.98
-    weight_decay:
-      - 0.0
-      - 0.001
-    box:
-      - 1.0
-      - 20.0
-    cls:
-      - 0.1
-      - 4.0
-    dfl:
-      - 0.4
-      - 12.0
-    translate:
-      - 0.0
-      - 0.25
-    scale:
-      - 0.0
-      - 0.5
-    fliplr:
-      - 0.0
-      - 0.5
-    mosaic:
-      - 0.0
-      - 1.0
-    close_mosaic:
-      - 0
-      - 10
+    lr0: [1.0e-05, 0.01]
+    lrf: [0.01, 1.0]
+    momentum: [0.7, 0.98]
+    weight_decay: [0.0, 0.001]
+    box: [1.0, 20.0]
+    cls: [0.1, 4.0]
+    dfl: [0.4, 12.0]
+    translate: [0.0, 0.25]
+    scale: [0.0, 0.5]
+    fliplr: [0.0, 0.5]
+    mosaic: [0.0, 1.0]
+    close_mosaic: [0, 10]

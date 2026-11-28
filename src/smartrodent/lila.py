@@ -9,16 +9,24 @@ import random
 import shutil
 import urllib.parse
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pandas as pd
-import requests
-import yaml
+from pydantic import Field, validate_call
 from tqdm import tqdm
 
 from smartrodent.base import DatasetLoader
+from smartrodent.config_loading import load_section
+from smartrodent.http_session import retrying_session
+from smartrodent.training_validation import (
+    Nonblank,
+    NonnegativeInt,
+    NonnegativeNumber,
+    PathSetting,
+    Seed,
+)
 
 
 class LilaDataset(DatasetLoader):
@@ -38,22 +46,36 @@ class LilaDataset(DatasetLoader):
         taxonomy_url: URL of the LILA taxonomy-mapping CSV.
         max_img_num: Maximum images per class and dataset.
         seed: Seed for sampling sequences when capping.
+        session: Session that retries transient failures of every request.
     """
 
     # Most to least specific: a label goes to the first rank that is a configured class.
-    RANKS = ("species", "subgenus", "genus", "tribe", "subfamily", "family",
-             "superfamily", "suborder", "order", "class")
+    RANKS = (
+        "species",
+        "subgenus",
+        "genus",
+        "tribe",
+        "subfamily",
+        "family",
+        "superfamily",
+        "suborder",
+        "order",
+        "class",
+    )
 
+    @validate_call
     def __init__(
         self,
-        output_path: str | Path,
-        datasets: Mapping[str, str],
-        classes: Sequence[str],
-        allowed_licenses: Sequence[str],
-        index_url: str,
-        taxonomy_url: str,
-        max_img_num: int = 2500,
-        seed: int = 42,
+        output_path: PathSetting,
+        datasets: Annotated[dict[Nonblank, Nonblank], Field(min_length=1)],
+        classes: Annotated[list[Nonblank], Field(min_length=1)],
+        allowed_licenses: list[Nonblank],
+        index_url: Nonblank,
+        taxonomy_url: Nonblank,
+        max_img_num: NonnegativeInt = 2500,
+        seed: Seed = 42,
+        max_retries: NonnegativeInt = 5,
+        backoff_factor: NonnegativeNumber = 0.5,
     ) -> None:
         """Store the download settings and create the metadata cache directory.
 
@@ -69,6 +91,12 @@ class LilaDataset(DatasetLoader):
             taxonomy_url: URL of the LILA taxonomy-mapping CSV.
             max_img_num: Maximum images per class and dataset.
             seed: Seed for sampling sequences when capping.
+            max_retries: Retries after the first attempt of each request.
+            backoff_factor: Base of the exponential delay between retries, in
+                seconds.
+
+        Raises:
+            ValueError: If a setting is invalid.
         """
         self.output_path = Path(output_path).resolve()
         self.cache = self.output_path / "metadata"
@@ -80,7 +108,9 @@ class LilaDataset(DatasetLoader):
         self.taxonomy_url = taxonomy_url
         self.max_img_num = max_img_num
         self.seed = seed
-        self.logger = logging.getLogger(type(self).__name__)
+        self.session = retrying_session(max_retries, backoff_factor)
+        # The module's logger, under the package logger the entry point configures.
+        self.logger = logging.getLogger(__name__)
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> LilaDataset:
@@ -94,19 +124,19 @@ class LilaDataset(DatasetLoader):
             A configured LILA downloader.
 
         Raises:
-            KeyError: If the config has no ``data.lila`` section.
-            TypeError: If ``data.lila`` lacks a required argument or has an
-                unknown one.
+            ValueError: If the ``data.lila`` section is missing or invalid.
         """
-        config = yaml.safe_load(Path(config_path).read_text())["data"]["lila"]
-        dataset = cls(**config)
+        dataset = cls(**load_section(config_path, "data", "lila"))
         shutil.copy2(config_path, dataset.output_path / Path(config_path).name)
         return dataset
 
     def download(self) -> None:
         """Select records for all classes, then download their images."""
-        self.retrieve_records()
-        self.download_images()
+        try:
+            self.retrieve_records()
+            self.download_images()
+        finally:
+            self.session.close()
 
     def retrieve_records(self) -> None:
         """Write ``records.csv`` for every class that does not have one yet.
@@ -119,16 +149,26 @@ class LilaDataset(DatasetLoader):
             ValueError: If a metadata zip does not hold exactly one JSON file.
             requests.HTTPError: If an index, taxonomy, or metadata request fails.
         """
-        missing = [c for c in self.classes if not (self.output_path / c / "records.csv").is_file()]
+        missing = [
+            c
+            for c in self.classes
+            if not (self.output_path / c / "records.csv").is_file()
+        ]
         if not missing:
             return
-        index = pd.read_csv(self._fetch(self.index_url), dtype=str, keep_default_na=False)
+        index = pd.read_csv(
+            self._fetch(self.index_url), dtype=str, keep_default_na=False
+        )
         index = index.set_index("name")
-        taxonomy = pd.read_csv(self._fetch(self.taxonomy_url), dtype=str, keep_default_na=False)
+        taxonomy = pd.read_csv(
+            self._fetch(self.taxonomy_url), dtype=str, keep_default_na=False
+        )
         selected: dict[str, list[pd.DataFrame]] = {c: [] for c in missing}
         for name, license in self.datasets.items():
             if license not in self.allowed_licenses:
-                self.logger.info("Skipping %s: license %s is not allowed", name, license)
+                self.logger.info(
+                    "Skipping %s: license %s is not allowed", name, license
+                )
                 continue
             rows = taxonomy[taxonomy["dataset_name"] == name].drop_duplicates("query")
             labels = rows.set_index("query").to_dict("index")
@@ -140,7 +180,9 @@ class LilaDataset(DatasetLoader):
             if frames:
                 records = pd.concat(frames, ignore_index=True)
             else:
-                records = pd.DataFrame(columns=["id", "photo.id", "image_url", "image_file"])
+                records = pd.DataFrame(
+                    columns=["id", "photo.id", "image_url", "image_file"]
+                )
             (self.output_path / class_name).mkdir(exist_ok=True)
             records.to_csv(self.output_path / class_name / "records.csv", index=False)
 
@@ -168,10 +210,12 @@ class LilaDataset(DatasetLoader):
         data = self._load_json(info["metadata_url_gcp"])
         category = {c["id"]: c["name"] for c in data["categories"]}
         annotations = pd.DataFrame(data["annotations"]).reindex(
-            columns=["image_id", "category_id", "bbox"])
+            columns=["image_id", "category_id", "bbox"]
+        )
         annotations["category"] = annotations["category_id"].map(category)
         annotations["class_name"] = annotations["category"].map(
-            lambda label: self._match(label, labels.get(label, {})))
+            lambda label: self._match(label, labels.get(label, {}))
+        )
         annotations = annotations.dropna(subset=["class_name"])
         if annotations.empty:
             return {}
@@ -182,14 +226,27 @@ class LilaDataset(DatasetLoader):
         group = images["seq_id"] if "seq_id" in images else images["location"]
         images["id"] = name + "/" + group.astype(str)
         images["photo.id"] = name + "/" + images["image_id"].astype(str)
-        images["image_url"] = (info["image_base_url_gcp"].rstrip("/") + "/"
-                               + images["file_name"].map(urllib.parse.quote))
-        images["image_file"] = info["short_name"] + "_" + images["file_name"].str.replace("/", "__")
+        images["image_url"] = (
+            info["image_base_url_gcp"].rstrip("/")
+            + "/"
+            + images["file_name"].map(urllib.parse.quote)
+        )
+        images["image_file"] = (
+            info["short_name"] + "_" + images["file_name"].str.replace("/", "__")
+        )
 
-        rows = annotations.groupby(["image_id", "class_name"]).agg(
-            category=("category", lambda s: "|".join(sorted(set(s)))),
-            bbox=("bbox", lambda s: json.dumps([b for b in s if isinstance(b, list)])),
-        ).reset_index().merge(images, on="image_id")
+        rows = (
+            annotations.groupby(["image_id", "class_name"])
+            .agg(
+                category=("category", lambda s: "|".join(sorted(set(s)))),
+                bbox=(
+                    "bbox",
+                    lambda s: json.dumps([b for b in s if isinstance(b, list)]),
+                ),
+            )
+            .reset_index()
+            .merge(images, on="image_id")
+        )
         rows["dataset"] = name
         rows["license"] = license
         return {c: self._cap(frame, name, c) for c, frame in rows.groupby("class_name")}
@@ -213,7 +270,9 @@ class LilaDataset(DatasetLoader):
                 return lookup[candidate.lower()]
         return None
 
-    def _cap(self, frame: pd.DataFrame, dataset_name: str, class_name: str) -> pd.DataFrame:
+    def _cap(
+        self, frame: pd.DataFrame, dataset_name: str, class_name: str
+    ) -> pd.DataFrame:
         """Take whole sequences in seeded random order until ``max_img_num`` rows.
 
         Only the last sequence taken may be cut. Seeding with dataset and class
@@ -243,11 +302,11 @@ class LilaDataset(DatasetLoader):
             Path of the cached file.
 
         Raises:
-            requests.HTTPError: If the request fails.
+            requests.HTTPError: If the request still fails after retries.
         """
         path = self.cache / Path(urllib.parse.urlparse(url).path).name
         if not path.is_file():
-            response = requests.get(url, timeout=120)
+            response = self.session.get(url, timeout=120)
             response.raise_for_status()
             path.write_bytes(response.content)
         return path
@@ -286,8 +345,11 @@ class LilaDataset(DatasetLoader):
             images_path.mkdir(exist_ok=True)
             found = [
                 self._download_image(url, images_path / file)
-                for url, file in tqdm(zip(records["image_url"], records["image_file"]),
-                                      total=len(records), desc=class_name)
+                for url, file in tqdm(
+                    zip(records["image_url"], records["image_file"]),
+                    total=len(records),
+                    desc=class_name,
+                )
             ]
             records = records.loc[found].copy()
             records["image_path"] = [
@@ -308,11 +370,12 @@ class LilaDataset(DatasetLoader):
             it (404).
 
         Raises:
-            requests.HTTPError: If the request fails with another status.
+            requests.HTTPError: If the request still fails with another status
+                after retries.
         """
         if path.is_file():
             return True
-        response = requests.get(url, timeout=60)
+        response = self.session.get(url, timeout=60)
         if response.status_code == 404:
             return False
         else:

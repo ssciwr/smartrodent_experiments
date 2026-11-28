@@ -1,17 +1,34 @@
 # Run: python scripts/create_yolo_dataset.py configs/create_yolo_classifier_dataset.yaml
 # Reads already-split per-species records.csv files and saves inferred animal crops.
 # Paths are relative to the working directory (normally the project root).
-data:
-  YoloClassifierDatasetCreatorFromSpeciesnet:
-    path_to_image_data: datasets/stage7_filtered_data_sampled_oversampled
-    dataset_output_path: datasets/stage8_yolo_classifier
-    # null discovers all species; a list selects directories.
-    # Ultralytics classification derives its own alphabetical class-index order.
-    class_names: null
+# Output layout: saved animal crops, one directory per class and split.
+layout: classifier
+# null discovers all species; a list selects directories.
+# Ultralytics classification derives its own alphabetical class-index order.
+class_names: null
+# Source rows per inference batch; bounds the crops held in memory.
+batch_size: 64
+detector:
+  # Detector class in smartrodent.yolo_dataset_creation, or "module:Class".
+  name: SpeciesNetDetector
+  parameters:
     # Explicitly use the SpeciesNet version configured on the development branch.
-    # Weights load lazily on the first nonempty inference request.
+    # Weights load lazily on the first nonempty inference request, once for all
+    # datasets below.
     model_name: kaggle:google/speciesnet/pyTorch/v4.0.3b/1
-    batch_size: 64
     confidence_threshold: 0.45
     allowed_classes: [animal]
     iou_threshold: 0.45
+datasets: # One entry per dataset: its input records and output root.
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_50
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_50
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_100
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_100
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_250
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_250
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_500
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_500
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_1000
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_1000
+  - path_to_image_data: datasets/stage7_filtered_data_downsampled_srilanka_1500
+    dataset_output_path: datasets/stage8_yolo_classifier_srilanka_1500

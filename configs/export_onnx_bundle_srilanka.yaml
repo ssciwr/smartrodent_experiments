@@ -1,0 +1,35 @@
+# Export the registered classifier as a sentinel-rat-ml-pipeline ONNX bundle (Sri Lanka species list, datasets/stage8_yolo_classifier_srilanka_*).
+tracking_uri: sqlite:///mlflow.db
+registered_model_name: species-classifier-xl   # adjust to the model you registered
+alias: champion        # ignored when version is set
+# version: 3
+output_directory: bundles/species-classifier-srilanka
+# One entry per class directory of the training dataset. The exporter requires
+# the labels to match the model's labels exactly. Keys are Taxon fields.
+taxonomy:
+  Accipiter virgatus: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Accipitriformes, family: Accipitridae, genus: Accipiter, species: virgatus, common_name: besra}
+  Bandicota bengalensis: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Bandicota, species: bengalensis, common_name: lesser bandicoot rat}
+  Bandicota indica: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Bandicota, species: indica, common_name: greater bandicoot rat}
+  Canis familiaris: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Carnivora, family: Canidae, genus: Canis, species: familiaris, common_name: domestic dog}
+  Falco tinnunculus: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Falconiformes, family: Falconidae, genus: Falco, species: tinnunculus, common_name: common kestrel}
+  Felis catus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Carnivora, family: Felidae, genus: Felis, species: catus, common_name: domestic cat}
+  Glaucidium castanotum: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Strigiformes, family: Strigidae, genus: Glaucidium, species: castanotum, common_name: chestnut-backed owlet}
+  Glaucidium radiatum: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Strigiformes, family: Strigidae, genus: Glaucidium, species: radiatum, common_name: jungle owlet}
+  Ketupa nipalensis: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Strigiformes, family: Strigidae, genus: Ketupa, species: nipalensis, common_name: spot-bellied eagle-owl}
+  Ketupa zeylonensis: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Strigiformes, family: Strigidae, genus: Ketupa, species: zeylonensis, common_name: brown fish owl}
+  Milvus migrans: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Accipitriformes, family: Accipitridae, genus: Milvus, species: migrans, common_name: black kite}
+  Mus booduga: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Mus, species: booduga, common_name: little Indian field mouse}
+  Mus musculus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Mus, species: musculus, common_name: house mouse}
+  Naja naja: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Elapidae, genus: Naja, species: naja, common_name: Indian cobra}
+  Ninox scutulata: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Strigiformes, family: Strigidae, genus: Ninox, species: scutulata, common_name: brown boobook}
+  Otus thilohoffmanni: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Strigiformes, family: Strigidae, genus: Otus, species: thilohoffmanni, common_name: Serendib scops owl}
+  Pavo cristatus: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Galliformes, family: Phasianidae, genus: Pavo, species: cristatus, common_name: Indian peafowl}
+  Ptyas mucosa: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Colubridae, genus: Ptyas, species: mucosa, common_name: Oriental rat snake}
+  Python molurus: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Pythonidae, genus: Python, species: molurus, common_name: Indian rock python}
+  Rattus norvegicus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Rattus, species: norvegicus, common_name: brown rat}
+  Rattus rattus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Rattus, species: rattus, common_name: black rat}
+  Suncus murinus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Eulipotyphla, family: Soricidae, genus: Suncus, species: murinus, common_name: Asian house shrew}
+  Tatera indica: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Gerbillidae, genus: Tatera, species: indica, common_name: Indian gerbil}
+  Tyto javanica: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Strigiformes, family: Tytonidae, genus: Tyto, species: javanica, common_name: eastern barn owl}
+  Urva edwardsii: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Carnivora, family: Herpestidae, genus: Urva, species: edwardsii, common_name: Indian grey mongoose}
+  Vandeleuria oleraceus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Vandeleuria, species: oleracea, common_name: Asian long-tailed climbing mouse}

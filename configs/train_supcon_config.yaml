@@ -1,0 +1,81 @@
+# python scripts/train_supcon.py configs/train_supcon_config.yaml
+# One run, or with a `tuning:` section an Optuna study over the tagged values:
+#   !suggest-float {low, high, step?, log?} | !suggest-int {low, high, step?, log?}
+#   | !suggest-categorical {choices: [...]} (any YAML values).
+train_dataset: datasets/stage8_yolo_classifier_srilanka/train
+validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
+output_directory: runs/supcon_standalone_xl_srilanka_lr-00001
+class_names:
+  - Accipiter virgatus
+  - Bandicota bengalensis
+  - Bandicota indica
+  - Canis familiaris
+  - Falco tinnunculus
+  - Felis catus
+  - Glaucidium castanotum
+  - Glaucidium radiatum
+  - Ketupa nipalensis
+  - Ketupa zeylonensis
+  - Milvus migrans
+  - Mus booduga
+  - Mus musculus
+  - Naja naja
+  - Ninox scutulata
+  - Otus thilohoffmanni
+  - Pavo cristatus
+  - Ptyas mucosa
+  - Python molurus
+  - Rattus norvegicus
+  - Rattus rattus
+  - Suncus murinus
+  - Tatera indica
+  - Tyto javanica
+  - Urva edwardsii
+  - Vandeleuria oleraceus
+encoder:  # Component class or factory (name or module:attr) with its keyword arguments.
+  name: YoloEncoder
+  parameters: {model_name: ./yolo26x-cls.pt}
+freeze: {prefixes: [], batchnorm: eval}  # Encoder parameter prefixes to freeze.
+optimizer: {name: AdamW, parameters: {lr: 0.0001, weight_decay: 0.01}}
+scheduler:  # Learning-rate phases (empty list = constant). All but the last set `epochs`.
+  - {name: ReduceLROnPlateau, parameters: {factor: 0.5, patience: 2, threshold: 0.001, threshold_mode: abs, min_lr: 0.000001}}
+early_stopping: {patience: 6, min_delta: 0.005}  # Native EarlyStopping options | null.
+trainer:  # Native lightning.Trainer arguments; max_epochs is required.
+  accelerator: gpu
+  devices: 1
+  max_epochs: 30
+  precision: 32-true
+  num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
+classes_per_batch: 8
+samples_per_class: 6
+samples_per_epoch: 100000
+workers: 20
+prefetch_factor: 4
+seed: 42
+dropout: 0.0
+output_features: 128
+temperature: 0.1
+transforms:  # Fixed preprocessing, then augmentations in order (torchvision.transforms.v2 classes).
+  image_size: 448  # Integer >0; square image size.
+  resize: {interpolation: bilinear, antialias: true}
+  augmentations:
+    - {name: RandomAdjustSharpness, parameters: {sharpness_factor: 0.5, p: 0.2}}
+    - {name: RandomGrayscale, parameters: {p: 0.2}}
+    - {name: RandomPerspective, parameters: {distortion_scale: 0.5, p: 0.2, fill: 0}}
+    - {name: RandomHorizontalFlip, parameters: {p: 0.2}}
+    - {name: RandomResizedCrop, parameters: {size: [448, 448], scale: [0.75, 1.0], ratio: [0.75, 1.3333333333333333], antialias: true}}
+onnx_export:  # ONNX export of best.ckpt written next to it | null (no export).
+  dynamic: false  # true | false; true=any batch and image size.
+  simplify: true  # true | false; onnxslim graph simplification.
+mlflow:  # Tracking settings | null (disabled).
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: lr-tau-supcon-xl
+  registered_model_name: species-classifier-encoder-xl  # Nonempty model name | null (no registration).
+  model_artifact_name: species-classifier-encoder-xl
+  champion_alias: champion
+  # dataset_revision: <revision>
+
+logging:  # Console output only: messages matching any regex are hidden there but kept in <output_directory>/training.log.
+  suppress:
+    - 'Tip: For seamless cloud logging|litlogger'
+    - 'module\(s\) in eval mode at the start of training'

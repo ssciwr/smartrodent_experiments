@@ -70,12 +70,11 @@ jobs:
                   uv sync --extra dev --extra experiments
 
             - name: Run Python tests
-              working-directory: ./tests
               run: |
-                  uv run pytest --cov --cov-report=xml
+                  uv run pytest --cov=smartrodent --cov-report=xml --cov-branch
 
             - name: Upload coverage to Codecov
               uses: codecov/codecov-action@v7
               with:
                   fail_ci_if_error: true
-                  files: ./tests/coverage.xml
+                  files: ./coverage.xml

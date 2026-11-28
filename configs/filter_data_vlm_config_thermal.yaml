@@ -1,56 +1,74 @@
-backend: vllm # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
-taskname: thermal
-labels: [kept, rejected]
-columns:
-  photo_id: photo.id
-  image_path: image_path
-
+# Run: python scripts/filter_data_vlm.py configs/filter_data_vlm_config_thermal.yaml
 paths:
   input_root: datasets/stage1_filtered_animal_srilanka
   output_root: datasets/thermal_filtered_srilanka
 
-ollama:
-  model: qwen3.6:35b-a3b
-  options:
-    temperature: 0.1
-    repeat_penalty: 1.1
-    repeat_last_n: 64
+filter:
+  taskname: thermal
+  photo_id_column: photo.id
+  image_path_column: image_path
+  # OllamaBackend (local Ollama server) or VllmBackend (fast, batched, local
+  # GPU); swap in the commented block to change it.
+  backend:
+    name: VllmBackend
+    parameters:
+      model: Qwen/Qwen3.8-27B
+      # model: Qwen/Qwen3.6-35B-A3B
+      batch_size: 4
+      engine:  # keyword arguments of vllm.LLM
+        gpu_memory_utilization: 0.97
+        max_model_len: 262144
+        # tensor_parallel_size: 8
+      sampling:  # keyword arguments of vllm.SamplingParams
+        temperature: 0
+        max_tokens: 500
+  # backend:
+  #   name: OllamaBackend
+  #   parameters:
+  #     model: qwen3.6:35b-a3b
+  #     # model: qwen3-vl:8b
+  #     options:
+  #       temperature: 0.1
+  #       repeat_penalty: 1.1
+  #       repeat_last_n: 64
+  # Enforced by the backend and inserted into the prompt at {answer_schema}. The
+  # "label" enum defines the label columns <label>_<taskname>; every other
+  # property is saved as column vlm_<taskname>_<property>.
+  answer_schema:
+    type: object
+    properties:
+      label: {type: string, enum: [kept, rejected]}
+      visible_animal: {type: boolean}
+      evidence_kept: {type: array, items: {type: string}}
+      evidence_rejected: {type: array, items: {type: string}}
+      image_quality: {type: string, enum: [clear, poor, unusable]}
+      needs_human_review: {type: boolean}
+    required:
+      - label
+      - visible_animal
+      - evidence_kept
+      - evidence_rejected
+      - image_quality
+      - needs_human_review
+    additionalProperties: false
+  system_prompt: |
+    You are a meticulous wildlife biologist and expert camera-trap image analyst. You
+    have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
+    grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
+    report evidence you can actually see in the image and never guess.
 
-  # model: qwen3-vl:8b
+  prompt: |
+    You are classifying wildlife images.
 
-vllm:
-  # model: Qwen/Qwen3.6-35B-A3B
-  model: Qwen/Qwen3.8-27B
-  gpu_memory_utilization: 0.97
-  max_new_tokens: 500
-  batch_size: 4
-  # tensor-parallel-size: 8
-  max-model-len: 262144
-system_prompt: |
-  You are a meticulous wildlife biologist and expert camera-trap image analyst. You
-  have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
-  grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
-  report evidence you can actually see in the image and never guess.
+    Return ONLY valid JSON matching this JSON schema:
 
-prompt: |
-  You are classifying wildlife images.
+    {answer_schema}
 
-  Return ONLY valid JSON with this exact schema:
-
-  {
-    "label": "kept | rejected ",
-    "visible_animal": true,
-    "evidence_kept": ["string"],
-    "evidence_rejected": ["string"],
-    "image_quality": "clear | poor | unusable",
-    "needs_human_review": true
-  }
-
-  Rules:
-  - label must be exactly one of: "kept", "rejected".
-  - Use "rejected" only for clear evidence of an infrared or thermal image: greyscale or thermal images taken with an infrared or thermal camera.
-  - Use "kept" only if it's clearly an rgb image that shows a color picture taken with a normal rgb camera.
-  - needs_human_review should be true for poor/unusable images, or conflicting
-    evidence.
-  - Do not include markdown.
-  - Do not include text outside the JSON object.
+    Rules:
+    - label must be exactly one of: "kept", "rejected".
+    - Use "rejected" only for clear evidence of an infrared or thermal image: greyscale or thermal images taken with an infrared or thermal camera.
+    - Use "kept" only if it's clearly an rgb image that shows a color picture taken with a normal rgb camera.
+    - needs_human_review should be true for poor/unusable images, or conflicting
+      evidence.
+    - Do not include markdown.
+    - Do not include text outside the JSON object.

@@ -14,6 +14,8 @@ data:
       NACTI: cdla-permissive-1.0
       Trail Camera Images of New Zealand Animals: cdla-permissive-1.0
       Ohio Small Animals: cdla-permissive-1.0
+      Oregon Critters: cdla-permissive-1.0
+      Indiana Small Animals: cdla-permissive-1.0
       SWG Camera Traps: cdla-permissive-1.0
       WCS Camera Traps: cdla-permissive-1.0
       Wellington Camera Traps: cdla-permissive-1.0
@@ -28,10 +30,11 @@ data:
       - cc-by-4.0
       - public-domain
     # Classes are Latin taxon names of any rank (species, genus, family, ...) or
-    # raw LILA labels such as empty, car, vehicle. Matching ignores case. A LILA
+    # raw LILA labels such as car or vehicle. Matching ignores case. A LILA
     # label matching several classes goes to the most specific one, e.g. with
     # both "Rattus" and "Rattus rattus", "ship rat" -> Rattus rattus and the
     # genus-only "rat" -> Rattus. An image with several classes is put in each.
+    # Omit empty and other blank labels to skip downloads of blank-only records.
     classes:
       - Rattus norvegicus # brown rat
       - Rattus rattus # black rat
@@ -78,7 +81,6 @@ data:
       - Felis catus # house cat
       - Canis familiaris # domestic dog
       # non animal stuff
-      - empty
       - car
       - vehicle
       - motorcycle

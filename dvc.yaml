@@ -87,6 +87,8 @@ stages:
     deps:
       - scripts/create_yolo_dataset.py
       - src/smartrodent/yolo_dataset_creation.py
+      - src/smartrodent/components.py
+      - src/smartrodent/config_loading.py
       - configs/create_yolo_detector_dataset.yaml
       - datasets/stage7_filtered_data_sampled_oversampled
     outs:
@@ -97,51 +99,46 @@ stages:
     deps:
       - scripts/create_yolo_dataset.py
       - src/smartrodent/yolo_dataset_creation.py
+      - src/smartrodent/components.py
+      - src/smartrodent/config_loading.py
       - configs/create_yolo_classifier_dataset.yaml
       - datasets/stage7_filtered_data_sampled_oversampled
     outs:
       - datasets/stage8_yolo_classifier
 
+  # The config copy written into each output directory is part of the output.
   train_yolo_detector:
-    cmd: uv run python scripts/train_yolo_detector.py configs/train_yolo_detector_config.yaml
+    cmd: uv run python scripts/train_yolo.py configs/train_yolo_detector_config.yaml
     deps:
-      - scripts/train_yolo_detector.py
-      - src/smartrodent/training.py
+      - scripts/train_yolo.py
+      - src/smartrodent/yolo_training.py
+      - src/smartrodent/config_loading.py
+      - src/smartrodent/training_validation.py
       - configs/train_yolo_detector_config.yaml
-      - datasets/stage8_yolo_detector
+      - datasets/stage8_yolo_detector_srilanka
     outs:
       - projects/smartrodent_experiments/training/yolo_detect
 
   train_yolo_classifier:
-    cmd: uv run python scripts/train_yolo_classifier.py configs/train_yolo_classifier_config.yaml
+    cmd: uv run python scripts/train_yolo.py configs/train_yolo_classifier_config.yaml
     deps:
-      - scripts/train_yolo_classifier.py
-      - src/smartrodent/config_utils.py
-      - src/smartrodent/training.py
+      - scripts/train_yolo.py
+      - src/smartrodent/yolo_training.py
+      - src/smartrodent/config_loading.py
+      - src/smartrodent/training_validation.py
       - configs/train_yolo_classifier_config.yaml
-      - datasets/stage8_yolo_classifier
+      - datasets/stage8_yolo_classifier_srilanka
     outs:
-      - projects/smartrodent_experiments/tuning/yolo_classify_speciesnames
-
-  train_yolo_classifier_supcon:
-    cmd: uv run python scripts/train_yolo_classifier_supcon.py configs/train_yolo_classifier_supcon_config.yaml
-    deps:
-      - scripts/train_yolo_classifier_supcon.py
-      - src/smartrodent/config_utils.py
-      - src/smartrodent/training.py
-      - src/smartrodent/yolo_supcon.py
-      - configs/train_yolo_classifier_supcon_config.yaml
-      - datasets/stage8_yolo_classifier
-    outs:
-      - projects/training/classification/xl_speciesnames_supcon
+      - projects/smartrodent_experiments/training/yolo_classify
 
   tune_yolo_classifier:
-    cmd: uv run python scripts/tune_yolo_classifier.py configs/train_yolo_classifier_config.yaml
+    cmd: uv run python scripts/tune_yolo.py configs/train_yolo_classifier_config.yaml
     deps:
-      - scripts/tune_yolo_classifier.py
-      - src/smartrodent/config_utils.py
-      - src/smartrodent/training.py
+      - scripts/tune_yolo.py
+      - src/smartrodent/yolo_training.py
+      - src/smartrodent/config_loading.py
+      - src/smartrodent/training_validation.py
       - configs/train_yolo_classifier_config.yaml
-      - datasets/stage8_yolo_classifier
+      - datasets/stage8_yolo_classifier_srilanka
     outs:
-      - projects/smartrodent_experiments/tuning/yolo_classify_speciesnames_tune
+      - projects/smartrodent_experiments/tuning/yolo_classify

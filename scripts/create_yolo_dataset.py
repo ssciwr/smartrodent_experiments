@@ -1,50 +1,30 @@
-"""Create the YOLO dataset selected by a class-named YAML configuration."""
+"""Create the YOLO datasets listed in a dataset-creation YAML configuration."""
 
 import argparse
 from pathlib import Path
 
-import yaml
-
-from smartrodent.yolo_dataset_creation import (
-    YoloClassifierDatasetCreatorFromSpeciesnet,
-    YoloDetectorDatasetCreatorFromSpeciesnet,
-)
+from smartrodent.yolo_dataset_creation import DatasetCreationPlan
 
 
 def main(config_path: Path) -> None:
-    """Select a supported creator, load its configuration, and create the dataset.
+    """Create every listed dataset with the shared detector and layout.
 
     Args:
-        config_path: YAML containing exactly one creator class name under ``data``.
+        config_path: YAML with a ``detector`` (name and parameters), the
+            ``layout``, optional ``class_names`` and ``batch_size``, and a
+            ``datasets`` list of input/output directories.
 
     Raises:
-        TypeError: Configuration sections are not mappings or values are invalid.
-        ValueError: The creator key is unsupported or ambiguous, or settings are invalid.
-        OSError: Configuration/source files cannot be read or outputs cannot be written.
+        ValueError: The configuration or any dataset's records are invalid; nothing
+            is created then.
+        OSError: Source files cannot be read or outputs cannot be written.
     """
-    configuration = yaml.safe_load(config_path.expanduser().read_text(encoding="utf-8"))
-    if not isinstance(configuration, dict):
-        raise TypeError("The configuration must be a mapping")
-    data = configuration.get("data")
-    if not isinstance(data, dict):
-        raise TypeError("The 'data' configuration must be a mapping")
-    if len(data) != 1:
-        raise ValueError("Configure exactly one dataset creator under 'data'")
-
-    # Keep supported classes explicit: a YAML key must not trigger arbitrary imports.
-    creators = {
-        "YoloDetectorDatasetCreatorFromSpeciesnet": YoloDetectorDatasetCreatorFromSpeciesnet,
-        "YoloClassifierDatasetCreatorFromSpeciesnet": YoloClassifierDatasetCreatorFromSpeciesnet,
-    }
-    name = next(iter(data))
-    if name not in creators:
-        raise ValueError(f"Unsupported dataset creator: {name!r}")
-    creators[name].from_config(config_path).create()
+    DatasetCreationPlan.from_yaml(config_path).create()
 
 
 def _parse_args() -> argparse.Namespace:
     """Parse the required positional configuration-file path."""
-    parser = argparse.ArgumentParser(description="Create a configured YOLO dataset.")
+    parser = argparse.ArgumentParser(description="Create configured YOLO datasets.")
     parser.add_argument(
         "config", type=Path, help="Path to a dataset-creation YAML config."
     )

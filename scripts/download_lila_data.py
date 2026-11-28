@@ -4,16 +4,18 @@ import argparse
 from pathlib import Path
 
 from smartrodent.lila import LilaDataset
+from smartrodent.logging_setup import log_to_console_and_file
 
 
 def main(config_path: Path) -> None:
-    """Build and run a LILA dataset downloader.
+    """Build the downloader, log next to its dataset, and download.
 
     Args:
         config_path: YAML configuration containing the ``data.lila`` section.
     """
-    dataset_client = LilaDataset.from_config(config_path)
-    dataset_client.download()
+    dataset = LilaDataset.from_config(config_path)
+    log_to_console_and_file(dataset.output_path / "lila_dataset.log")
+    dataset.download()
 
 
 def _parse_args() -> argparse.Namespace:

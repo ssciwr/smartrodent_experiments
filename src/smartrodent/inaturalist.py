@@ -6,20 +6,27 @@ import ast
 import logging
 import os
 import shutil
-import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pandas as pd
-import requests
-import urllib3
-import yaml
+from pydantic import Field, validate_call
 from pyinaturalist.session import ClientSession
 from pyinaturalist.v2 import get_observations as get_observations_v2
 from tqdm.auto import tqdm
 
 from .base import DatasetLoader
+from .config_loading import load_section
+from .http_session import retrying_session
+from .training_validation import (
+    Nonblank,
+    NonnegativeInt,
+    NonnegativeNumber,
+    PathSetting,
+)
+
+type Year = Annotated[int, Field(strict=True)]
 
 
 class InaturalistDataset(DatasetLoader):
@@ -39,12 +46,11 @@ class InaturalistDataset(DatasetLoader):
     Args:
         output_path: Directory in which species folders and metadata are saved.
         species: Scientific names to retrieve from iNaturalist.
-        years: Explicit observation years. Mutually exclusive with a complete
-            `first_year`/`last_year` range.
+        years: Explicit observation years. Mutually exclusive with
+            `first_year` and `last_year`.
         first_year: First year in an inclusive year range.
         last_year: Last year in an inclusive year range.
         quality_grade: iNaturalist observation quality grade to request.
-        seed: Retained for backwards-compatible dataset configuration.
         max_img_num: Maximum number of licensed images to save per species.
         max_observations: Maximum number of raw API observations requested per
             species. Duplicate observations count toward this budget.
@@ -52,8 +58,8 @@ class InaturalistDataset(DatasetLoader):
         cache_file: SQLite response-cache path. Defaults next to `output_path`.
         ratelimit_path: Persistent SQLite rate-limit path. Defaults next to
             `output_path` and is retained after downloads.
-        backoff_factor: Exponential backoff factor for API retries.
-        max_retries: Maximum retries after the initial failure for API requests.
+        backoff_factor: Exponential backoff factor for API and image retries.
+        max_retries: Retries after the first attempt of each API or image request.
         config_path: Optional source YAML file to copy into `output_path`.
 
     Attributes:
@@ -61,45 +67,45 @@ class InaturalistDataset(DatasetLoader):
         species (list[str]): Scientific names to download, in configured order.
         years (list[int]): Resolved years sent together in each API request.
         quality_grade (str): Quality grade passed to the iNaturalist API.
-        seed (int): Backwards-compatible dataset configuration value.
         max_img_num (int): Per-species image cap.
         max_observations (int): Per-species raw observation request budget.
         allowed_licenses (set[str]): Accepted photo license codes.
         cache_file (Path): SQLite API response-cache path.
         ratelimit_path (Path): Persistent SQLite rate-limit path.
-        session (ClientSession): Persistent API session owned by this downloader.
+        session (ClientSession): Persistent API session owned by this downloader;
+            it rate-limits, caches and retries the API requests.
+        image_session (requests.Session): Retrying session for image downloads.
         config_path (Path | None): Absolute path to the source YAML file, if any.
-        logger (logging.Logger): Logger named after this class.
+        logger (logging.Logger): The module's logger; the entry point decides
+            where its messages go.
 
     Raises:
-        ValueError: If the year selection is missing, inconsistent, or empty,
-            if `species` is empty, if `max_img_num` is negative, or if
-            `max_observations` is not a nonnegative integer.
+        ValueError: If a setting is invalid, or the year selection is missing,
+            inconsistent, or empty.
     """
 
+    @validate_call
     def __init__(
         self,
-        output_path: str | Path,
-        species: Sequence[str],
-        years: Sequence[int] | None = None,
-        first_year: int | None = None,
-        last_year: int | None = None,
-        quality_grade: str = "research",
-        seed: int = 42,
-        max_img_num: int = 2000,
-        max_observations: int = 4000,
-        allowed_licenses: Sequence[str] = ("cc-by-nc",),
-        cache_file: str | Path | None = None,
-        ratelimit_path: str | Path | None = None,
-        backoff_factor: float = 0.5,
-        max_retries: int = 5,
-        config_path: str | Path | None = None,
+        output_path: PathSetting,
+        species: Annotated[list[Nonblank], Field(min_length=1)],
+        years: list[Year] | None = None,
+        first_year: Year | None = None,
+        last_year: Year | None = None,
+        quality_grade: Nonblank = "research",
+        max_img_num: NonnegativeInt = 2000,
+        max_observations: NonnegativeInt = 4000,
+        allowed_licenses: tuple[Nonblank, ...] = ("cc-by-nc",),
+        cache_file: PathSetting | None = None,
+        ratelimit_path: PathSetting | None = None,
+        backoff_factor: NonnegativeNumber = 0.5,
+        max_retries: NonnegativeInt = 5,
+        config_path: PathSetting | None = None,
     ) -> None:
         self.output_path = Path(output_path).expanduser().resolve()
         self.species = list(species)
         self.years = self._resolve_years(years, first_year, last_year)
         self.quality_grade = quality_grade
-        self.seed = seed
         self.max_img_num = max_img_num
         self.max_observations = max_observations
         configured_licenses = list(dict.fromkeys(allowed_licenses))
@@ -109,22 +115,6 @@ class InaturalistDataset(DatasetLoader):
             if config_path is not None
             else None
         )
-
-        if self.max_img_num < 0:
-            raise ValueError("max_img_num must be zero or greater")
-        if isinstance(self.max_observations, bool) or not isinstance(
-            self.max_observations, int
-        ):
-            raise ValueError("max_observations must be an integer")
-        if self.max_observations < 0:
-            raise ValueError("max_observations must be zero or greater")
-        if isinstance(max_retries, bool) or not isinstance(max_retries, int):
-            raise ValueError("max_retries must be a nonnegative integer")
-        if max_retries < 0:
-            raise ValueError("max_retries must be a nonnegative integer")
-        self.max_retries = max_retries
-        if not self.species:
-            raise ValueError("species must contain at least one scientific name")
 
         self.output_path.mkdir(parents=True, exist_ok=True)
         default_prefix = self.output_path.parent / f".{self.output_path.name}"
@@ -149,39 +139,20 @@ class InaturalistDataset(DatasetLoader):
         # pyinaturalist 0.21.1 validates uppercase licenses while API v2 accepts
         # lowercase values. Session parameters bypass that incompatible validator.
         self.session.params["photo_license"] = ",".join(configured_licenses)
-
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.setLevel(logging.INFO)
-        self.logger.propagate = False
-
-        formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-        )
-
-        file_handler = logging.FileHandler(
-            Path(output_path) / "inaturalist_dataset.log"
-        )
-        file_handler.setFormatter(formatter)
-
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(console_handler)
+        # Images come from a CDN, not the API: no rate limit or response cache, and
+        # caching image bytes in SQLite would only grow the cache file.
+        self.image_session = retrying_session(max_retries, backoff_factor)
+        self.logger = logging.getLogger(__name__)
 
         # Keep setup local and deterministic; downloading remains explicit.
         self._copy_config()
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> InaturalistDataset:
-        """Build a dataset downloader from an iNaturalist YAML configuration.
+        """Build a dataset downloader from the ``data.inaturalist`` YAML mapping.
 
-        The loader accepts either a top-level `inaturalist` mapping or a
-        configuration that is itself that mapping. `allowed_licences` is
-        supported as a backwards-compatible spelling for `allowed_licenses`.
-        Every setting other than `output_path` and `species` falls back to the
-        constructor default when it is absent. The configuration file is copied
-        into the dataset root so a download can always be traced back to it.
+        The configuration file is copied into the dataset root so a download can
+        always be traced back to it.
 
         Args:
             config_path: Path to the YAML configuration file.
@@ -191,50 +162,10 @@ class InaturalistDataset(DatasetLoader):
 
         Raises:
             FileNotFoundError: If `config_path` does not exist.
-            TypeError: If the file is empty or neither it nor its `inaturalist`
-                entry is a mapping.
-            ValueError: If `output_path` or `species` is missing, or if the
-                remaining settings fail constructor validation.
+            ValueError: If the section is missing or its settings are invalid.
         """
         path = Path(config_path).expanduser().resolve()
-        with path.open(encoding="utf-8") as config_file:
-            loaded_config = yaml.safe_load(config_file)
-
-        if not isinstance(loaded_config, dict):
-            raise TypeError(f"Expected a mapping in configuration file {path}")
-
-        config = loaded_config.get("data", loaded_config).get(
-            "inaturalist", loaded_config
-        )
-        if not isinstance(config, dict):
-            raise TypeError("The 'inaturalist' configuration must be a mapping")
-        try:
-            output_path = config["output_path"]
-            species = config["species"]
-        except KeyError as exc:
-            raise ValueError(
-                f"Missing required iNaturalist setting: {exc.args[0]}"
-            ) from exc
-
-        return cls(
-            output_path=output_path,
-            species=species,
-            years=config.get("years"),
-            first_year=config.get("first_year"),
-            last_year=config.get("last_year"),
-            quality_grade=config.get("quality_grade", "research"),
-            seed=config.get("seed", 42),
-            max_img_num=config.get("max_img_num", 2000),
-            max_observations=config.get("max_observations", 4000),
-            allowed_licenses=config.get(
-                "allowed_licenses", config.get("allowed_licences", ("cc-by-nc",))
-            ),
-            cache_file=config.get("cache_file"),
-            ratelimit_path=config.get("ratelimit_path"),
-            backoff_factor=config.get("backoff_factor", 0.5),
-            max_retries=config.get("max_retries", 5),
-            config_path=path,
-        )
+        return cls(**load_section(path, "data", "inaturalist"), config_path=path)
 
     @staticmethod
     def _resolve_years(
@@ -260,13 +191,13 @@ class InaturalistDataset(DatasetLoader):
                 `first_year` is greater than `last_year`.
         """
         explicit_years = list(years or [])
-        has_range = first_year is not None and last_year is not None
+        range_parts = (first_year is not None) + (last_year is not None)
 
-        if has_range and explicit_years:
+        if range_parts and explicit_years:
             raise ValueError("years and first_year/last_year are mutually exclusive")
-        if not has_range and not explicit_years:
+        if range_parts != 2 and not explicit_years:
             raise ValueError("must have either years or first_year and last_year")
-        if has_range:
+        if range_parts == 2:
             if first_year > last_year:
                 raise ValueError("first_year must be less than or equal to last_year")
             return list(range(first_year, last_year + 1))
@@ -302,7 +233,6 @@ class InaturalistDataset(DatasetLoader):
         """
         records: list[dict[str, Any]] = []
         remaining = self.max_observations
-        consecutive_errors = 0
         page = 1
         with tqdm(
             total=self.max_observations, desc=f"Fetching {species} records"
@@ -315,52 +245,32 @@ class InaturalistDataset(DatasetLoader):
                     species,
                     page,
                 )
-                try:
-                    response = get_observations_v2(
-                        taxon_name=species,
-                        quality_grade=self.quality_grade,
-                        year=self.years,
-                        photos=True,
-                        order_by="random",
-                        page=page,
-                        per_page=page_size,
-                        fields="all",
-                        session=self.session,
-                    )
-                    consecutive_errors = 0
-                    page_records = response.get("results", [])[:remaining]
-                    records.extend(page_records)
-                    retrieved = len(page_records)
-                    remaining -= retrieved
-                    progress.update(retrieved)
+                # The API session retries transient failures itself; anything it
+                # gives up on propagates, so saved records stay as they are.
+                response = get_observations_v2(
+                    taxon_name=species,
+                    quality_grade=self.quality_grade,
+                    year=self.years,
+                    photos=True,
+                    order_by="random",
+                    page=page,
+                    per_page=page_size,
+                    fields="all",
+                    session=self.session,
+                )
+                page_records = response.get("results", [])[:remaining]
+                records.extend(page_records)
+                retrieved = len(page_records)
+                remaining -= retrieved
+                progress.update(retrieved)
 
-                    total_results = response.get("total_results")
-                    population_exhausted = (
-                        isinstance(total_results, int) and len(records) >= total_results
-                    )
-                    if retrieved < page_size or population_exhausted:
-                        break
-                    page += 1
-                except requests.exceptions.RetryError as exc:
-                    self.logger.error("Retry error while fetching records: %s", exc)
-                    consecutive_errors = self._retry_after_error(
-                        exc, consecutive_errors, delay_seconds=30
-                    )
-                except requests.HTTPError as exc:
-                    self.logger.error("Failed to fetch records: %s", exc)
-                    consecutive_errors = self._retry_after_error(
-                        exc, consecutive_errors, delay_seconds=30
-                    )
-                except requests.RequestException as exc:
-                    self.logger.error("Request error while fetching records: %s", exc)
-                    consecutive_errors = self._retry_after_error(
-                        exc, consecutive_errors, delay_seconds=30
-                    )
-                except Exception as exc:
-                    self.logger.error(
-                        "Unexpected error while fetching records: %s", exc
-                    )
-                    raise
+                total_results = response.get("total_results")
+                population_exhausted = (
+                    isinstance(total_results, int) and len(records) >= total_results
+                )
+                if retrieved < page_size or population_exhausted:
+                    break
+                page += 1
 
         # Keep one row per photo, retaining its original position for filenames.
         photo_records = []
@@ -390,62 +300,24 @@ class InaturalistDataset(DatasetLoader):
         )
         return records_df.reset_index(drop=True)
 
-    def _retry_after_error(
-        self, error: Exception, consecutive_errors: int, *, delay_seconds: int
-    ) -> int:
-        """Bound a manual retry loop using the configured retry budget.
+    def _download_photo(self, photo_url: str, image_path: Path) -> None:
+        """Download one photo's large variant to ``image_path``.
+
+        The API returns thumbnail URLs; they are rewritten to the large variant.
 
         Args:
-            error: The latest anticipated request failure.
-            consecutive_errors: Number of failures for the current request so far.
-            delay_seconds: Delay before retrying, if retries remain.
-
-        Returns:
-            Updated consecutive error count.
+            photo_url: Thumbnail URL from the photo record.
+            image_path: Where the image is written.
 
         Raises:
-            The original request exception after ``max_retries`` retries.
+            requests.HTTPError: If the image request still fails after retries.
+            requests.ConnectionError: If the server stays unreachable.
         """
-        next_error_count = consecutive_errors + 1
-        if next_error_count > self.max_retries:
-            raise error
-        time.sleep(delay_seconds)
-        return next_error_count
-
-    def _download_photo(
-        self, photo: dict[str, Any], images_path: Path, observation_id: int, index: int
-    ) -> bool:
-        """Download a single photo with a usable URL.
-
-        The thumbnail URL returned by the API is rewritten to the large variant
-        before the request, and the image is saved as
-        `{observation_id}_{index}.jpg`.
-
-        Args:
-            photo: One entry of an observation's `photos` list.
-            images_path: Directory the image is written to.
-            observation_id: Identifier of the owning observation.
-            index: Position of the photo within its observation.
-
-        Returns:
-            True if an image was written, or False for a missing URL or an
-            already-existing image.
-
-        Raises:
-            requests.HTTPError: If the image request returns an error status.
-        """
-        photo_url = photo.get("url")
-        if not photo_url:
-            return False
-
-        image_path = images_path / f"{observation_id}_{index}.jpg"
-        if image_path.exists():
-            return False
-        else:
-            response = requests.get(photo_url.replace("square", "large"), timeout=30)
-            response.raise_for_status()
-            image_path.write_bytes(response.content)
-            return True
+        response = self.image_session.get(
+            photo_url.replace("square", "large"), timeout=30
+        )
+        response.raise_for_status()
+        image_path.write_bytes(response.content)
 
     def _download_species_images(
         self, records_df: pd.DataFrame, images_path: Path
@@ -458,12 +330,14 @@ class InaturalistDataset(DatasetLoader):
             images_path: Directory the images are written to.
 
         Returns:
-            The number of newly written images and the same DataFrame, with
-            an `image_path` column containing paths for saved or existing photos.
-            Skipped photos have no path. This method does not save the DataFrame.
+            The number of images now available (downloaded or already present,
+            at most `max_img_num`) and the same DataFrame, with an `image_path`
+            column containing paths for those photos. Skipped photos have no
+            path. This method does not save the DataFrame.
 
         Raises:
             KeyError: If a nonempty frame is missing required photo columns.
+            requests.HTTPError: If an image request still fails after retries.
         """
         if not records_df.empty:
             required = {"id", "photo_index", "photo.url"}
@@ -474,76 +348,31 @@ class InaturalistDataset(DatasetLoader):
             records_df["image_path"] = pd.Series(
                 None, index=records_df.index, dtype=object
             )
+        path_column = records_df.columns.get_loc("image_path")
 
-        downloaded_images = 0
-        consecutive_errors = 0
-        with tqdm(total=len(records_df)) as progress:
-            i = 0
-            while i < len(records_df) and downloaded_images < self.max_img_num:
-                try:
-                    record = records_df.iloc[i]
-                    observation_id = record["id"]
-                    photo_index = record["photo_index"]
-                    photo_url = record["photo.url"]
-                    if (
-                        pd.isna(observation_id)
-                        or pd.isna(photo_index)
-                        or not isinstance(photo_url, str)
-                        or not photo_url
-                    ):
-                        consecutive_errors = 0
-                        i += 1
-                        progress.update(1)
-                        continue
+        available_images = 0
+        for row in tqdm(range(len(records_df))):
+            if available_images >= self.max_img_num:
+                break
+            record = records_df.iloc[row]
+            photo_url = record["photo.url"]
+            if (
+                pd.isna(record["id"])
+                or pd.isna(record["photo_index"])
+                or not isinstance(photo_url, str)
+                or not photo_url
+            ):
+                continue
 
-                    # CSV ids can become floats when another row has a missing id.
-                    observation_id = int(observation_id)
-                    photo_index = int(photo_index)
-                    photo = {"url": photo_url}
-                    image_path = images_path / f"{observation_id}_{photo_index}.jpg"
-                    if not image_path.exists():
-                        # download the image if it hasn't been saved yet
-                        self._download_photo(
-                            photo, images_path, observation_id, photo_index
-                        )
-                        downloaded_images += 1
-                    else:
-                        # has been downloaded before
-                        downloaded_images += 1
-
-                    if image_path.exists():
-                        records_df.iat[i, records_df.columns.get_loc("image_path")] = (
-                            str(image_path)
-                        )
-                    progress.update(1)
-                    i += 1
-                    consecutive_errors = 0
-                except requests.exceptions.RetryError as exc:
-                    self.logger.error("Retry error while fetching image: %s", exc)
-                    consecutive_errors = self._retry_after_error(
-                        exc, consecutive_errors, delay_seconds=20
-                    )
-                except urllib3.exceptions.MaxRetryError as exc:
-                    self.logger.error(
-                        "Max retries exceeded while fetching image: %s", exc
-                    )
-                    consecutive_errors = self._retry_after_error(
-                        exc, consecutive_errors, delay_seconds=20
-                    )
-                except requests.HTTPError as exc:
-                    self.logger.error("Failed to fetch image: %s", exc)
-                    consecutive_errors = self._retry_after_error(
-                        exc, consecutive_errors, delay_seconds=20
-                    )
-                except requests.RequestException as exc:
-                    self.logger.error("Request error while fetching image: %s", exc)
-                    consecutive_errors = self._retry_after_error(
-                        exc, consecutive_errors, delay_seconds=20
-                    )
-                except Exception as exc:
-                    self.logger.error("Unexpected error while fetching image: %s", exc)
-                    raise
-        return downloaded_images, records_df
+            # CSV ids can become floats when another row has a missing id.
+            image_path = (
+                images_path / f"{int(record['id'])}_{int(record['photo_index'])}.jpg"
+            )
+            if not image_path.exists():
+                self._download_photo(photo_url, image_path)
+            available_images += 1
+            records_df.iat[row, path_column] = str(image_path)
+        return available_images, records_df
 
     def download(self) -> None:
         """Retrieve records for all species before downloading any images.
@@ -556,6 +385,7 @@ class InaturalistDataset(DatasetLoader):
             self.retrieve_records()
             self.download_images()
         finally:
+            self.image_session.close()
             cache_path = Path(self.session.cache.db_path)
             self.session.close()
             for path in (
@@ -624,16 +454,15 @@ class InaturalistDataset(DatasetLoader):
             downloaded, records_df = self._download_species_images(
                 records_df, images_path
             )
-            if "image_path" in records_df.columns:
-                # Skipped or undownloaded photos can lack a path. na_action="ignore"
-                # retains those missing values and rows without warning or filling
-                # in an image path that was never established.
-                records_df["image_path"] = records_df["image_path"].map(
-                    lambda path: os.path.relpath(
-                        (self.output_path.parent / path).resolve(),
-                        self.output_path.parent,
-                    ),
-                    na_action="ignore",
-                )
+            # Skipped or undownloaded photos lack a path. na_action="ignore" retains
+            # those missing values and rows without warning or filling in an image
+            # path that was never established.
+            records_df["image_path"] = records_df["image_path"].map(
+                lambda path: os.path.relpath(
+                    (self.output_path.parent / path).resolve(),
+                    self.output_path.parent,
+                ),
+                na_action="ignore",
+            )
             records_df.to_csv(records_path, index=False)
-            self.logger.info("Downloaded %s images for %s", downloaded, species)
+            self.logger.info("%s images available for %s", downloaded, species)

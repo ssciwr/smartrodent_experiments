@@ -47,8 +47,9 @@ outputs
 .coverage
 
 # local MLflow tracking
-mlflow.db
-mlflow.db-shm
-mlflow.db-wal
+*.db
+*.db-shm
+*.db-wal
 mlartifacts/
 mlruns
+projects

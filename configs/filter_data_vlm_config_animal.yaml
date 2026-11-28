@@ -1,81 +1,99 @@
-backend: ollama # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
-taskname: animal
-labels: [kept, rejected]
-columns:
-  photo_id: photo.id
-  image_path: image_path
-
+# Run: python scripts/filter_data_vlm.py configs/filter_data_vlm_config_animal.yaml
 paths:
   input_root: datasets/inaturalist_srilanka
   output_root: datasets/stage1_filtered_animal_srilanka
 
-ollama:
-  model: qwen3.6:35b-a3b
-  num_workers: 1
-  options:
-    temperature: 0.1
-    repeat_penalty: 1.1
-    repeat_last_n: 64
+filter:
+  taskname: animal
+  photo_id_column: photo.id
+  image_path_column: image_path
+  # OllamaBackend (local Ollama server) or VllmBackend (fast, batched, local
+  # GPU); swap in the commented block to change it.
+  backend:
+    name: OllamaBackend
+    parameters:
+      model: qwen3.6:35b-a3b
+      num_workers: 1
+      # model: qwen3-vl:8b
+      options:
+        temperature: 0.1
+        repeat_penalty: 1.1
+        repeat_last_n: 64
+  # backend:
+  #   name: VllmBackend
+  #   parameters:
+  #     model: Qwen/Qwen3.8-27B
+  #     # model: Qwen/Qwen3.6-35B-A3B
+  #     batch_size: 8
+  #     engine:  # keyword arguments of vllm.LLM
+  #       gpu_memory_utilization: 0.97
+  #       max_model_len: 262144
+  #       # tensor_parallel_size: 8
+  #     sampling:  # keyword arguments of vllm.SamplingParams
+  #       temperature: 0
+  #       max_tokens: 300
+  # Enforced by the backend and inserted into the prompt at {answer_schema}. The
+  # "label" enum defines the label columns <label>_<taskname>; every other
+  # property is saved as column vlm_<taskname>_<property>.
+  answer_schema:
+    type: object
+    properties:
+      label: {type: string, enum: [kept, rejected]}
+      visible_animal: {type: boolean}
+      evidence_kept: {type: array, items: {type: string}}
+      evidence_rejected: {type: array, items: {type: string}}
+      image_quality: {type: string, enum: [clear, poor, unusable]}
+      needs_human_review: {type: boolean}
+    required:
+      - label
+      - visible_animal
+      - evidence_kept
+      - evidence_rejected
+      - image_quality
+      - needs_human_review
+    additionalProperties: false
+  system_prompt: |
+    You are a meticulous wildlife biologist and expert camera-trap image analyst. You
+    have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
+    grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
+    report evidence you can actually see in the image and never guess. Check the
+    entire image for visible humans or human body parts and for animals being held,
+    restrained, trapped, or confined in human-made containers. Distinguish freely
+    roaming wildlife in human-made surroundings from captive or staged animals.
+    Camera traps record animals without capturing them and are allowed.
 
-  # model: qwen3-vl:8b
+  prompt: |
+    You are classifying wildlife images.
 
-vllm:
-  # model: Qwen/Qwen3.6-35B-A3B
-  model: Qwen/Qwen3.8-27B
-  gpu_memory_utilization: 0.97
-  # max_new_tokens: 500
-  batch_size: 8
-  # tensor-parallel-size: 8
-  max-model-len: 262144
-system_prompt: |
-  You are a meticulous wildlife biologist and expert camera-trap image analyst. You
-  have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
-  grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
-  report evidence you can actually see in the image and never guess. Check the
-  entire image for visible humans or human body parts and for animals being held,
-  restrained, trapped, or confined in human-made containers. Distinguish freely
-  roaming wildlife in human-made surroundings from captive or staged animals.
-  Camera traps record animals without capturing them and are allowed.
+    Return ONLY valid JSON matching this JSON schema:
 
-prompt: |
-  You are classifying wildlife images.
+    {answer_schema}
 
-  Return ONLY valid JSON with this exact schema:
-
-  {
-    "label": "kept | rejected",
-    "visible_animal": true,
-    "evidence_kept": ["string"],
-    "evidence_rejected": ["string"],
-    "image_quality": "clear | poor | unusable",
-    "needs_human_review": true | false
-  }
-
-  Rules:
-  - label must be exactly one of: "kept", "rejected".
-  - Use "rejected" only for clear evidence of:
-    - dead animal: carcass, roadkill, skull, bones, preserved specimen, visibly rejected body.
-    - non-terrestrial animal, non-bird or no animal at all: fish, plant, landscape without animal in it
-    - any visible human or human body part anywhere in the image, including hands,
-      fingers, arms, legs, feet, faces, or partial figures, even if a live animal
-      is also visible.
-    - an animal outside a natural, freely roaming setting: visibly held, handled,
-      restrained, captive, or staged for photography; inside a capture trap or
-      cage; or contained in a human-made vessel such as a bucket, jar, glass,
-      bottle, tank, box, or similar container.
-  - Human-made surroundings alone are NOT a reason to reject an image. Allow
-    freely roaming animals in house gardens, yards, streets, around buildings,
-    or similar places, provided no rejection rule applies.
-  - Camera-trap images and visible camera-trap equipment are allowed. A camera
-    trap photographs animals; a capture trap catches or confines them. Reject
-    animals visibly caught or confined in capture traps, not camera-trap images.
-  - Use "kept" only if a live animal is visible and can be identified as such,
-    and none of the rejection rules applies. Clear rejection evidence takes
-    precedence over the presence of a live animal.
-  - Do not infer humans, captivity, confinement, or staging from the image source
-    or human-made surroundings alone. If the evidence is ambiguous, do not guess;
-    set needs_human_review to true.
-  - needs_human_review should be true for poor/unusable images, ambiguous context,
-    or conflicting evidence.
-  - Do not include markdown.
-  - Do not include text outside the JSON object.
+    Rules:
+    - label must be exactly one of: "kept", "rejected".
+    - Use "rejected" only for clear evidence of:
+      - dead animal: carcass, roadkill, skull, bones, preserved specimen, visibly rejected body.
+      - non-terrestrial animal, non-bird or no animal at all: fish, plant, landscape without animal in it
+      - any visible human or human body part anywhere in the image, including hands,
+        fingers, arms, legs, feet, faces, or partial figures, even if a live animal
+        is also visible.
+      - an animal outside a natural, freely roaming setting: visibly held, handled,
+        restrained, captive, or staged for photography; inside a capture trap or
+        cage; or contained in a human-made vessel such as a bucket, jar, glass,
+        bottle, tank, box, or similar container.
+    - Human-made surroundings alone are NOT a reason to reject an image. Allow
+      freely roaming animals in house gardens, yards, streets, around buildings,
+      or similar places, provided no rejection rule applies.
+    - Camera-trap images and visible camera-trap equipment are allowed. A camera
+      trap photographs animals; a capture trap catches or confines them. Reject
+      animals visibly caught or confined in capture traps, not camera-trap images.
+    - Use "kept" only if a live animal is visible and can be identified as such,
+      and none of the rejection rules applies. Clear rejection evidence takes
+      precedence over the presence of a live animal.
+    - Do not infer humans, captivity, confinement, or staging from the image source
+      or human-made surroundings alone. If the evidence is ambiguous, do not guess;
+      set needs_human_review to true.
+    - needs_human_review should be true for poor/unusable images, ambiguous context,
+      or conflicting evidence.
+    - Do not include markdown.
+    - Do not include text outside the JSON object.

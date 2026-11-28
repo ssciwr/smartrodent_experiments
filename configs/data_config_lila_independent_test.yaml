@@ -1,0 +1,62 @@
+# External camera-trap sanity check. Keep these samples out of training and tuning.
+data:
+  lila:
+    output_path: datasets/lila_independent_test
+    index_url: https://lila.science/wp-content/uploads/2023/06/lila_camera_trap_datasets.csv
+    taxonomy_url: https://lila.science/public/lila-taxonomy-mapping_release.csv
+    datasets:
+      Oregon Critters: cdla-permissive-1.0
+      Indiana Small Animals: cdla-permissive-1.0
+      Ohio Small Animals: cdla-permissive-1.0
+      California Small Animals: cc-by-4.0
+    allowed_licenses:
+      - cdla-permissive-1.0
+      - cc-by-4.0
+    classes:
+      # Existing classifier targets represented in these sources.
+      - Mus musculus # house mouse
+      - Rattus norvegicus # brown rat
+      - Rattus rattus # black rat
+      - Vulpes vulpes # red fox
+      - Felis catus # domestic cat
+      - Canis familiaris # domestic dog
+
+      # Additional small mammals.
+      - Microtus pennsylvanicus # meadow vole
+      - Peromyscus leucopus # white-footed mouse
+      - Sorex cinereus # masked shrew
+      - Napaeozapus insignis # woodland jumping mouse
+      - Blarina brevicauda # northern short-tailed shrew
+      - Tamias striatus # eastern chipmunk
+      - Glaucomys volans # southern flying squirrel
+      - Reithrodontomys megalotis # western harvest mouse
+      - Ammospermophilus leucurus # white-tailed antelope squirrel
+      - Otospermophilus beecheyi # California ground squirrel
+      - Microtus californicus # California vole
+      - Neotoma fuscipes # dusky-footed woodrat
+      - Neotamias townsendii # Townsend's chipmunk
+      - Tamiasciurus douglasii # Douglas squirrel
+      - Glaucomys oregonensis # Humboldt's flying squirrel
+      - Aplodontia rufa # mountain beaver
+
+      # Additional predators.
+      - Neogale frenata # long-tailed weasel
+      - Neogale vison # American mink
+      # Match Indiana's source label exactly. LILA also maps California's
+      # coarser "weasel species" label to Mustela nivalis.
+      - least weasel # Mustela nivalis
+      - Sistrurus catenatus # eastern massasauga
+      - Lampropeltis triangulum # eastern milksnake
+      - Pantherophis spiloides # gray ratsnake
+      - Pituophis catenifer # gophersnake
+      - Lampropeltis californiae # California kingsnake
+      - Spilogale gracilis # western spotted skunk
+      - Crotalus oreganus # western rattlesnake
+      - Lynx rufus # bobcat
+      - Urocyon cinereoargenteus # gray fox
+      - Canis latrans # coyote
+
+    # Limit downloads to 1000 frames per class and source for the sanity check.
+    # The downloader samples by sequence when available, otherwise by location.
+    max_img_num: 1000
+    seed: 42

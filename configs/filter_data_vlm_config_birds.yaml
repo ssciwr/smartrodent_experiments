@@ -1,30 +1,8 @@
-backend: vllm # "vllm" (fast, batched, local GPU) or "ollama" (fallback)
-taskname: bird
-labels: [kept, rejected]
-columns:
-  photo_id: photo.id
-  image_path: image_path
-
+# Run: python scripts/filter_data_vlm.py configs/filter_data_vlm_config_birds.yaml
 paths:
   input_root: datasets/stage1_filtered_animal_srilanka
   output_root: datasets/stage2_filtered_birds_srilanka
-
-ollama:
-  model: qwen3.6:35b-a3b
-  options:
-    temperature: 0.1
-    repeat_penalty: 1.1
-    repeat_last_n: 64
-
-  # model: qwen3-vl:8b
-vllm:
-  # model: Qwen/Qwen2.5-VL-3B-Instruct
-  model: Qwen/Qwen3.8-27B
-  gpu_memory_utilization: 0.97
-  # max_new_tokens: 500
-  batch_size: 8
-  # tensor-parallel-size: 8
-  max-model-len: 262144
+# Only these species are filtered; the others pass through.
 species:
   - Buteo buteo # common buzzard
   - Ciconia ciconia # white stork
@@ -32,30 +10,72 @@ species:
   - Spilornis cheela # crested serpent eagle
   - Centropus sinensis #  crow pheasant
   - Pavo cristatus # indian pea fowl
-system_prompt: |
-  You are a meticulous wildlife biologist and expert camera-trap image analyst. You
-  have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
-  grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
-  report evidence you can actually see in the image and never guess.
-prompt: |
-  You are classifying wildlife images.
 
-  Return ONLY valid JSON with this exact schema:
+filter:
+  taskname: bird
+  photo_id_column: photo.id
+  image_path_column: image_path
+  # OllamaBackend (local Ollama server) or VllmBackend (fast, batched, local
+  # GPU); swap in the commented block to change it.
+  backend:
+    name: VllmBackend
+    parameters:
+      model: Qwen/Qwen3.8-27B
+      # model: Qwen/Qwen3.6-35B-A3B
+      batch_size: 8
+      engine:  # keyword arguments of vllm.LLM
+        gpu_memory_utilization: 0.97
+        max_model_len: 262144
+        # tensor_parallel_size: 8
+      sampling:  # keyword arguments of vllm.SamplingParams
+        temperature: 0
+        max_tokens: 300
+  # backend:
+  #   name: OllamaBackend
+  #   parameters:
+  #     model: qwen3.6:35b-a3b
+  #     # model: qwen3-vl:8b
+  #     options:
+  #       temperature: 0.1
+  #       repeat_penalty: 1.1
+  #       repeat_last_n: 64
+  # Enforced by the backend and inserted into the prompt at {answer_schema}. The
+  # "label" enum defines the label columns <label>_<taskname>; every other
+  # property is saved as column vlm_<taskname>_<property>.
+  answer_schema:
+    type: object
+    properties:
+      label: {type: string, enum: [kept, rejected]}
+      visible_animal: {type: boolean}
+      evidence_kept: {type: array, items: {type: string}}
+      evidence_rejected: {type: array, items: {type: string}}
+      image_quality: {type: string, enum: [clear, poor, unusable]}
+      needs_human_review: {type: boolean}
+    required:
+      - label
+      - visible_animal
+      - evidence_kept
+      - evidence_rejected
+      - image_quality
+      - needs_human_review
+    additionalProperties: false
+  system_prompt: |
+    You are a meticulous wildlife biologist and expert camera-trap image analyst. You
+    have extensive experience reviewing citizen scientist images and know their common artifacts: motion blur, infrared/night-vision
+    grain, partial occlusion by objects, dead animals or animal remains being photographed, animals photographed at varying distances. You only
+    report evidence you can actually see in the image and never guess.
+  prompt: |
+    You are classifying wildlife images.
 
-  {
-    "label": "kept | rejected",
-    "visible_animal": true,
-    "evidence_kept": ["string"],
-    "evidence_rejected": ["string"],
-    "image_quality": "clear | poor | unusable",
-    "needs_human_review": true | false
-  }
+    Return ONLY valid JSON matching this JSON schema:
 
-  Rules:
-  - label must be exactly one of: "kept", "rejected".
-  - Use "rejected" only for clear evidence is present that the image does depict a bird in flight before a sky-like background.
-  - Use "kept" only if a bird sitting, perching or standing in a natural environment is clearly visible in the image.
-  - needs_human_review should be true for poor/unusable images, or conflicting
-    evidence.
-  - Do not include markdown.
-  - Do not include text outside the JSON object.
+    {answer_schema}
+
+    Rules:
+    - label must be exactly one of: "kept", "rejected".
+    - Use "rejected" only for clear evidence is present that the image does depict a bird in flight before a sky-like background.
+    - Use "kept" only if a bird sitting, perching or standing in a natural environment is clearly visible in the image.
+    - needs_human_review should be true for poor/unusable images, or conflicting
+      evidence.
+    - Do not include markdown.
+    - Do not include text outside the JSON object.
