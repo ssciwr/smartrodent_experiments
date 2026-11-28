@@ -63,7 +63,7 @@ When implementing features, work like this:
 - after the user gives you the requirements, use the following process when tasked with implementation:
     1) plan: Write a plan for implementation including the test list and -functionality (one line per behaviour, Hypothesis candidates marked). Ask the human to approve plan and test list in one stop.
     2) tests and implementation: one implementation subagent writes the approved test list, confirms it is red for the right reason (missing code, not test bugs), then writes the minimal code that turns the tests green: only what the plan and tests require, no speculative helpers or compatibility shims.
-    3) review: the reviewer subagent reviews tests and implementation together in one round. The same implementation subagent (resumed, not a new one) fixes all findings. Only blocker fixes get a second, targeted review round.
+    3) review: the reviewer subagent reviews tests and implementation together, at most 4 rounds. After each round the same implementation subagent (resumed, not a new one) fixes all findings. Rounds after the first only review the changes since the previous round and check that the previous findings are resolved. Stop as soon as a round has no blocker or should-fix findings; nits are fixed without another round.
     4) refactor: run the refactorer subagent only when the review flags unneeded complexity; its result gets one review round.
     5) final human review, iterate until the human approves
 - the human sees the tests again only with the final result, unless writing or reviewing them raises a specification question
