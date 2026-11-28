@@ -44,12 +44,10 @@ This project uses DVC as its core driver.
 
 ## Role separation
 
-The main agent acts as an orchestrator, not an implementer.
+The main agent implements (tests and code) itself, in the current session. There are no implementation subagents.
 
-- Delegate implementation, testing and refactoring.
-- Delegate verification to independent reviewers.
+- Delegate verification to the independent reviewer subagent.
 - Retain responsibility for architectural coherence.
-- Resolve conflicts between subagents.
 - Escalate specification ambiguities and consequential
   architectural decisions to the human.
 - Do not make unapproved changes to the specification.
@@ -62,14 +60,13 @@ When implementing features, work like this:
 - use the test driven development paradigm
 - after the user gives you the requirements, use the following process when tasked with implementation:
     1) plan: Write a plan for implementation including the test list and -functionality (one line per behaviour, Hypothesis candidates marked). Ask the human to approve plan and test list in one stop.
-    2) tests and implementation: one implementation subagent writes the approved test list, confirms it is red for the right reason (missing code, not test bugs), then writes the minimal code that turns the tests green: only what the plan and tests require, no speculative helpers or compatibility shims.
-    3) review: the reviewer subagent reviews tests and implementation together, at most 4 rounds. After each round the same implementation subagent (resumed, not a new one) fixes all findings. Rounds after the first only review the changes since the previous round and check that the previous findings are resolved. Stop as soon as a round has no blocker or should-fix findings; nits are fixed without another round.
-    4) refactor: run the refactorer subagent only when the review flags unneeded complexity; its result gets one review round.
-    5) final human review, iterate until the human approves
+    2) tests and implementation: the main agent writes the approved test list, confirms it is red for the right reason (missing code, not test bugs), then writes the minimal code that turns the tests green: only what the plan and tests require, no speculative helpers or compatibility shims.
+    3) review: the reviewer subagent reviews tests and implementation together, at most 4 rounds. After each round the main agent fixes all findings. Rounds after the first only review the changes since the previous round and check that the previous findings are resolved. Stop as soon as a round has no blocker or should-fix findings; nits are fixed without another round.
+    4) final human review, iterate until the human approves
 - the human sees the tests again only with the final result, unless writing or reviewing them raises a specification question
-- the full test suite runs once per step, by the subagent doing that step, in the foreground (targeted test files while iterating are fine). It reports the commands and counts. The orchestrator does not re-run it.
-- keep context small: delegation prompts name the exact files to read and the scope; subagent reports and orchestrator messages are short and contain only results, decisions and open questions
-- the delegation prompt is the handoff: it contains the approved test list, the API signatures the tests target, and the files to create or modify. The subagent reads only those files plus one existing test file for style. It does not read the plans, AGENTS.md or unrelated modules; whatever it needs from them belongs in the prompt.
+- the full test suite runs once per step, in the foreground (targeted test files while iterating are fine). Report the commands and counts.
+- keep context small: delegation prompts to the reviewer name the exact files to read and the scope; subagent reports and messages to the human are short and contain only results, decisions and open questions
+- the delegation prompt is the handoff: it contains the approved plan and test list, and the files changed. The subagent reads only those files plus whatever it needs to verify them; whatever it needs from the plans or AGENTS.md belongs in the prompt.
 
 ## Coding guidelines
 
