@@ -140,7 +140,7 @@ class ClassifierTask(L.LightningModule):
         )
         self._training_loss = torch.zeros(())
         self._training_count = 0
-        self._validation_loss = torch.zeros(())
+        self._validation_losses: list[torch.Tensor] = []
         self._validation_targets: list[torch.Tensor] = []
         self._validation_predictions: list[torch.Tensor] = []
         self.train()
@@ -185,16 +185,18 @@ class ClassifierTask(L.LightningModule):
         return loss
 
     def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        """Accumulate summed cross-entropy and predictions of a validation batch."""
+        """Accumulate per-sample cross-entropy and predictions of a validation batch."""
         labels, images = batch
         logits = self(images)
-        loss = F.cross_entropy(logits, labels)
-        self._validation_loss = self._validation_loss.to(loss.device) + (
-            loss.detach() * len(labels)
-        )
+        # Per-sample losses are kept (not just their sum) so that the epoch can report
+        # their distribution: the mean alone hides a few confidently wrong samples.
+        losses = F.cross_entropy(logits, labels, reduction="none")
+        # float32: a half-precision trainer yields half-precision losses, which
+        # torch.quantile rejects; the statistics need no half-precision speed.
+        self._validation_losses.append(losses.detach().float())
         self._validation_targets.append(labels.detach().cpu())
         self._validation_predictions.append(logits.argmax(dim=1).detach().cpu())
-        return loss
+        return losses.mean()
 
     def on_train_epoch_start(self) -> None:
         """Start each epoch's training mean from zero.
@@ -214,7 +216,11 @@ class ClassifierTask(L.LightningModule):
         self._log_training_mean(CE_METRIC, prog_bar=True)
 
     def on_validation_epoch_end(self) -> None:
-        """Log the whole-split mean loss, the configured scores and the epoch's training mean.
+        """Log the whole-split loss statistics, the configured scores and the training mean.
+
+        The loss statistics are the mean and the per-sample minimum, median, 95th
+        percentile and maximum, plus the mean over correctly and wrongly classified
+        samples.
 
         Validation runs after the epoch's training batches and before its
         ``on_train_epoch_end``. Logging everything in this one hook makes the CSV
@@ -222,15 +228,46 @@ class ClassifierTask(L.LightningModule):
         """
         targets = torch.cat(self._validation_targets)
         predictions = torch.cat(self._validation_predictions)
-        mean = self._validation_loss / len(targets)
-        self._validation_loss = torch.zeros(())
+        losses = torch.cat(self._validation_losses)
+        self._validation_losses.clear()
         self._validation_targets.clear()
         self._validation_predictions.clear()
-        self.log(CE_METRIC, mean, prog_bar=True, batch_size=len(targets))
+        self.log(CE_METRIC, losses.mean(), prog_bar=True, batch_size=len(targets))
+        statistics = self._loss_statistics(losses, predictions == targets)
+        self.log_dict(statistics, batch_size=len(targets))
         scores = self.metrics.score(targets.numpy(), np.asarray(predictions.numpy()))
         self.log_dict(scores, batch_size=len(targets))
         if not self.trainer.sanity_checking:  # no training has happened yet then
             self._log_training_mean(f"train_{CE_METRIC}", prog_bar=False)
+
+    @staticmethod
+    def _loss_statistics(
+        losses: torch.Tensor, correct: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Summarize per-sample losses: extremes, quantiles and means by correctness.
+
+        The median and 95th percentile are linear-interpolated quantiles. The mean of a
+        group without samples (no wrong or no right prediction) is NaN, not a number
+        that could be mistaken for a loss.
+        """
+        correct = correct.to(losses.device)
+        nan = torch.full((), float("nan"), device=losses.device)
+        if correct.any():
+            correct_mean = losses[correct].mean()
+        else:
+            correct_mean = nan
+        if correct.all():
+            wrong_mean = nan
+        else:
+            wrong_mean = losses[~correct].mean()
+        return {
+            "ce_loss_min": losses.min(),
+            "ce_loss_median": losses.quantile(0.5),
+            "ce_loss_p95": losses.quantile(0.95),
+            "ce_loss_max": losses.max(),
+            "ce_loss_correct_mean": correct_mean,
+            "ce_loss_wrong_mean": wrong_mean,
+        }
 
     def _log_training_mean(self, name: str, *, prog_bar: bool) -> None:
         """Log the epoch's mean training loss and reset the accumulators."""

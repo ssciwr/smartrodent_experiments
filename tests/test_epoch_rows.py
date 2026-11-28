@@ -135,6 +135,17 @@ def _recording(base, covered):
 TRAINERS = {"classifier": _train_classifier, "supcon": _train_supcon}
 TRAIN_COLUMN = {"classifier": "train_ce_loss_mean", "supcon": "train_supcon_loss_mean"}
 OBJECTIVE_COLUMN = {"classifier": "ce_loss_mean", "supcon": "supcon_loss_mean"}
+LOSS_STATISTIC_COLUMNS = {
+    "classifier": {
+        "ce_loss_min",
+        "ce_loss_median",
+        "ce_loss_p95",
+        "ce_loss_max",
+        "ce_loss_correct_mean",
+        "ce_loss_wrong_mean",
+    },
+    "supcon": set(),
+}
 
 
 @pytest.mark.parametrize("task", ["classifier", "supcon"])
@@ -147,7 +158,8 @@ def test_validated_run_logs_train_and_validation_metrics_in_one_row_per_epoch(
     columns, rows = _rows(path)
     assert len(rows) == 2
     assert all(value != "" for row in rows for value in row.values())
-    assert {TRAIN_COLUMN[task], OBJECTIVE_COLUMN[task]} <= set(columns)
+    expected = {TRAIN_COLUMN[task], OBJECTIVE_COLUMN[task]}
+    assert expected | LOSS_STATISTIC_COLUMNS[task] <= set(columns)
 
 
 @pytest.mark.parametrize("task", ["classifier", "supcon"])

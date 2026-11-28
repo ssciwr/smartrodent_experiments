@@ -1,8 +1,10 @@
 """Exercise the Lightning classifier: training, loss, reinitialization and export."""
 
 import csv
+import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from classifier_task_test_support import (
@@ -13,6 +15,8 @@ from classifier_task_test_support import (
     runner,
     sample_inputs,
     scratch_directory,
+    sgd,
+    tensor_data,
     train_supcon,
 )
 from hypothesis import example, given, settings
@@ -101,8 +105,6 @@ def test_classifier_starts_from_a_supcon_checkpoint_and_restores_without_it(tmp_
 )
 def test_ce_loss_is_the_whole_split_mean_for_any_batch_size(labels, batch_size):
     """An uneven final batch must not weigh its samples more than the others."""
-    from classifier_task_test_support import tensor_data
-
     with scratch_directory() as directory:
         task = classifier_task(lr=0.0)
         stage, artifacts = runner(Path(directory) / "run", epochs=1)
@@ -114,6 +116,130 @@ def test_ce_loss_is_the_whole_split_mean_for_any_batch_size(labels, batch_size):
     with torch.inference_mode():
         expected = F.cross_entropy(task(images), targets).item()
     assert logged == [pytest.approx(expected, abs=1e-5)]
+
+
+LOSS_STATISTICS = (
+    "ce_loss_min",
+    "ce_loss_median",
+    "ce_loss_p95",
+    "ce_loss_max",
+    "ce_loss_correct_mean",
+    "ce_loss_wrong_mean",
+)
+
+
+def _fit_and_log_loss_statistics(
+    labels, *, batch_size=4, task=None, **trainer_options
+) -> dict:
+    """Fit one epoch with frozen weights; return each logged loss statistic."""
+    with scratch_directory() as directory:
+        if task is None:
+            task = classifier_task(lr=0.0)
+        stage, artifacts = runner(Path(directory) / "run", epochs=1)
+        stage.trainer.update(**trainer_options)
+        fit(stage, task, labels, batch_size=batch_size)
+        return {
+            name: _metric_rows(artifacts.metrics_csv, name)[0]
+            for name in ("ce_loss_mean", *LOSS_STATISTICS)
+        }
+
+
+@settings(max_examples=8, deadline=None)
+@example(labels=[0, 1, 2, 0, 1, 2, 0], batch_size=3)
+@given(
+    labels=st.lists(st.integers(0, 2), min_size=3, max_size=14),
+    batch_size=st.integers(1, 14),
+)
+def test_validation_loss_statistics_are_per_sample_for_any_batch_size(
+    labels, batch_size
+):
+    """The statistics describe single samples, not batches, even for an uneven last batch."""
+    task = classifier_task(lr=0.0)
+    logged = _fit_and_log_loss_statistics(labels, batch_size=batch_size, task=task)
+
+    targets, images = tensor_data(labels).tensors
+    task.eval()
+    with torch.inference_mode():
+        logits = task(images)
+    losses = F.cross_entropy(logits, targets, reduction="none")
+    correct = logits.argmax(dim=1) == targets
+    nan = float("nan")
+    values = losses.numpy()
+    # numpy's quantile (also linear interpolation) keeps the oracle independent of torch.
+    expected = {
+        "ce_loss_min": values.min(),
+        "ce_loss_median": np.quantile(values, 0.5),
+        "ce_loss_p95": np.quantile(values, 0.95),
+        "ce_loss_max": values.max(),
+        "ce_loss_correct_mean": values[correct.numpy()].mean()
+        if correct.any()
+        else nan,
+        "ce_loss_wrong_mean": values[~correct.numpy()].mean()
+        if not correct.all()
+        else nan,
+    }
+    for name, value in expected.items():
+        assert logged[name] == pytest.approx(float(value), abs=1e-5, nan_ok=True), name
+
+
+@settings(max_examples=8, deadline=None)
+@given(labels=st.lists(st.integers(0, 2), min_size=3, max_size=14))
+def test_validation_loss_statistics_are_ordered_and_bound_the_mean(labels):
+    """min <= median <= p95 <= max for any data, and the mean lies between min and max."""
+    logged = _fit_and_log_loss_statistics(labels)
+
+    slack = 1e-6
+    assert logged["ce_loss_min"] <= logged["ce_loss_median"] + slack
+    assert logged["ce_loss_median"] <= logged["ce_loss_p95"] + slack
+    assert logged["ce_loss_p95"] <= logged["ce_loss_max"] + slack
+    assert logged["ce_loss_min"] - slack <= logged["ce_loss_mean"]
+    assert logged["ce_loss_mean"] <= logged["ce_loss_max"] + slack
+
+
+def test_validation_loss_statistics_work_with_half_precision_training():
+    """A half-precision trainer yields half-precision losses, which torch.quantile rejects."""
+    logged = _fit_and_log_loss_statistics([0, 1, 2, 0, 1, 2, 0], precision="bf16-true")
+
+    assert all(
+        math.isfinite(logged[name])
+        for name in ("ce_loss_mean", "ce_loss_median", "ce_loss_p95")
+    )
+
+
+def _forced_prediction_task(class_shift: int):
+    """Return a frozen task whose prediction is the true class rolled by ``class_shift``.
+
+    The test images are saturated in their class's color channel, so the channel
+    means identify the true class; shift 0 is always right, shift 1 always wrong.
+    """
+    from smartrodent.classifier_task import ClassifierTask
+
+    class Forced(ClassifierTask):
+        def forward(self, images):
+            channels = images.mean(dim=(2, 3))
+            forced = 10.0 * torch.roll(channels, shifts=class_shift, dims=1)
+            return super().forward(images) * 0.0 + forced  # keeps the autograd graph
+
+    return Forced(encoder=encoder_spec(), label_names=LABEL_NAMES, optimizer=sgd(0.0))
+
+
+@pytest.mark.parametrize(
+    "class_shift,undefined,defined",
+    [
+        (0, "ce_loss_wrong_mean", "ce_loss_correct_mean"),  # every prediction right
+        (1, "ce_loss_correct_mean", "ce_loss_wrong_mean"),  # every prediction wrong
+    ],
+)
+def test_mean_loss_of_an_empty_prediction_group_is_nan_not_a_silent_default(
+    class_shift, undefined, defined
+):
+    """With no wrong (or no right) sample that group's mean is undefined: logged as NaN."""
+    logged = _fit_and_log_loss_statistics(
+        [0, 1, 2, 0, 1, 2], task=_forced_prediction_task(class_shift)
+    )
+
+    assert math.isnan(logged[undefined])
+    assert logged[defined] == pytest.approx(logged["ce_loss_mean"], abs=1e-5)
 
 
 def _initializing_weights(path: Path) -> dict[str, torch.Tensor]:
