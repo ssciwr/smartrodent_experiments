@@ -52,3 +52,4 @@ outputs
 *.db-wal
 mlartifacts/
 mlruns
+projects
