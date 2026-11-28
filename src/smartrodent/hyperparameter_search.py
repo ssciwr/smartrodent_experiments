@@ -4,7 +4,9 @@
 document into an ``ExperimentResult``. ``training_studies`` binds it to the trainers.
 """
 
+import itertools
 import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass as result_dataclass
 from pathlib import Path
@@ -314,6 +316,11 @@ class HyperparameterStudy:
         self._check_output_directory()
         study = self._open_study()
         self.output_directory.mkdir(parents=True, exist_ok=True)
+        # Optuna's own "Trial N finished" line shows categoricals as raw indices; the
+        # trial lines of this class show the decoded values instead.
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        # Position within this invocation, so a resumed study counts from 1 again.
+        self._positions = itertools.count(1)
         try:
             study.optimize(
                 self._objective,
@@ -421,6 +428,12 @@ class HyperparameterStudy:
         """Train one sampled configuration and return its configured best value."""
         params = self.space.sample(trial)
         directory = self.output_directory / f"trial_{trial.number:04d}"
+        label = f"trial {next(self._positions)}/{self.settings.n_trials}"
+        described = ", ".join(
+            f"{name}={value}" for name, value in self.space.decode(params).items()
+        )
+        logger = logging.getLogger(__name__)
+        logger.info("%s started: %s", label, described)
         try:
             result = self.run_trial(
                 self.space.resolve(params), directory, _PruningReporter(trial)
@@ -430,20 +443,29 @@ class HyperparameterStudy:
             raise
         except self._anticipated_failures as error:
             # Re-raised unchanged so Optuna's catch= marks the trial FAIL and continues.
-            self._record_failure(trial, error)
+            self._record_failure(trial, error, label)
             raise
         except Exception as error:
             # Deliberately unwrapped: unanticipated errors stop the study and reach the
             # caller as raised; Optuna marks the trial FAIL on the way out.
-            self._record_failure(trial, error)
+            self._record_failure(trial, error, label)
             raise
+        logger.info(
+            "%s finished: %s=%.6g (%s)",
+            label,
+            result.tracked_metric,
+            result.best_value,
+            described,
+        )
         trial.set_user_attr("result", result.to_dict())
         return result.best_value
 
     @staticmethod
-    def _record_failure(trial: optuna.Trial, error: Exception) -> None:
-        """Keep a failed trial's reason for the report."""
-        trial.set_user_attr("error", f"{type(error).__name__}: {error}")
+    def _record_failure(trial: optuna.Trial, error: Exception, label: str) -> None:
+        """Keep a failed trial's reason for the report and show it in the log."""
+        reason = f"{type(error).__name__}: {error}"
+        trial.set_user_attr("error", reason)
+        logging.getLogger(__name__).error("%s failed: %s", label, reason)
 
     def _summarize(self, study: optuna.Study) -> StudyResult:
         """Rebuild the report and winner from storage, covering resumed trials."""

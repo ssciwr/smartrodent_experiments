@@ -6,9 +6,10 @@ encoder of the classifier run or of every classifier trial.
 """
 
 import hashlib
+import logging
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict, field, replace
 from dataclasses import dataclass as result_dataclass
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from smartrodent.encoders import build_encoder, preflight_encoders
 from smartrodent.experiment_results import ExperimentResult
 from smartrodent.experiment_support import MlflowConfiguration
 from smartrodent.hyperparameter_search import StudyConfiguration
+from smartrodent.logging_setup import LoggingConfiguration
 from smartrodent.model_card import load_training_template
 from smartrodent.output_paths import validate_output_paths
 from smartrodent.search_space import reject_search_tags
@@ -60,6 +62,7 @@ def _validate_stage_ownership(settings: Mapping, section: str) -> None:
         "output_directory",
         "mlflow",
         "tuning",
+        "logging",
     }
     if section == "classifier":
         reserved.add("encoder")  # supplied by the pipeline: the winning SupCon encoder
@@ -102,6 +105,7 @@ class TwoStageConfiguration:
         classifier: Standalone CE settings without an encoder, which SupCon supplies.
         mlflow: Optional shared tracking; registry publication applies only to CE.
         tuning: Optional per-stage Optuna study settings; tagged stages need one.
+        logging: Console noise filter of the training script.
     """
 
     output_directory: Path
@@ -110,6 +114,9 @@ class TwoStageConfiguration:
     classifier: dict[str, object]
     mlflow: MappingInput[MlflowConfiguration] | None = None
     tuning: MappingInput[StageStudies] | None = None
+    logging: MappingInput[LoggingConfiguration] = field(
+        default_factory=LoggingConfiguration
+    )
 
     def __post_init__(self):
         """Keep shared data, outputs, tracking and the encoder owned by the pipeline root."""
@@ -165,6 +172,7 @@ class TwoStageConfiguration:
             "data": self.data,
             "supcon": self.supcon,
             "classifier": self.classifier,
+            "logging": asdict(self.logging),
         }
         if self.mlflow is not None:
             values["mlflow"] = asdict(self.mlflow)
@@ -453,6 +461,13 @@ class TwoStageExperiment:
         results, selected = self._run_supcon_stage(run_id)
         with selected.best_checkpoint.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+        logging.getLogger(__name__).info(
+            "SupCon selected: %s=%.6g at epoch %d, checkpoint sha256 %s",
+            selected.tracked_metric,
+            selected.best_value,
+            selected.best_epoch,
+            checksum[:12],
+        )
         summary = {
             **empty_summary,
             "supcon_results": [result.to_dict() for result in results],
@@ -490,6 +505,7 @@ class TwoStageExperiment:
         self, run_id: str | None
     ) -> tuple[list[ExperimentResult], ExperimentResult]:
         """Run the SupCon study or single run and return its results and winner."""
+        logging.getLogger(__name__).info("Stage 1/2: SupCon")
         if self.plan.supcon_study is not None:
             study = self.plan.supcon_study.run(parent_run_id=run_id)
             return list(study.results), study.selected
@@ -515,6 +531,7 @@ class TwoStageExperiment:
         Returns:
             All completed results, the winner, and the champion version after promotion.
         """
+        logging.getLogger(__name__).info("Stage 2/2: classifier")
         encoder = selected.best_checkpoint.resolve()
         if self.configuration.study("classifier") is not None:
             study = self.plan.classifier_study(

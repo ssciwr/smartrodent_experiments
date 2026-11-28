@@ -42,12 +42,21 @@ def images(tmp_path):
 
 @pytest.fixture
 def package_logger():
-    """The ``smartrodent`` logger, restored afterwards for entry points that configure it."""
-    logger = logging.getLogger("smartrodent")
-    handlers, level, propagate = list(logger.handlers), logger.level, logger.propagate
-    yield logger
-    for handler in set(logger.handlers) - set(handlers):
-        handler.close()
-        logger.removeHandler(handler)
-    logger.setLevel(level)
-    logger.propagate = propagate
+    """The ``smartrodent`` logger; it and the third-party loggers that entry points
+    configure are restored afterwards, as is Python's warnings capture."""
+    names = ("smartrodent", "lightning.pytorch", "lightning.fabric", "py.warnings")
+    saved = {
+        name: (
+            list(logging.getLogger(name).handlers),
+            logging.getLogger(name).level,
+            logging.getLogger(name).propagate,
+        )
+        for name in names
+    }
+    yield logging.getLogger("smartrodent")
+    logging.captureWarnings(False)
+    for name, (handlers, level, propagate) in saved.items():
+        logger = logging.getLogger(name)
+        for handler in set(logger.handlers) - set(handlers):
+            handler.close()
+        logger.handlers, logger.level, logger.propagate = handlers, level, propagate

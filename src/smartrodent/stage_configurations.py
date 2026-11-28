@@ -15,6 +15,7 @@ from smartrodent.components import ComponentSpec
 from smartrodent.encoders import FreezePolicy, Reinitialization
 from smartrodent.experiment_results import Objective
 from smartrodent.experiment_support import MlflowConfiguration
+from smartrodent.logging_setup import LoggingConfiguration
 from smartrodent.metrics import ValidationMetrics
 from smartrodent.output_paths import RunArtifacts, validate_output_paths
 from smartrodent.search_space import reject_search_tags
@@ -70,6 +71,7 @@ class StageConfiguration:
         mlflow: Optional tracking and registry settings.
         model_card_template: Template of the selected checkpoint's model card.
         onnx_export: Optional ONNX export of the best checkpoint.
+        logging: Console noise filter of the training script.
     """
 
     # Settings that define what trials are compared on, or where they read and write.
@@ -99,6 +101,9 @@ class StageConfiguration:
     mlflow: MappingInput[MlflowConfiguration] | None = None
     model_card_template: PathSetting = "configs/model_card_template.yaml"
     onnx_export: MappingInput[OnnxExportSettings] | None = None
+    logging: MappingInput[LoggingConfiguration] = field(
+        default_factory=LoggingConfiguration
+    )
 
     def __post_init__(self):
         """Validate the shared sections, then protect the inputs from the outputs."""

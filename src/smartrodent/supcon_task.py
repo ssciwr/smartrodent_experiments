@@ -221,14 +221,32 @@ class SupConTask(L.LightningModule):
         self._validation_losses.append(loss.detach())
         return loss
 
+    def on_train_epoch_start(self) -> None:
+        """Start each epoch's training statistics from nothing.
+
+        With validation, the statistics are logged by the validation hook, which does
+        not run in every epoch when ``check_val_every_n_epoch`` or ``val_check_interval``
+        says so. Clearing here makes logged statistics cover only their own epoch's
+        batches; an epoch without validation logs no train statistics.
+        """
+        self._training_losses.clear()
+
     def on_train_epoch_end(self) -> None:
-        """Record training loss statistics and use the mean if validation is absent."""
-        primary = not self.trainer.enable_validation
-        self._log_losses(self._training_losses, primary=primary)
+        """Log training loss statistics as the objective; with validation they go below."""
+        if self.trainer.enable_validation:
+            return  # logged with the validation metrics, which keeps one CSV row per epoch
+        self._log_losses(self._training_losses, primary=True)
 
     def on_validation_epoch_end(self) -> None:
-        """Record validation statistics with the mean as the checkpoint objective."""
+        """Log validation statistics as the objective, with the epoch's training statistics.
+
+        Validation runs after the epoch's training batches and before its
+        ``on_train_epoch_end``. Logging everything in this one hook makes the CSV
+        logger write a single complete row per epoch.
+        """
         self._log_losses(self._validation_losses, primary=True)
+        if not self.trainer.sanity_checking:  # no training has happened yet then
+            self._log_losses(self._training_losses, primary=False)
 
     def _log_losses(self, losses: list[torch.Tensor], *, primary: bool) -> None:
         """Aggregate detached losses and show only the objective in the progress bar."""

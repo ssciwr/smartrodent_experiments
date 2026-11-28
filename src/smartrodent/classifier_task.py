@@ -196,18 +196,30 @@ class ClassifierTask(L.LightningModule):
         self._validation_predictions.append(logits.argmax(dim=1).detach().cpu())
         return loss
 
-    def on_train_epoch_end(self) -> None:
-        """Log the training mean; it is the objective only without validation."""
-        mean = self._training_loss / self._training_count
-        count = self._training_count
+    def on_train_epoch_start(self) -> None:
+        """Start each epoch's training mean from zero.
+
+        With validation, the mean is logged by the validation hook, which does not run
+        in every epoch when ``check_val_every_n_epoch`` or ``val_check_interval`` says
+        so. Resetting here makes a logged mean cover only its own epoch's batches; an
+        epoch without validation logs no train mean.
+        """
         self._training_loss = torch.zeros(())
         self._training_count = 0
-        primary = not self.trainer.enable_validation
-        name = CE_METRIC if primary else f"train_{CE_METRIC}"
-        self.log(name, mean, prog_bar=primary, batch_size=count)
+
+    def on_train_epoch_end(self) -> None:
+        """Log the training mean as the objective; with validation it is logged there."""
+        if self.trainer.enable_validation:
+            return  # logged with the validation metrics, which keeps one CSV row per epoch
+        self._log_training_mean(CE_METRIC, prog_bar=True)
 
     def on_validation_epoch_end(self) -> None:
-        """Log the whole-split mean loss and the configured scores."""
+        """Log the whole-split mean loss, the configured scores and the epoch's training mean.
+
+        Validation runs after the epoch's training batches and before its
+        ``on_train_epoch_end``. Logging everything in this one hook makes the CSV
+        logger write a single complete row per epoch.
+        """
         targets = torch.cat(self._validation_targets)
         predictions = torch.cat(self._validation_predictions)
         mean = self._validation_loss / len(targets)
@@ -217,6 +229,16 @@ class ClassifierTask(L.LightningModule):
         self.log(CE_METRIC, mean, prog_bar=True, batch_size=len(targets))
         scores = self.metrics.score(targets.numpy(), np.asarray(predictions.numpy()))
         self.log_dict(scores, batch_size=len(targets))
+        if not self.trainer.sanity_checking:  # no training has happened yet then
+            self._log_training_mean(f"train_{CE_METRIC}", prog_bar=False)
+
+    def _log_training_mean(self, name: str, *, prog_bar: bool) -> None:
+        """Log the epoch's mean training loss and reset the accumulators."""
+        count = self._training_count
+        mean = self._training_loss / count
+        self._training_loss = torch.zeros(())
+        self._training_count = 0
+        self.log(name, mean, prog_bar=prog_bar, batch_size=count)
 
     def configure_optimizers(self):
         """Build the optimizer and scheduler for the task's trainable parameters."""
