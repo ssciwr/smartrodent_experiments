@@ -6,54 +6,53 @@ output_directory: runs/classifier_xl_srilanka
 train_dataset: datasets/stage8_yolo_classifier_srilanka/train
 validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
 class_names:
-  - Rattus rattus
-  - Rattus norvegicus
+  - Accipiter virgatus
   - Bandicota bengalensis
   - Bandicota indica
+  - Canis familiaris
+  - Falco tinnunculus
+  - Felis catus
+  - Glaucidium castanotum
+  - Glaucidium radiatum
+  - Ketupa nipalensis
+  - Ketupa zeylonensis
+  - Milvus migrans
   - Mus booduga
   - Mus musculus
-  - Vandeleuria oleraceus
-  - Tatera indica
-  - Suncus murinus
+  - Naja naja
+  - Ninox scutulata
+  - Otus thilohoffmanni
+  - Pavo cristatus
   - Ptyas mucosa
   - Python molurus
-  - Naja naja
+  - Rattus norvegicus
+  - Rattus rattus
+  - Suncus murinus
+  - Tatera indica
   - Tyto javanica
-  - Ninox scutulata
-  - Glaucidium radiatum
-  - Ketupa zeylonensis
-  - Ketupa nipalensis
-  - Glaucidium castanotum
-  - Otus thilohoffmanni
-  - Milvus migrans
-  - Accipiter virgatus
-  - Falco tinnunculus
   - Urva edwardsii
-  - Felis catus
-  - Canis familiaris
-  - Pavo cristatus
+  - Vandeleuria oleraceus
 encoder:  # {checkpoint: SupCon or classifier .ckpt} | {name, parameters} of an encoder class.
-  checkpoint: runs/two_stage_xl_srilanka/supcon/best.ckpt
-head: !suggest-categorical  # linear (new final layer only) | full (also renew the encoder's post-pooling part)
-  choices: [linear, full]
-freeze:  # Linear probe (whole encoder) | layers 0-9 frozen with a trainable renewed Classify convolution.
-  prefixes: !coupled
-    target: head
-    values: [[network], [network.model.0, network.model.1, network.model.2, network.model.3, network.model.4, network.model.5, network.model.6, network.model.7, network.model.8, network.model.9]]
-  batchnorm: eval
+  name: YoloEncoder
+  parameters: {model_name: ./yolo26x-cls.pt}
+head: linear  # linear (new final layer only) | full (also renew the encoder's post-pooling part)
+freeze:  # Nothing frozen: the whole encoder is fine-tuned (BatchNorm statistics adapt).
+  prefixes: []
+  batchnorm: adapt
 # reinitialization:  # Optional: redraw encoder modules randomly.
 #   prefixes: [network.model.9]
 #   source: random
 native_checkpoint: false  # true writes a loadable Ultralytics best.pt (YoloEncoder only).
-optimizer: {name: AdamW, parameters: {lr: 0.001, weight_decay: 0.01}}
+optimizer: {name: AdamW, parameters: {lr: 0.0001, weight_decay: 0.01}}
 scheduler:  # Learning-rate phases (empty list = constant). All but the last set `epochs`.
   - {name: ReduceLROnPlateau, parameters: {factor: 0.5, patience: 2, threshold: 0.001, threshold_mode: abs, min_lr: 0.000001}}
-early_stopping: {patience: 6, min_delta: 0.005}  # Native EarlyStopping options | null.
+early_stopping: {patience: 10, min_delta: 0.001}  # Native EarlyStopping options | null.
 trainer:  # Native lightning.Trainer arguments; max_epochs is required.
   accelerator: gpu
   devices: 1
   max_epochs: 30
   precision: 32-true
+  num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
 batch_size: 48
 workers: 20
 seed: 42
@@ -61,7 +60,7 @@ validation_metrics:  # Named sklearn scorers | null (CE loss only).
   accuracy: {name: accuracy_score}
   balanced_accuracy: {name: balanced_accuracy_score}
   f1_macro: {name: f1_score, parameters: {average: macro, zero_division: 0}}
-tracked_metric: balanced_accuracy  # ce_loss_mean | a validation_metrics alias.
+tracked_metric: accuracy  # ce_loss_mean | a validation_metrics alias.
 tracked_mode: max  # min | max | null (infer direction).
 transforms:  # Fixed preprocessing, then augmentations in order (torchvision.transforms.v2 classes).
   image_size: 640  # Integer >0; square image size.
@@ -78,15 +77,12 @@ onnx_export:  # ONNX export of best.ckpt written next to it | null (no export).
 mlflow:  # Tracking settings | null (disabled).
   tracking_uri: sqlite:///mlflow.db
   experiment_name: classifier-xl
-  registered_model_name: species-classifier-xl  # Nonempty model name | null (no registration).
+  registered_model_name: null # species-classifier-xl  # Nonempty model name | null (no registration).
   model_artifact_name: species-classifier-xl
   champion_alias: champion
   # dataset_revision: <revision>
 
-tuning:  # Optuna study over the tagged values | omit for one run.
-  study_name: classifier-head-grid-xl
-  storage: sqlite:///optuna.db
-  n_trials: 4  # Upper bound; the grid sampler stops after every combination.
-  sampler: {name: BruteForceSampler, parameters: {seed: 42}}
-  pruner: null
-  load_if_exists: false
+logging:  # Console output only: messages matching any regex are hidden there but kept in <output_directory>/training.log.
+  suppress:
+    - 'Tip: For seamless cloud logging|litlogger'
+    - 'module\(s\) in eval mode at the start of training'

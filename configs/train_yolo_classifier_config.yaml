@@ -9,7 +9,7 @@ mlflow: # optional; leave out to switch Ultralytics' MLflow integration off
   tune_experiment_name: smartrodent-yolo-classifier-tuning
 train_kwargs: # YOLO.train; `project` and `optimizer` are required
   epochs: 200
-  imgsz: 448
+  imgsz: &imgsize 448
   batch: 48
   device: 0
   workers: 10
@@ -23,7 +23,7 @@ train_kwargs: # YOLO.train; `project` and `optimizer` are required
   save: true
   val: true
   # Closest YOLO classification equivalents to the SupCon transforms.
-  scale: 0.25 # RandomResizedCrop area range: [0.75, 1.0]
+  scale: 0.25
   fliplr: 0.2
   flipud: 0.0
   # Sharpness, grayscale, and perspective cannot be configured individually for classification.
@@ -41,7 +41,7 @@ tune_kwargs: # YOLO.tune; unlisted arguments keep their train_kwargs value
   name: full_data_classifier_xl_220_tuning
   project: projects/smartrodent_experiments/tuning/yolo_classify # relative to the working directory (repo root under DVC); also the DVC output
   epochs: 20
-  imgsz: 220
+  # imgsz: *imgsize # repeated values from train_kwargs are ignored
   # Search space for YOLO.tune: each key is [min, max] (an optional 3rd value is the mutation gain).
   # The tuner mutates values inside these bounds; anything not listed keeps the train_kwargs value.
   # Only arguments that act on classification are listed (no box/cls/dfl losses, mosaic, mixup, ...).

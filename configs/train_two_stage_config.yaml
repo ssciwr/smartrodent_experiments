@@ -7,33 +7,32 @@ data:
   train_dataset: datasets/stage8_yolo_classifier_srilanka/train
   validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
   class_names:
-    - Rattus rattus
-    - Rattus norvegicus
+    - Accipiter virgatus
     - Bandicota bengalensis
     - Bandicota indica
+    - Canis familiaris
+    - Falco tinnunculus
+    - Felis catus
+    - Glaucidium castanotum
+    - Glaucidium radiatum
+    - Ketupa nipalensis
+    - Ketupa zeylonensis
+    - Milvus migrans
     - Mus booduga
     - Mus musculus
-    - Vandeleuria oleraceus
-    - Tatera indica
-    - Suncus murinus
+    - Naja naja
+    - Ninox scutulata
+    - Otus thilohoffmanni
+    - Pavo cristatus
     - Ptyas mucosa
     - Python molurus
-    - Naja naja
+    - Rattus norvegicus
+    - Rattus rattus
+    - Suncus murinus
+    - Tatera indica
     - Tyto javanica
-    - Ninox scutulata
-    - Glaucidium radiatum
-    - Ketupa zeylonensis
-    - Ketupa nipalensis
-    - Glaucidium castanotum
-    - Otus thilohoffmanni
-    - Milvus migrans
-    - Accipiter virgatus
-    - Falco tinnunculus
     - Urva edwardsii
-    - Felis catus
-    - Canis familiaris
-    - Pavo cristatus
-
+    - Vandeleuria oleraceus
 supcon:
   encoder:  # Component class or factory (name or module:attr) with its keyword arguments.
     name: YoloEncoder
@@ -48,6 +47,7 @@ supcon:
     devices: 1
     max_epochs: 30
     precision: 32-true
+    num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
   classes_per_batch: 4
   samples_per_class: 4
   samples_per_epoch: 100000
@@ -88,6 +88,7 @@ classifier:  # No `encoder` key: the pipeline supplies the winning SupCon best.c
     devices: 1
     max_epochs: 30
     precision: 32-true
+    num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
   batch_size: 24
   workers: 12
   seed: 42
@@ -124,3 +125,8 @@ tuning:  # Per-stage Optuna studies; an omitted stage runs once (no search tags)
     sampler: {name: BruteForceSampler, parameters: {seed: 42}}
     pruner: null
     load_if_exists: true  # true resumes this study on rerun with the same encoder.
+
+logging:  # Console output only: messages matching any regex are hidden there but kept in <output_directory>/training.log.
+  suppress:
+    - 'Tip: For seamless cloud logging|litlogger'
+    - 'module\(s\) in eval mode at the start of training'

@@ -6,29 +6,32 @@ train_dataset: datasets/stage8_yolo_classifier_srilanka/train
 validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
 output_directory: runs/supcon_standalone_xl_srilanka_lr-00001
 class_names:
-  - Rattus rattus # brown rat
-  - Bandicota bengalensis # lesser bandicot rat
-  - Bandicota indica # greater bandicot rat
-  - Mus booduga # little indian field mouse
-  - Vandeleuria oleraceus # climbing mouse
-  - Tatera indica # indian gerbil
-  - Suncus murinus # shrew
-  - Ptyas mucosa # indian rat snake
-  - Python molurus # rock python
-  - Naja naja # indian cobra
-  - Tyto javanica # eastern barn owl
-  - Ninox scutulata # brown boobook
-  - Glaucidium radiatum # jungle owlet
-  - Ketupa zeylonensis # Brown fish owl
-  - Ketupa nipalensis # spot-bellied eagle-owl
-  - Glaucidium castanotum # chestnut-backed owlet
-  - Otus thilohoffmanni # Serendib scops-owl
-  - Milvus migrans # Black kite
-  - Accipiter virgatus # common kestrel
-  - Falco tinnunculus # besra
-  - Urva edwardsii # Indian grey mongoose
-  - Felis catus # house cat
-  - Canis familiaris # domestic dog
+  - Accipiter virgatus
+  - Bandicota bengalensis
+  - Bandicota indica
+  - Canis familiaris
+  - Falco tinnunculus
+  - Felis catus
+  - Glaucidium castanotum
+  - Glaucidium radiatum
+  - Ketupa nipalensis
+  - Ketupa zeylonensis
+  - Milvus migrans
+  - Mus booduga
+  - Mus musculus
+  - Naja naja
+  - Ninox scutulata
+  - Otus thilohoffmanni
+  - Pavo cristatus
+  - Ptyas mucosa
+  - Python molurus
+  - Rattus norvegicus
+  - Rattus rattus
+  - Suncus murinus
+  - Tatera indica
+  - Tyto javanica
+  - Urva edwardsii
+  - Vandeleuria oleraceus
 encoder:  # Component class or factory (name or module:attr) with its keyword arguments.
   name: YoloEncoder
   parameters: {model_name: ./yolo26x-cls.pt}
@@ -42,6 +45,7 @@ trainer:  # Native lightning.Trainer arguments; max_epochs is required.
   devices: 1
   max_epochs: 30
   precision: 32-true
+  num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
 classes_per_batch: 8
 samples_per_class: 6
 samples_per_epoch: 100000
@@ -70,3 +74,8 @@ mlflow:  # Tracking settings | null (disabled).
   model_artifact_name: species-classifier-encoder-xl
   champion_alias: champion
   # dataset_revision: <revision>
+
+logging:  # Console output only: messages matching any regex are hidden there but kept in <output_directory>/training.log.
+  suppress:
+    - 'Tip: For seamless cloud logging|litlogger'
+    - 'module\(s\) in eval mode at the start of training'
