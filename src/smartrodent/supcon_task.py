@@ -194,6 +194,7 @@ class SupConTask(L.LightningModule):
         )
         self._training_losses: list[torch.Tensor] = []
         self._validation_losses: list[torch.Tensor] = []
+        self._validation_anchor_losses: list[torch.Tensor] = []
         self.train()
 
     def train(self, mode: bool = True) -> "SupConTask":
@@ -215,10 +216,16 @@ class SupConTask(L.LightningModule):
         return loss
 
     def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        """Collect the contrastive loss of a deterministic validation batch."""
+        """Collect the batch and per-anchor contrastive losses of a validation batch."""
         labels, images = batch
-        loss = self.criterion(self(images), labels)
+        embeddings = self(images)
+        loss = self.criterion(embeddings, labels)
         self._validation_losses.append(loss.detach())
+        # float32: a half-precision trainer yields half-precision losses, which
+        # torch.quantile rejects; the statistics need no half-precision speed.
+        self._validation_anchor_losses.append(
+            self._anchor_losses(embeddings, labels).detach().float()
+        )
         return loss
 
     def on_train_epoch_start(self) -> None:
@@ -245,8 +252,51 @@ class SupConTask(L.LightningModule):
         logger write a single complete row per epoch.
         """
         self._log_losses(self._validation_losses, primary=True)
+        self._log_anchor_losses()
         if not self.trainer.sanity_checking:  # no training has happened yet then
             self._log_losses(self._training_losses, primary=False)
+
+    def _anchor_losses(
+        self, embeddings: torch.Tensor, labels: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the loss of each anchor that has a positive (another sample of its class).
+
+        The mask comes from the labels instead of from the loss values: the library
+        gives an anchor without positives a loss of 0 that the objective's reducer
+        ignores, so including it would pull the statistics below the objective's mean.
+        The library also returns a bare 0 instead of a tensor for a batch without any
+        positive pair or without any negative pair (a single class), hence the
+        explicit empty case.
+        """
+        has_positive = (labels[:, None] == labels[None, :]).sum(dim=1) > 1
+        has_negative = labels.unique().numel() > 1
+        if not (has_positive.any() and has_negative):
+            return embeddings.new_empty(0)
+        losses = self.criterion.compute_loss(embeddings, labels, None, None, None)
+        return losses["loss"]["losses"][has_positive]
+
+    def _log_anchor_losses(self) -> None:
+        """Log the validation epoch's per-anchor loss distribution, then reset it.
+
+        The batch-level statistics hide a few badly embedded samples inside a batch's
+        mean. The median and 95th percentile are linear-interpolated quantiles; with no
+        anchor that has a positive in the whole epoch the statistics are NaN.
+        """
+        anchors = torch.cat(self._validation_anchor_losses)
+        self._validation_anchor_losses.clear()
+        if anchors.numel() == 0:
+            nan = torch.full((), float("nan"), device=anchors.device)
+            statistics = dict.fromkeys(("min", "median", "p95", "max"), nan)
+        else:
+            statistics = {
+                "min": anchors.min(),
+                "median": anchors.quantile(0.5),
+                "p95": anchors.quantile(0.95),
+                "max": anchors.max(),
+            }
+        self.log_dict(
+            {f"supcon_anchor_loss_{name}": value for name, value in statistics.items()}
+        )
 
     def _log_losses(self, losses: list[torch.Tensor], *, primary: bool) -> None:
         """Aggregate detached losses and show only the objective in the progress bar."""

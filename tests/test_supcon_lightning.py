@@ -3,14 +3,20 @@
 import csv
 import math
 import statistics
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
+import numpy as np
 import optuna
 import pytest
 import torch
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from PIL import Image
 from pytorch_metric_learning.losses import SupConLoss
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 
 class TinyEncoder(nn.Module):
@@ -222,6 +228,129 @@ def test_supcon_records_all_validation_loss_statistics(data, tmp_path):
     assert result.best_value == pytest.approx(
         min(float(row["supcon_loss_mean"]) for row in rows)
     )
+
+
+ANCHOR_STATISTICS = {
+    "supcon_anchor_loss_min": lambda values: values.min(),
+    "supcon_anchor_loss_median": lambda values: np.quantile(values, 0.5),
+    "supcon_anchor_loss_p95": lambda values: np.quantile(values, 0.95),
+    "supcon_anchor_loss_max": lambda values: values.max(),
+}
+
+
+def _anchor_losses_by_definition(embeddings, labels, temperature=0.1) -> list[float]:
+    """Return the textbook SupCon loss of every anchor that has a positive.
+
+    Anchor i: -mean over its positives p of [s_ip - logsumexp over a != i of s_ia],
+    with s the temperature-scaled cosine similarities of unit-length embeddings. A
+    batch of a single class has no negatives; like the objective, which counts such a
+    batch as 0, it contributes no anchors.
+    """
+    if len(set(labels)) < 2:
+        return []
+    scores = embeddings @ embeddings.T / temperature
+    losses = []
+    for anchor in range(len(labels)):
+        others = [i for i in range(len(labels)) if i != anchor]
+        positives = [i for i in others if labels[i] == labels[anchor]]
+        if positives:
+            log_denominator = torch.logsumexp(scores[anchor, others], dim=0)
+            losses.append(-(scores[anchor, positives] - log_denominator).mean().item())
+    return losses
+
+
+def _expected_anchor_statistics(losses: list[float]) -> dict[str, float]:
+    """Return each per-anchor statistic of the losses; NaN when there are no anchors."""
+    if not losses:
+        return {name: float("nan") for name in ANCHOR_STATISTICS}
+    values = np.asarray(losses, dtype=np.float64)
+    return {name: float(f(values)) for name, f in ANCHOR_STATISTICS.items()}
+
+
+@contextmanager
+def _fit_one_epoch_with_validation_counts(counts: tuple[int, int, int]):
+    """Fit one epoch on a validation cohort of the given per-class sizes.
+
+    Yields the trained task, the data and the CSV row of the validation epoch. The
+    images exist only inside the context: loaders read them lazily.
+    """
+    class_names = ("mouse", "rat", "shrew")
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        data = _build_data(
+            root / "data", validation_counts=dict(zip(class_names, counts))
+        )
+        runner, artifacts = _runner(root / "run", epochs=1, sanity_steps=0)
+        task = _task()
+        _fit(runner, task, data)
+        (row,) = _loss_rows(artifacts.metrics_csv)
+        yield task, data, row
+
+
+_VALIDATION_COUNTS = st.tuples(*[st.integers(2, 5)] * 3)
+
+
+@settings(max_examples=6, deadline=None)
+@given(counts=_VALIDATION_COUNTS)
+def test_supcon_records_per_anchor_validation_loss_statistics(counts):
+    """The logged statistics describe single anchors across the whole cohort."""
+    with _fit_one_epoch_with_validation_counts(counts) as (task, data, row):
+        task.eval()
+        losses = []
+        with torch.inference_mode():
+            for labels, images in data.val_dataloader():
+                losses += _anchor_losses_by_definition(task(images), labels.tolist())
+    for name, value in _expected_anchor_statistics(losses).items():
+        assert float(row[name]) == pytest.approx(value, abs=1e-5), name
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        [0, 0, 1],  # one anchor has no positive: it is not part of the statistics
+        [0, 1, 2],  # no anchor has a positive: the statistics are undefined
+        [0, 0, 0],  # one class only: every anchor has positives but none has a negative
+    ],
+)
+def test_supcon_anchors_without_a_usable_loss_are_left_out_of_the_statistics(
+    data, tmp_path, labels
+):
+    """Lone-class anchors, or a batch without negatives, have no loss to count."""
+    generator = torch.Generator().manual_seed(7)
+    images = torch.rand(len(labels), 3, 8, 8, generator=generator)
+    validation = DataLoader(
+        TensorDataset(torch.tensor(labels), images), batch_size=len(labels)
+    )
+    runner, artifacts = _runner(tmp_path / "lone", epochs=1, sanity_steps=0)
+    task = _task()
+
+    runner.fit(
+        task,
+        train_loader=data.train_dataloader(),
+        validation_loader=validation,
+        validation_dataset=data.validation_dataset.data_dir,
+    )
+
+    task.eval()
+    with torch.inference_mode():
+        expected = _expected_anchor_statistics(
+            _anchor_losses_by_definition(task(images), labels)
+        )
+    (row,) = _loss_rows(artifacts.metrics_csv)
+    for name, value in expected.items():
+        assert float(row[name]) == pytest.approx(value, abs=1e-5, nan_ok=True), name
+
+
+def test_supcon_anchor_statistics_work_with_half_precision_training(data, tmp_path):
+    """A half-precision trainer yields half-precision losses, which torch.quantile rejects."""
+    runner, artifacts = _runner(
+        tmp_path / "bf16", epochs=1, sanity_steps=0, precision="bf16-true"
+    )
+
+    _fit(runner, _task(), data)
+
+    (row,) = _loss_rows(artifacts.metrics_csv)
+    assert all(math.isfinite(float(row[name])) for name in ANCHOR_STATISTICS)
 
 
 def test_supcon_stops_on_tied_mean_and_keeps_the_earliest_best_checkpoint(

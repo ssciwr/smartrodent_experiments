@@ -144,7 +144,12 @@ LOSS_STATISTIC_COLUMNS = {
         "ce_loss_correct_mean",
         "ce_loss_wrong_mean",
     },
-    "supcon": set(),
+    "supcon": {
+        "supcon_anchor_loss_min",
+        "supcon_anchor_loss_median",
+        "supcon_anchor_loss_p95",
+        "supcon_anchor_loss_max",
+    },
 }
 
 
