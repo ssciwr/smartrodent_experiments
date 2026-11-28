@@ -2,7 +2,7 @@
 # One run, or with a `tuning:` section an Optuna study over the tagged values:
 #   !suggest-float {low, high, step?, log?} | !suggest-int {low, high, step?, log?}
 #   | !suggest-categorical {choices: [...]} (any YAML values).
-output_directory: runs/classifier_xl_srilanka
+output_directory: projects/smartrodent_experiments/training/lightning_classify_xl_srilanka_debug_test
 train_dataset: datasets/stage8_yolo_classifier_srilanka/train
 validation_dataset: datasets/stage8_yolo_classifier_srilanka/val
 class_names:
@@ -43,7 +43,7 @@ freeze:  # Nothing frozen: the whole encoder is fine-tuned (BatchNorm statistics
 #   prefixes: [network.model.9]
 #   source: random
 native_checkpoint: false  # true writes a loadable Ultralytics best.pt (YoloEncoder only).
-optimizer: {name: AdamW, parameters: {lr: 0.0001, weight_decay: 0.01}}
+optimizer: {name: AdamW, parameters: {lr: 0.00025, weight_decay: 0.01}}
 scheduler:  # Learning-rate phases (empty list = constant). All but the last set `epochs`.
   - {name: ReduceLROnPlateau, parameters: {factor: 0.5, patience: 2, threshold: 0.001, threshold_mode: abs, min_lr: 0.000001}}
 early_stopping: {patience: 10, min_delta: 0.001}  # Native EarlyStopping options | null.
@@ -53,33 +53,34 @@ trainer:  # Native lightning.Trainer arguments; max_epochs is required.
   max_epochs: 30
   precision: 32-true
   num_sanity_val_steps: 0  # No scoring before the first epoch (it would warn about classes missing from y_true).
-batch_size: 48
-workers: 20
+batch_size: 36
+workers: 15
 seed: 42
 validation_metrics:  # Named sklearn scorers | null (CE loss only).
   accuracy: {name: accuracy_score}
   balanced_accuracy: {name: balanced_accuracy_score}
   f1_macro: {name: f1_score, parameters: {average: macro, zero_division: 0}}
+  f1_micro: {name: f1_score, parameters: {average: micro, zero_division: 0}}
 tracked_metric: accuracy  # ce_loss_mean | a validation_metrics alias.
 tracked_mode: max  # min | max | null (infer direction).
 transforms:  # Fixed preprocessing, then augmentations in order (torchvision.transforms.v2 classes).
-  image_size: 640  # Integer >0; square image size.
+  image_size: &imgsz 448  # Integer >0; square image size.
   resize: {interpolation: bilinear, antialias: true}
   augmentations:
     - {name: RandomAdjustSharpness, parameters: {sharpness_factor: 0.5, p: 0.2}}
     - {name: RandomGrayscale, parameters: {p: 0.2}}
     - {name: RandomPerspective, parameters: {distortion_scale: 0.5, p: 0.2, fill: 0}}
     - {name: RandomHorizontalFlip, parameters: {p: 0.2}}
-    - {name: RandomResizedCrop, parameters: {size: [640, 640], scale: [0.75, 1.0], ratio: [0.75, 1.3333333333333333], antialias: true}}
+    - {name: RandomResizedCrop, parameters: {size: [*imgsz, *imgsz], scale: [0.75, 1.0], ratio: [0.75, 1.3333333333333333], antialias: true}}
 onnx_export:  # ONNX export of best.ckpt written next to it | null (no export).
-  dynamic: false  # true | false; true=any batch and image size.
+  dynamic: true  # true | false; true=any batch and image size.
   simplify: true  # true | false; onnxslim graph simplification.
-mlflow:  # Tracking settings | null (disabled).
-  tracking_uri: sqlite:///mlflow.db
-  experiment_name: classifier-xl
-  registered_model_name: null # species-classifier-xl  # Nonempty model name | null (no registration).
-  model_artifact_name: species-classifier-xl
-  champion_alias: champion
+mlflow:  null # Tracking settings | null (disabled).
+  # tracking_uri: sqlite:///mlflow.db
+  # experiment_name: classifier-xl
+  # registered_model_name: null # species-classifier-xl  # Nonempty model name | null (no registration).
+  # model_artifact_name: species-classifier-xl
+  # champion_alias: champion
   # dataset_revision: <revision>
 
 logging:  # Console output only: messages matching any regex are hidden there but kept in <output_directory>/training.log.

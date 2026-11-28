@@ -3,6 +3,8 @@
 import argparse
 from pathlib import Path
 
+import torch
+
 from smartrodent.classifier_training import ClassifierExperiment
 from smartrodent.logging_setup import log_training_run
 from smartrodent.stage_configurations import ClassifierConfiguration
@@ -30,4 +32,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    torch.set_float32_matmul_precision("high")
     main()

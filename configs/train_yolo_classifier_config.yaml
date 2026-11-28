@@ -3,20 +3,22 @@
 task: classify # detect | classify
 model: yolo26x-cls.pt
 dataset: datasets/stage8_yolo_classifier_srilanka # root holding train/ (and val/, test/)
-mlflow: # optional; leave out to switch Ultralytics' MLflow integration off
-  tracking_uri: sqlite:///mlflow.db
-  train_experiment_name: smartrodent-yolo-classifier-training-with-autoaugment-with-classweighting-xl_speciesnames_448_reduced_augmentation
-  tune_experiment_name: smartrodent-yolo-classifier-tuning
+# mlflow: # optional; leave out to switch Ultralytics' MLflow integration off
+  # tracking_uri: sqlite:///mlflow.db
+  # train_experiment_name: smartrodent-yolo-classifier-training-with-autoaugment-with-classweighting-xl_speciesnames_448_reduced_augmentation
+  # tune_experiment_name: smartrodent-yolo-classifier-tuning
 train_kwargs: # YOLO.train; `project` and `optimizer` are required
   epochs: 200
   imgsz: &imgsize 448
   batch: 48
   device: 0
   workers: 10
+  lr0: 0.00025
+  lrf: 0.004 # final LR as a fraction of lr0 (final_lr = lr0 * lrf) at the end of the schedule
   patience: 10
-  warmup_epochs: 3.0
-  optimizer: auto
-  project: projects/smartrodent_experiments/training/yolo_classify # relative to the working directory (repo root under DVC); also the DVC output
+  warmup_epochs: 0.0
+  optimizer: AdamW
+  project: projects/smartrodent_experiments/runs/yolo_classify_run_debug # relative to the working directory (repo root under DVC); also the DVC output
   name: full_data_classifier_xl_speciesnames_448_reduced_augmentation
   exist_ok: true
   plots: true
@@ -39,7 +41,7 @@ tune_kwargs: # YOLO.tune; unlisted arguments keep their train_kwargs value
   iterations: 100
   # Only real overrides of train_kwargs belong here (repeating a train value is an error).
   name: full_data_classifier_xl_220_tuning
-  project: projects/smartrodent_experiments/tuning/yolo_classify # relative to the working directory (repo root under DVC); also the DVC output
+  # project: projects/smartrodent_experiments/tuning/yolo_classify # relative to the working directory (repo root under DVC); also the DVC output
   epochs: 20
   # imgsz: *imgsize # repeated values from train_kwargs are ignored
   # Search space for YOLO.tune: each key is [min, max] (an optional 3rd value is the mutation gain).
