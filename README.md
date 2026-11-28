@@ -1,12 +1,9 @@
 # SmartRodent experiments
-
-Python tools for acquiring, reviewing, preparing, and learning from wildlife
-images, with a focus on rodents, snakes, birds, and other small animals. The
-repository contains an iNaturalist/LILA data workflow, SpeciesNet-assisted YOLO
+This repository contains Python tools for acquiring, reviewing, preparing, and learning from wildlife images, with a focus on rodents, snakes, birds, and other small animals. The repository contains an iNaturalist/LILA data workflow (download, filtering), SpeciesNet-assisted YOLO
 dataset creation, an Ultralytics detector and classifier trainer, and independent PyTorch
 supervised-contrastive (SupCon) and cross-entropy (CE) training workflows. The
-SupCon and CE stages run either once or as Optuna hyperparameter studies; a grid
-is a study over categorical choices.
+SupCon and CE stages run either once or as Optuna hyperparameter studies. The Ultralytics
+trainers use the Optuna workflows provided by Ultralytics.
 
 ## Contents
 
