@@ -55,7 +55,7 @@ base-only `uv sync` does not select the `experiments` extra.
 | Extra | Purpose |
 | --- | --- |
 | `experiments` | DVC, MLflow, and Optuna. |
-| `dev` | pytest, Hypothesis, coverage, and test helpers. |
+| `dev` | pytest, Hypothesis, coverage, ruff, and test helpers. |
 | `jupyter` | IPython kernel support for notebooks. |
 | `ollama` | Ollama client extra; the client is also a runtime dependency. The Ollama server is separate. |
 | `vllm` | Pinned local vLLM inference backend; needs a compatible GPU/software stack. |
@@ -127,12 +127,13 @@ Import reusable APIs from `smartrodent` modules, not executable scripts.
 | [`two_stage_training.py`](src/smartrodent/two_stage_training.py) | `TwoStageConfiguration`, `TwoStagePlan`, `TwoStageExperiment`: a SupCon run or study, encoder selection, then a classifier run or study. |
 | [`experiment_support.py`](src/smartrodent/experiment_support.py), [`experiment_results.py`](src/smartrodent/experiment_results.py) | MLflow settings and model publication, and structured results (`ExperimentResult`, `Objective`). |
 | [`onnx_export.py`](src/smartrodent/onnx_export.py) | `OnnxExporter`: one Torch ONNX path for CE classifiers (probabilities) and SupCon encoders (features). |
+| [`onnx_bundle.py`](src/smartrodent/onnx_bundle.py) | `OnnxBundleExporter`, `OnnxBundleError`, `order_classes`: write the registered MLflow classifier as a `sentinel-rat-ml-pipeline` bundle (schema 1) with a per-class taxonomy. |
 | [`classifier_champions.py`](src/smartrodent/classifier_champions.py) | `ClassifierChampionRegistry`: provenance-aware historical comparison and promotion. |
 | [`model_card.py`](src/smartrodent/model_card.py) | Template loading, training-card population, YAML/Markdown rendering and writing. |
 | [`eval.py`](src/smartrodent/eval.py) | `EvaluationImages`, `FeatureExtractor(encoder, projector)`, `EvaluationFeatures`, `TsneComparison`: fixed-subset representation evaluation; the encoder is called directly. |
 | [`base.py`](src/smartrodent/base.py) | Shared protocols `Configurable`, `Filterable`, `DatasetLoader`; an implementation missing a method fails when it is created. |
 | [`http_session.py`](src/smartrodent/http_session.py) | `retrying_session`: a `requests` session that retries 429/5xx responses and dropped connections, used by both downloaders. |
-| [`logging_setup.py`](src/smartrodent/logging_setup.py) | `log_to_console_and_file`: the download scripts' console and log-file output; library classes add no handlers. |
+| [`logging_setup.py`](src/smartrodent/logging_setup.py) | Console and log-file output of the entry points: `log_to_console_and_file` (download scripts), `log_training_run` (the three modern training scripts; writes `training.log` into the run's output directory), and `LoggingConfiguration`/`ConsoleNoiseFilter` for the `logging.suppress` regexes that hide console messages but keep them in the file. Library classes add no handlers. |
 | [`__init__.py`](src/smartrodent/__init__.py) | Convenience exports for filters and Ultralytics trainers. Experiment APIs are imported from their modules. |
 
 Some data-processing scripts also contain workflow-specific pandas/file
@@ -150,8 +151,9 @@ Arrows point from the importing module to the imported module.
 
 #### Scripts and their library entry points
 
-Each script is a thin entry point that delegates to one or two library
-modules. `reconcile_filtered_data.py`, `materialize_filtered_data.py`, and
+Each script is a thin entry point that delegates to a few library modules.
+`train_supcon.py` and `train_classifier.py` additionally import `stages` and
+`stage_configurations`, which are left out of the graph. `reconcile_filtered_data.py`, `materialize_filtered_data.py`, and
 `downsample_dataset.py` only use pandas and file operations and import nothing
 from `smartrodent`.
 
@@ -169,6 +171,7 @@ flowchart LR
         s_supcon[train_supcon.py]
         s_clf[train_classifier.py]
         s_two[train_two_stage.py]
+        s_bundle[export_onnx_bundle.py]
     end
 
     subgraph lib["src/smartrodent/"]
@@ -182,6 +185,7 @@ flowchart LR
         classifier_training
         training_studies
         two_stage_training
+        onnx_bundle
         logging_setup
     end
 
@@ -197,9 +201,13 @@ flowchart LR
     s_yolotune -->|via package root| yolo_training
     s_supcon --> supcon_training
     s_supcon --> training_studies
+    s_supcon --> logging_setup
     s_clf --> classifier_training
     s_clf --> training_studies
+    s_clf --> logging_setup
     s_two --> two_stage_training
+    s_two --> logging_setup
+    s_bundle --> onnx_bundle
 ```
 
 #### Data acquisition and preparation modules
@@ -254,7 +262,10 @@ flowchart TB
 Almost every training module imports `training_validation` (settings types
 and parsing), and the orchestration and stage modules also import
 `config_loading` and `components`. To keep the graph readable, those foundation edges are left
-out here. `hyperparameter_search` additionally imports `components`.
+out here. `hyperparameter_search` additionally imports `components`, and
+`stage_configurations` and `two_stage_training` import `logging_setup` for
+their `logging` section. `onnx_bundle` (which only imports `transforms`) is
+not part of this graph.
 
 ```mermaid
 flowchart TB
@@ -292,7 +303,7 @@ flowchart TB
     end
 
     subgraph standalone["Standalone"]
-        training["training (Ultralytics trainer)"]
+        yolo_training["yolo_training (Ultralytics trainer)"]
         eval["eval (representation evaluation)"]
     end
 
@@ -723,8 +734,8 @@ python scripts/<script>.py [-h] CONFIGURATION
 ```
 
 The positional argument is named `config` in most help messages and
-`configuration` in `train_classifier.py` and `train_two_stage.py`; its usage is
-the same. There is no `--config` flag, installed `smartrodent` command, or general
+`configuration` in `train_classifier.py`, `train_two_stage.py` and
+`export_onnx_bundle.py`; its usage is the same. There is no `--config` flag, installed `smartrodent` command, or general
 command-line parameter-override interface. Set experiment parameters in YAML.
 
 For help without starting a workflow:
@@ -796,6 +807,12 @@ The two Ultralytics scripts are separate from the modern SupCon/CE experiment
 implementation. Each copies its config into the training or tuning project
 directory before it runs; the device comes from `device` in the config.
 
+### Exporting a registered classifier
+
+| Command | Workflow and reported output |
+| --- | --- |
+| `python scripts/export_onnx_bundle.py configs/export_onnx_bundle_srilanka.yaml` (or `export_onnx_bundle_inaturalist.yaml`) | Reads the registered CE classifier from MLflow (no training) and writes a new bundle directory for `sentinel-rat-ml-pipeline`; prints `Bundle written: <output_directory>`. Details under [Sharing ONNX exports](#sharing-onnx-exports). |
+
 ## Configuration guide
 
 The three modern training examples contain inline comments listing node
@@ -820,11 +837,12 @@ which use `task`, `train_kwargs`, `tune_kwargs`, and `export_kwargs`.
 | Review materialization/reconciliation | Input/output paths, rejection-column prefix or corrected partition/column lists, accepted image suffixes. |
 | Splitting/sampling/downsampling | Input/output metadata roots, record discovery, split/sampling rules, seeds, or per-class caps. |
 | YOLO dataset creators | `detector: {name, parameters}` (`SpeciesNetDetector` or `module:Class`), `layout` (`detector` or `classifier`), `class_names`, `batch_size`, and a `datasets` list of `path_to_image_data`/`dataset_output_path` pairs. |
-| Modern standalone training | Top-level data/output, transforms, validation, tracking, `encoder`, and the `optimizer`, `scheduler`, `early_stopping` and `trainer` sections shared by both stages; CE adds `head`, `freeze`, `reinitialization` and `native_checkpoint`. |
-| Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, optional shared `mlflow`, and optional per-stage `tuning`. |
+| Modern standalone training | Top-level data/output, transforms, validation, tracking, `encoder`, and the `optimizer`, `scheduler`, `early_stopping` and `trainer` sections shared by both stages, plus an optional `logging: {suppress: [regex, ...]}` for console output; CE adds `head`, `freeze`, `reinitialization` and `native_checkpoint`. |
+| Two-stage training | Root `output_directory`, shared `data`, `supcon`, `classifier`, optional shared `mlflow`, optional per-stage `tuning`, and an optional root-level `logging` section (stage sections must not contain their own). |
 | Optuna studies | A standalone SupCon or CE configuration with `!suggest-*` tags plus a top-level `tuning` section; see [Hyperparameter studies with Optuna](#hyperparameter-studies-with-optuna). |
 | Ultralytics trainer | `task` (`detect`/`classify`), `model`, `dataset`, native `train_kwargs`/`export_kwargs`, optional `tune_kwargs` (`iterations`, `space`, real overrides), and optional wrapper-specific `mlflow` settings. |
 | Model cards | [`model_card_template.yaml`](configs/model_card_template.yaml): model, classes, validation, provenance, and editable narrative. |
+| ONNX bundle export | [`export_onnx_bundle_inaturalist.yaml`](configs/export_onnx_bundle_inaturalist.yaml), [`export_onnx_bundle_srilanka.yaml`](configs/export_onnx_bundle_srilanka.yaml): `tracking_uri`, `registered_model_name`, `alias` (default `champion`; ignored when `version` is set), optional `version`, `output_directory`, and `taxonomy` (label to `Taxon` fields). Read with plain `yaml.safe_load` and passed to `OnnxBundleExporter` as keyword arguments. |
 
 ### Search tags and coupled values
 
@@ -868,7 +886,7 @@ classifier choices do not multiply SupCon training runs. See
 | `optimizer` | `{name, parameters}` of a `torch.optim` optimizer, e.g. `AdamW` with `lr`. |
 | `scheduler` | A list of phases `{name, parameters, epochs?, interval?}`. `[]` keeps the learning rate constant; several phases run in sequence (all but the last set `epochs`); `ReduceLROnPlateau` must be alone and follows the stage's objective; `interval: step` is allowed for a single phase. |
 | `early_stopping` | `null`, or native Lightning `EarlyStopping` options such as `patience` and `min_delta`; the monitored metric and direction come from the stage's objective. |
-| `trainer` | Native `lightning.Trainer` arguments (`accelerator`, `devices`, `precision`, ...). `max_epochs` is required; `callbacks`, `logger` and `default_root_dir` belong to the runner and are rejected. |
+| `trainer` | Native `lightning.Trainer` arguments (`accelerator`, `devices`, `precision`, ...; the sample configs set `num_sanity_val_steps: 0` to skip scoring before the first epoch). `max_epochs` is required; `callbacks`, `logger` and `default_root_dir` belong to the runner and are rejected. |
 | `freeze` | `{prefixes: [...], batchnorm: eval \| adapt}`: encoder parameter-name prefixes to freeze, on dotted boundaries (`network.model.1` does not match `network.model.10`); an unmatched prefix fails before training. `eval` keeps frozen BatchNorm statistics fixed, `adapt` updates them. For `YoloEncoder`, layer `N` is `network.model.N` and `network` is the whole encoder. |
 | CE `head` | `linear` (default) puts a new final layer on the encoder's features. `full` also renews everything after the pooling through the encoder's optional `reinitialize_post_pooling()`; for YOLO that is the `Classify` convolution. An encoder without the method rejects `full` before training. The head is always newly initialized. |
 | CE `reinitialization` | Optional `{prefixes, source: random}`: the matched encoder modules redraw themselves; every other parameter stays intact. |
@@ -880,12 +898,17 @@ classifier choices do not multiply SupCon training runs. See
 | `mlflow` | `null`/omitted, or tracking/registry settings described below. |
 | `model_card_template` | Optional template path; defaults to `configs/model_card_template.yaml`. |
 | `onnx_export` | `null`/omitted for no export, or a mapping with optional `dynamic` (default `false`: batch 1 at `image_size`; `true`: any batch and image size) and `simplify` (default `true`: onnxslim). `{}` exports with these defaults. The opset is not configurable; see [Sharing ONNX exports](#sharing-onnx-exports). |
+| `logging` | Optional `{suppress: [regex, ...]}`. A console message in which any pattern is found (`re.search`) is hidden on the console but kept in `training.log`. Invalid patterns fail when the configuration loads. In the two-stage pipeline the section is root-level only. |
 
 SupCon logs `supcon_loss_min`, `supcon_loss_mean`, `supcon_loss_std` and
 `supcon_loss_max`; the mean selects the best checkpoint and drives early stopping
 (without validation, the training mean does). CE logs `ce_loss_mean`, the
 unweighted full-split mean cross-entropy, and the configured sklearn aliases;
-these names are reserved. Ties go to the earliest epoch. A nonfinite loss raises
+these names are reserved. With validation, the epoch's training statistics are
+logged in the same hook as `train_supcon_loss_*` (min, mean, std, max) and
+`train_ce_loss_mean`, so `metrics.csv` gets one complete row per epoch. An epoch
+in which validation does not run (for example through Lightning's
+`check_val_every_n_epoch`) logs no training mean. Ties go to the earliest epoch. A nonfinite loss raises
 `FloatingPointError` before anything is published.
 
 Use `min` for losses and `max` for scores where larger is better. Without CE
@@ -1238,6 +1261,14 @@ Each trial trains in its own `trial_NNNN` directory under `output_directory`.
 After each epoch the trainer reports its tracked validation value to the
 pruner, so a configured pruner can stop unpromising trials early.
 
+The study logs `trial N/M started` and `finished` (tracked metric and value) or
+`failed` (error) lines with the decoded parameter values, where N counts the
+trials of this invocation and M is `n_trials`; categoricals show the choice, not
+Optuna's index. Optuna's own logging is lowered to WARNING for that reason. The
+two-stage pipeline additionally logs `Stage 1/2: SupCon`, the selected SupCon
+checkpoint (metric, value, epoch, and the first 12 characters of its SHA-256),
+and `Stage 2/2: classifier`. All of this goes to the console and `training.log`.
+
 | Trial outcome | Effect |
 | --- | --- |
 | Completed | Ranked by the configured tracked metric and direction. |
@@ -1257,6 +1288,7 @@ own storage holds the choice index.
 ```text
 <output_directory>/
   study.yaml
+  training.log       # Written by the training script (standalone studies)
   trial_0000/        # Same artifacts as one standalone SupCon or CE run
   trial_0001/
   ...
@@ -1343,12 +1375,15 @@ are never registered.
 
 ### Modern experiment artifacts
 
-Both stages write the same files into their output directory:
+Both stages write the same files into their output directory. The training
+scripts add one more file, `training.log`, which belongs to the script's
+`output_directory` rather than to each stage:
 
 | Artifact | File |
 | --- | --- |
 | Concrete owned configuration | `config.yaml` |
 | Epoch metrics and hyperparameters | `metrics.csv`, `hparams.yaml` |
+| Console and log-file output of the script (`train_supcon.py`, `train_classifier.py`, `train_two_stage.py`) | `training.log`: INFO messages incl. Lightning's and Python warnings, with `logging.suppress` messages kept here but hidden on the console. Standalone run: the output directory; study: the study root next to `study.yaml`; two-stage run: the root `output_directory`, not the stage directories. Messages are appended on a rerun. |
 | Latest weights | `last.ckpt` |
 | Selected best weights | `best.ckpt` |
 | Selected snapshot cards | `best.model_card.yaml` / `.md` |
@@ -1370,6 +1405,7 @@ For a two-stage experiment with a SupCon study and a single classifier run:
 <output_directory>/
   config.yaml
   selection.yaml
+  training.log               # Written by train_two_stage.py
   supcon/
     study.yaml
     trial_0000/              # One directory per SupCon trial
@@ -1477,6 +1513,39 @@ names = ast.literal_eval(metadata["names"])  # CE classifier only.
 print(names[int(output.argmax(axis=1)[0])])
 ```
 
+To hand a registered classifier to `sentinel-rat-ml-pipeline`, `scripts/export_onnx_bundle.py`
+writes a bundle (schema 1) from MLflow instead of from a local checkpoint:
+
+```bash
+python scripts/export_onnx_bundle.py configs/export_onnx_bundle_srilanka.yaml
+```
+
+It resolves the registered model's `champion` alias (the `alias` setting) or an
+explicit `version`, and downloads `best.onnx`, `best.model_card.md` and
+`config.yaml` from the source run's `best_model` artifacts, so the run must have
+been tracked (`mlflow`) with `onnx_export` set. The output directory must be new or empty;
+an unmet precondition raises `OnnxBundleError` before anything is written (a
+`config.yaml` without the `transforms` keys it needs, or a failing MLflow call,
+raises a different exception, again before anything is written). The
+bundle holds:
+
+- `model.onnx`: the classifier's `best.onnx`.
+- `README.md`: the run's Markdown model card.
+- `config.yaml`: the manifest, with `schema_version: 1`, `role: classifier`,
+  `info` (registered model name and version), `model_file`, `opsets`, the single
+  `input` and `output` (name, dtype, shape; the output adds
+  `score_semantics: probabilities`), `classes`, `preprocessing`, and
+  `calibration: {method: none}`.
+  The `preprocessing` list describes the run's validation transform (built from
+  the logged `transforms` settings) as ordered torchvision v2 steps with their
+  constructor arguments.
+
+`classes` is the configured `taxonomy` (label to `Taxon` fields `kingdom`,
+`phylum`, `class_name`, `order`, `family`, `genus`, `species`, `common_name`)
+in the graph's output order. The taxonomy labels must equal the model's
+`names` metadata exactly; missing or extra labels and unknown `Taxon` keys are
+errors.
+
 For library-driven execution, use `SupConExperiment(configuration).run_with_result()`,
 `ClassifierExperiment(configuration).run_with_result()`,
 `StageStudy.from_yaml(SUPCON, path).run()`, `StageStudy.from_yaml(CLASSIFIER, path).run()`, or
@@ -1553,8 +1622,8 @@ output. Align configs and stage `deps`/`outs` for the intended dataset before
 reproduction; DVC does not rewrite paths inside YAML for you.
 
 The three modern training scripts (`train_supcon.py`, `train_classifier.py`,
-`train_two_stage.py`), downsampling, and thermal filtering **do not currently
-have DVC stages**. Execute those directly or explicitly add a suitable stage
+`train_two_stage.py`), the ONNX bundle export, downsampling, and thermal
+filtering **do not currently have DVC stages**. Execute those directly or explicitly add a suitable stage
 when integrating them; do not assume `dvc repro` runs them.
 
 ### Inspect, reproduce, and share
@@ -1646,8 +1715,10 @@ working directory.
   [Studies and MLflow](#studies-and-mlflow).
 
 Runs record stage-specific parameters and epoch metrics, selected best values
-and epochs, source Git/data tags, and best checkpoint/cards (plus `best.onnx` with `onnx_export`). Both stages log their epoch metrics
-(`ce_loss_mean` and the sklearn aliases, or the four `supcon_loss_*` statistics) through Lightning. Local
+and epochs, source Git/data tags, and best checkpoint/cards. The checkpoint, cards, the run's `config.yaml` and, with
+`onnx_export`, `best.onnx` are stored under the run's `best_model` artifact path.
+Both stages log their epoch metrics
+(`ce_loss_mean` and the sklearn aliases, or the four `supcon_loss_*` statistics, plus the `train_*` training statistics when validating) through Lightning. Local
 `config.yaml`, `metrics.csv` and `hparams.yaml` remain useful independently of the tracking UI.
 
 Modern experiments own their MLflow run contexts. An unrelated active run or
@@ -1747,6 +1818,7 @@ weights and use substantial GPU resources; enable them intentionally.
 | Search tag rejected with "add a tuning section" | A configuration without `tuning` (two-stage: without a `tuning` entry for that stage) is a single run. Add the section or replace the tags with values. |
 | Study refuses to start or resume | The `study_name` already exists without `load_if_exists: true`, or its stored search space, objective, direction, or encoder checksums differ. Use a new `study_name` and `output_directory`. |
 | Study ends with no completed trial | Inspect each trial's `state` and `error` in `study.yaml`; pruned and failed trials are never selected. |
+| `OnnxBundleError` from `export_onnx_bundle.py` | The output directory is not empty; the alias or version is not in the registry; the source run has no `best_model/best.onnx`, `best.model_card.md` or `config.yaml` (it was trained without `onnx_export` or tracking, or before `config.yaml` was logged to the run); or the `taxonomy` labels differ from the model's labels. Nothing is written in these cases. |
 | No validated winner or champion | Check validation configuration; training-only results are not validated candidates. |
 | Champion metadata rejected | Compare scorer/options, split identity, labels, direction, and revision; do not erase provenance simply to force promotion. |
 | DVC reports missing outputs or ignores a changed input | Compare the script's configured paths with declared `deps`/`outs` and listed code dependencies; current example configs and graph are not fully aligned. |
