@@ -1,0 +1,48 @@
+# Export the registered classifier as a sentinel-rat-ml-pipeline ONNX bundle (iNaturalist species list, datasets/stage8_yolo_classifier).
+tracking_uri: sqlite:///mlflow.db
+registered_model_name: species-classifier-xl   # adjust to the model you registered
+alias: champion        # ignored when version is set
+# version: 3
+output_directory: bundles/species-classifier-inaturalist
+# One entry per class directory of the training dataset. The exporter requires
+# the labels to match the model's labels exactly. Keys are Taxon fields.
+taxonomy:
+  Apodemus agrarius: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Apodemus, species: agrarius, common_name: striped field mouse}
+  Apodemus flavicollis: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Apodemus, species: flavicollis, common_name: yellow-necked mouse}
+  Apodemus sylvaticus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Apodemus, species: sylvaticus, common_name: wood mouse}
+  Ardea cinerea: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Pelecaniformes, family: Ardeidae, genus: Ardea, species: cinerea, common_name: grey heron}
+  Arvicola amphibius: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Cricetidae, genus: Arvicola, species: amphibius, common_name: European water vole}
+  Bandicota bengalensis: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Bandicota, species: bengalensis, common_name: lesser bandicoot rat}
+  Bandicota indica: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Bandicota, species: indica, common_name: greater bandicoot rat}
+  Bungarus caeruleus: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Elapidae, genus: Bungarus, species: caeruleus, common_name: common krait}
+  Buteo buteo: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Accipitriformes, family: Accipitridae, genus: Buteo, species: buteo, common_name: common buzzard}
+  Canis familiaris: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Carnivora, family: Canidae, genus: Canis, species: familiaris, common_name: domestic dog}
+  Centropus sinensis: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Cuculiformes, family: Cuculidae, genus: Centropus, species: sinensis, common_name: greater coucal}
+  Ciconia ciconia: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Ciconiiformes, family: Ciconiidae, genus: Ciconia, species: ciconia, common_name: white stork}
+  Clethrionomys glareolus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Cricetidae, genus: Clethrionomys, species: glareolus, common_name: bank vole}
+  Coelognathus helena: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Colubridae, genus: Coelognathus, species: helena, common_name: trinket snake}
+  Coronella austriaca: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Colubridae, genus: Coronella, species: austriaca, common_name: smooth snake}
+  Crocidura leucodon: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Eulipotyphla, family: Soricidae, genus: Crocidura, species: leucodon, common_name: bicolored shrew}
+  Daboia russelii: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Viperidae, genus: Daboia, species: russelii, common_name: Russell's viper}
+  Felis catus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Carnivora, family: Felidae, genus: Felis, species: catus, common_name: domestic cat}
+  Meles meles: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Carnivora, family: Mustelidae, genus: Meles, species: meles, common_name: European badger}
+  Microtus agrestis: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Cricetidae, genus: Microtus, species: agrestis, common_name: field vole}
+  Microtus arvalis: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Cricetidae, genus: Microtus, species: arvalis, common_name: common vole}
+  Mus booduga: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Mus, species: booduga, common_name: little Indian field mouse}
+  Mus musculus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Mus, species: musculus, common_name: house mouse}
+  Naja naja: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Elapidae, genus: Naja, species: naja, common_name: Indian cobra}
+  Natrix helvetica: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Colubridae, genus: Natrix, species: helvetica, common_name: barred grass snake}
+  Natrix natrix: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Colubridae, genus: Natrix, species: natrix, common_name: grass snake}
+  Pavo cristatus: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Galliformes, family: Phasianidae, genus: Pavo, species: cristatus, common_name: Indian peafowl}
+  Ptyas mucosa: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Colubridae, genus: Ptyas, species: mucosa, common_name: Oriental rat snake}
+  Rattus norvegicus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Rattus, species: norvegicus, common_name: brown rat}
+  Rattus rattus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Rattus, species: rattus, common_name: black rat}
+  Sorex araneus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Eulipotyphla, family: Soricidae, genus: Sorex, species: araneus, common_name: common shrew}
+  Sorex coronatus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Eulipotyphla, family: Soricidae, genus: Sorex, species: coronatus, common_name: crowned shrew}
+  Sorex minutus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Eulipotyphla, family: Soricidae, genus: Sorex, species: minutus, common_name: Eurasian pygmy shrew}
+  Spilornis cheela: {kingdom: Animalia, phylum: Chordata, class_name: Aves, order: Accipitriformes, family: Accipitridae, genus: Spilornis, species: cheela, common_name: crested serpent eagle}
+  Suncus murinus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Eulipotyphla, family: Soricidae, genus: Suncus, species: murinus, common_name: Asian house shrew}
+  Vandeleuria oleraceus: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Rodentia, family: Muridae, genus: Vandeleuria, species: oleracea, common_name: Asian long-tailed climbing mouse}
+  Varanus bengalensis: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Varanidae, genus: Varanus, species: bengalensis, common_name: Bengal monitor}
+  Vipera berus: {kingdom: Animalia, phylum: Chordata, class_name: Reptilia, order: Squamata, family: Viperidae, genus: Vipera, species: berus, common_name: common European adder}
+  Vulpes vulpes: {kingdom: Animalia, phylum: Chordata, class_name: Mammalia, order: Carnivora, family: Canidae, genus: Vulpes, species: vulpes, common_name: red fox}

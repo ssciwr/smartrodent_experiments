@@ -91,7 +91,7 @@ class MlflowConfiguration:
         onnx_model: Path | None = None,
         native_model: Path | None = None,
     ) -> None:
-        """Publish a best checkpoint, its completed local cards, and its export to the owned run.
+        """Publish a best checkpoint, its completed local cards, run config, and its export to the owned run.
 
         Args:
             checkpoint: Selected best.pt whose YAML/Markdown cards already exist.
@@ -102,6 +102,8 @@ class MlflowConfiguration:
             checkpoint,
             checkpoint.with_suffix(".model_card.yaml"),
             checkpoint.with_suffix(".model_card.md"),
+            # The run's settings (e.g. transforms) let a registered model be exported later.
+            checkpoint.with_name("config.yaml"),
         ]
         paths.extend(path for path in (onnx_model, native_model) if path is not None)
         for path in paths:
